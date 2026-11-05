@@ -20,6 +20,8 @@ WORK_DIR = "/work"
 HOME_DIR = "/home/runner"
 LABEL_RUN = "exradius.run_id"
 LABEL_KIND = "exradius.kind"
+RUNNER_LABEL = "exradius.runner"
+"""Set on the exradius-runner image (and so inherited by project images built FROM it)."""
 
 
 @dataclass
@@ -150,6 +152,34 @@ class ContainerManager:
             return await asyncio.to_thread(_wait)
         except NotFound:
             return ContainerExit(exit_code=-1, logs="container disappeared")
+
+    async def docker_report(self) -> dict:
+        """What the status page needs from this worker's Docker daemon."""
+
+        def _report() -> dict:
+            report = {"docker_ok": False, "docker_detail": None, "runner_image_ok": False, "images": []}
+            try:
+                self.client.ping()
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                report["docker_detail"] = f"{type(exc).__name__}: {exc}"
+                return report
+            report["docker_ok"] = True
+            report["docker_detail"] = "reachable"
+            try:
+                self.client.images.get(self.settings.runner_image)
+                report["runner_image_ok"] = True
+            except NotFound:
+                pass
+            images = []
+            for image in self.client.images.list(filters={"label": f"{RUNNER_LABEL}=true"}):
+                for tag in image.tags:
+                    images.append(
+                        {"tag": tag, "created_at": image.attrs.get("Created"), "size": image.attrs.get("Size")}
+                    )
+            report["images"] = sorted(images, key=lambda i: i["tag"])
+            return report
+
+        return await asyncio.to_thread(_report)
 
     async def list_run_containers(self, run_id: str) -> list[RunContainer]:
         """Every container (running or exited) labelled with this run id."""

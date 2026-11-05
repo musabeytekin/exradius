@@ -23,7 +23,7 @@ class AppState:
     sessions: SessionFactory
     store: ObjectStore
     box: SecretBox
-    control: Any  # ControlPublisher
+    broker: Any  # BrokerPublisher
 
 
 def app_state(request: Request) -> AppState:

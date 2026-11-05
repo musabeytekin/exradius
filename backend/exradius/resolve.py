@@ -66,22 +66,40 @@ async def load_secrets(
     return values
 
 
-def connection_spec(
-    connection: Connection, override: dict[str, Any] | None, secrets: SecretValues
-) -> dict[str, Any]:
-    """The runner-facing description of one MCP server, with secrets substituted."""
+def merged_connection(connection: Connection, override: dict[str, Any] | None) -> dict[str, Any]:
+    """A connection with a project override applied; secret references left as written."""
     override = override or {}
-    env = {**(connection.env or {}), **(override.get("env") or {})}
-    headers = {**(connection.headers or {}), **(override.get("headers") or {})}
     return {
         "name": connection.slug,
         "transport": connection.transport,
         "command": override.get("command", connection.command),
         "args": list(override.get("args", connection.args or [])),
         "url": override.get("url", connection.url),
-        "env": {k: str(substitute(v, secrets)) for k, v in env.items()},
-        "headers": {k: str(substitute(v, secrets)) for k, v in headers.items()},
+        "env": {k: str(v) for k, v in {**(connection.env or {}), **(override.get("env") or {})}.items()},
+        "headers": {
+            k: str(v) for k, v in {**(connection.headers or {}), **(override.get("headers") or {})}.items()
+        },
     }
+
+
+def secret_references(spec: dict[str, Any]) -> list[str]:
+    """Secret names referenced in a connection's env and header values, in order."""
+    names: list[str] = []
+    for value in [*spec["env"].values(), *spec["headers"].values()]:
+        for name in SECRET_REF.findall(value):
+            if name not in names:
+                names.append(name)
+    return names
+
+
+def connection_spec(
+    connection: Connection, override: dict[str, Any] | None, secrets: SecretValues
+) -> dict[str, Any]:
+    """The runner-facing description of one MCP server, with secrets substituted."""
+    spec = merged_connection(connection, override)
+    spec["env"] = {k: str(substitute(v, secrets)) for k, v in spec["env"].items()}
+    spec["headers"] = {k: str(substitute(v, secrets)) for k, v in spec["headers"].items()}
+    return spec
 
 
 def agent_connection_specs(

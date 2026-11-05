@@ -3,9 +3,10 @@ agents and agent-to-project attachments (architecture §8)."""
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import ValidationError
 from sqlalchemy import select
 
@@ -17,13 +18,24 @@ from exradius.models import (
     EnvVar,
     Project,
     ProjectAgent,
+    ProjectVerification,
     Repository,
     Secret,
+    utcnow,
 )
-from exradius.resolve import MissingSecret, SecretValues, connection_spec, load_secrets
+from exradius.resolve import (
+    MissingSecret,
+    SecretValues,
+    connection_spec,
+    load_secrets,
+    merged_connection,
+    secret_references,
+)
+from exradius.worker import prepare
 from exradius.schemas import api as s
 
 router = APIRouter(prefix="/api")
+REPOSITORY_CHECK_TIMEOUT = 30
 NO_CONTENT = status.HTTP_204_NO_CONTENT
 
 
@@ -103,9 +115,37 @@ async def update_repository(
 ):
     repo = await _repo(session, project_id, repo_id)
     await _check_auth_secret(session, project_id, body.auth_secret_id)
+    before = (repo.url, repo.auth_secret_id)
     apply_update(repo, body)
+    if (repo.url, repo.auth_secret_id) != before:
+        repo.last_check = None
     await session.commit()
     return repo
+
+
+@router.post("/projects/{project_id}/repositories/{repo_id}/check", response_model=s.RepositoryCheckOut)
+async def check_repository(project_id: uuid.UUID, repo_id: uuid.UUID, session: DB, state: State, _: Admin):
+    """``git ls-remote`` from the API with the repository's auth secret. The result is
+    stored on the repository (``last_check``) for the setup checklist."""
+    repo = await _repo(session, project_id, repo_id)
+    auth = None
+    if repo.auth_secret_id:
+        secret = await session.get(Secret, repo.auth_secret_id)
+        auth = state.box.decrypt(secret.value_encrypted) if secret else None
+    checked_at = utcnow()
+    try:
+        refs = await asyncio.to_thread(prepare.ls_remote, repo.url, auth, REPOSITORY_CHECK_TIMEOUT)
+        result = s.RepositoryCheckOut(
+            ok=True, branches=refs.branches, default_branch=refs.default_branch, checked_at=checked_at
+        )
+        if repo.branch not in refs.branches:
+            result.ok = False
+            result.error = f"branch {repo.branch!r} does not exist on the remote"
+    except prepare.PreparationError as exc:
+        result = s.RepositoryCheckOut(ok=False, error=str(exc), checked_at=checked_at)
+    repo.last_check = result.model_dump(mode="json")
+    await session.commit()
+    return result
 
 
 @router.delete("/projects/{project_id}/repositories/{repo_id}", status_code=NO_CONTENT)
@@ -267,13 +307,21 @@ async def update_connection(
     connection_id: uuid.UUID, body: s.ConnectionUpdate, session: DB, _: Admin
 ):
     connection = await get_or_404(session, Connection, connection_id)
+    before = _test_relevant(connection)
     apply_update(connection, body)
+    if _test_relevant(connection) != before:
+        connection.last_test = None  # the stored test no longer describes this configuration
     try:
         s.ConnectionIn.model_validate({k: getattr(connection, k) for k in s.ConnectionIn.model_fields})
     except ValidationError as exc:
-        raise HTTPException(422, exc.errors(include_url=False, include_context=False)) from exc
+        raise HTTPException(422, exc.errors(include_url=False, include_context=False, include_input=False)) from exc
     await session.commit()
     return connection
+
+
+def _test_relevant(connection: Connection) -> tuple:
+    return (connection.transport, connection.command, list(connection.args or []), connection.url,
+            dict(connection.env or {}), dict(connection.headers or {}))
 
 
 @router.delete("/connections/{connection_id}", status_code=NO_CONTENT)
@@ -305,8 +353,17 @@ async def test_connection_endpoint(
     try:
         spec = connection_spec(connection, override, secrets)
     except MissingSecret as exc:
-        return s.ConnectionTestOut(ok=False, error=str(exc))
-    return await test_connection(spec)
+        result = s.ConnectionTestOut(ok=False, error=str(exc))
+    else:
+        result = await test_connection(spec)
+    connection.last_test = {
+        "ok": result.ok,
+        "tested_at": utcnow().isoformat(),
+        "tools": [{"name": t["name"], "description": t.get("description", "")} for t in result.tools],
+        "error": result.error,
+    }
+    await session.commit()
+    return result
 
 
 # Agents ----------------------------------------------------------------------------------
@@ -406,3 +463,92 @@ async def detach_agent(project_id: uuid.UUID, agent_id: uuid.UUID, session: DB, 
     await session.delete(await get_or_404(session, ProjectAgent, (project_id, agent_id)))
     await session.commit()
     return Response(status_code=NO_CONTENT)
+
+
+# Project verification ---------------------------------------------------------------------
+
+
+@router.post("/projects/{project_id}/verify", response_model=s.VerificationCreated, status_code=202)
+async def verify_project(project_id: uuid.UUID, session: DB, state: State, _: Admin):
+    """Ask a worker to prepare the project as a run would, in a throwaway directory."""
+    await get_or_404(session, Project, project_id)
+    verification = ProjectVerification(project_id=project_id, state="pending", steps=[])
+    session.add(verification)
+    await session.commit()
+    try:
+        await state.broker.verify(str(verification.id))
+    except Exception as exc:
+        verification.state, verification.error, verification.ended_at = "failed", f"broker: {exc}", utcnow()
+        await session.commit()
+        raise HTTPException(503, f"could not reach the broker: {exc}") from exc
+    return s.VerificationCreated(verification_id=verification.id)
+
+
+@router.get("/projects/{project_id}/verifications", response_model=list[s.VerificationOut])
+async def list_verifications(
+    project_id: uuid.UUID, session: DB, _: Admin, limit: int = Query(5, ge=1, le=50)
+):
+    stmt = (
+        select(ProjectVerification)
+        .where(ProjectVerification.project_id == project_id)
+        .order_by(ProjectVerification.created_at.desc())
+        .limit(limit)
+    )
+    return (await session.scalars(stmt)).all()
+
+
+@router.get("/projects/{project_id}/verifications/{verification_id}", response_model=s.VerificationOut)
+async def get_verification(project_id: uuid.UUID, verification_id: uuid.UUID, session: DB, _: Admin):
+    verification = await get_or_404(session, ProjectVerification, verification_id)
+    if verification.project_id != project_id:
+        raise HTTPException(404, "ProjectVerification not found")
+    return verification
+
+
+# Resolved configuration of an attachment ----------------------------------------------------
+
+
+@router.get("/projects/{project_id}/agents/{agent_id}/resolved", response_model=s.ResolvedAgentOut)
+async def resolved_attachment(project_id: uuid.UUID, agent_id: uuid.UUID, session: DB, _: Admin):
+    """The agent's connections as this project will run them: overrides applied, secret
+    references shown as written (never their values), unresolved references listed."""
+    link = await get_or_404(session, ProjectAgent, (project_id, agent_id))
+    agent = await get_or_404(session, Agent, agent_id)
+    rows = (
+        await session.execute(
+            select(Secret.key, Secret.project_id).where(
+                (Secret.project_id == project_id) | (Secret.project_id.is_(None))
+            )
+        )
+    ).all()
+    project_keys = {key for key, pid in rows if pid is not None}
+    global_keys = {key for key, pid in rows if pid is None}
+    secret_overrides = dict(link.secret_overrides or {})
+    overrides = dict(link.connection_overrides or {})
+
+    connections = []
+    for connection in agent.connections:
+        spec = merged_connection(connection, overrides.get(connection.slug))
+        references = []
+        for name in secret_references(spec):
+            target = secret_overrides.get(name, name)
+            scope = "project" if target in project_keys else ("global" if target in global_keys else None)
+            references.append(s.SecretReference(name=name, resolves_to=target, scope=scope))
+        connections.append(
+            s.ResolvedConnection(
+                slug=connection.slug,
+                name=connection.name,
+                transport=spec["transport"],
+                command=spec["command"],
+                args=spec["args"],
+                url=spec["url"],
+                env=spec["env"],
+                headers=spec["headers"],
+                overridden=connection.slug in overrides,
+                references=references,
+                unresolved=[r.name for r in references if r.scope is None],
+            )
+        )
+    return s.ResolvedAgentOut(
+        project_id=project_id, agent_id=agent_id, secret_overrides=secret_overrides, connections=connections
+    )

@@ -19,7 +19,9 @@ from exradius.storage import make_store
 from exradius.worker.containers import ContainerManager
 from exradius.worker.intake import accept_answer, accept_task
 from exradius.worker.lifecycle import PendingEvent
+from exradius.worker.heartbeat import Heartbeat
 from exradius.worker.presence import make_presence, new_worker_id
+from exradius.worker.verify import ProjectVerifier
 from exradius.worker.runs import RunManager
 
 log = logging.getLogger("exradius.worker")
@@ -35,13 +37,20 @@ class Worker:
         # Concurrency is the prefetch count: a task message stays unacknowledged (and is
         # not persisted) until a slot is free, so the broker holds the backlog.
         self.slots = asyncio.Semaphore(settings.worker_concurrency)
-        self.runs = RunManager(
-            settings, self.sessions, self.store, ContainerManager(settings), self.emit
-        )
+        self.containers = ContainerManager(settings)
+        self.runs = RunManager(settings, self.sessions, self.store, self.containers, self.emit)
+        self.verifier = ProjectVerifier(self.runs)
         self._background: set[asyncio.Task] = set()
         self.worker_id = new_worker_id()
         self.runs.worker_id = self.worker_id
         self.presence = make_presence(self.engine, self.worker_id)
+        self.heartbeat = Heartbeat(
+            self.sessions,
+            self.containers,
+            worker_id=self.worker_id,
+            concurrency=settings.worker_concurrency,
+            runner_image=settings.runner_image,
+        )
 
     async def emit(self, events: list[PendingEvent]) -> None:
         assert self.publisher is not None
@@ -99,12 +108,20 @@ class Worker:
         async with self.slots:
             await self.runs.reattach(run_id, container_id)
 
+    async def _verify(self, verification_id: uuid.UUID) -> None:
+        async with self.slots:
+            try:
+                await self.verifier.run(verification_id)
+            except Exception:
+                log.exception("verification %s crashed", verification_id)
+
     async def recover(self) -> None:
         """Crash recovery before consuming: re-attach to or fail runs that a dead
         worker left mid-flight, sweep orphaned run directories, and resume waiting runs
         whose answer arrived while no worker could act on it."""
         for run_id, container_id in await self.runs.reconcile(self.presence.is_alive):
             self._spawn(self._reattach(run_id, container_id))
+        await self.verifier.reconcile(self.presence.is_alive)
         removed = await self.runs.sweep_orphans()
         if removed:
             log.info("removed %d orphaned run directories", len(removed))
@@ -115,13 +132,21 @@ class Worker:
         async with message.process(requeue=False):
             try:
                 command = json.loads(message.body)
-                action, run_id = command["action"], uuid.UUID(command["run_id"])
+                action = command["action"]
+                target = uuid.UUID(command["run_id" if action == "cancel" else "verification_id"])
             except (ValueError, KeyError, TypeError):
                 log.warning("dropping invalid control message")
                 return
             if action == "cancel":
-                log.info("cancelling run %s", run_id)
-                self._spawn(self.runs.cancel(run_id))
+                log.info("cancelling run %s", target)
+                self._spawn(self.runs.cancel(target))
+            elif action == "verify":
+                # Claimed before the ack, so a crash leaves a detectable owner.
+                if await self.verifier.claim(target, self.worker_id):
+                    log.info("verifying project (verification %s)", target)
+                    self._spawn(self._verify(target))
+            else:
+                log.warning("dropping control message with unknown action %r", action)
 
     # -- lifecycle ------------------------------------------------------------------------
 
@@ -141,6 +166,7 @@ class Worker:
             control_queue = await other_channel.declare_queue(messaging.CONTROL_QUEUE, durable=True)
 
             await self.presence.start()
+            self.heartbeat.start()
             await self.recover()
 
             await tasks_queue.consume(self.on_task)
@@ -158,6 +184,7 @@ class Worker:
                 loop.add_signal_handler(sig, stop.set)
             await stop.wait()
             log.info("shutting down")
+        await self.heartbeat.stop()
         await self.presence.stop()
         await self.engine.dispose()
 

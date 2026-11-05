@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     s3_bucket: str = "exradius"
     s3_region: str = "us-east-1"
 
+    public_broker_host: str | None = None
+    public_broker_port: int | None = None
+    """Broker host and port as integrations reach them (shown on the integration page);
+    default to those of ``broker_url``."""
+
     public_api_url: str = "http://localhost:8000"
     """Base URL of the API as consumers of outbound events reach it; used to build the
     artifact and transcript download URLs in ``task.result``."""

@@ -11,6 +11,11 @@ class RuntimeName(StrEnum):
     CLAUDE_CODE = "claude_code"
 
 
+RUNTIME_LABELS: dict[RuntimeName, str] = {
+    RuntimeName.CLAUDE_CODE: "Claude Code (Claude Agent SDK)",
+}
+
+
 def get_runtime(name: str) -> Runtime:
     match RuntimeName(name):
         case RuntimeName.CLAUDE_CODE:
@@ -25,6 +30,7 @@ __all__ = [
     "RunOutcome",
     "RunSpec",
     "Runtime",
+    "RUNTIME_LABELS",
     "RuntimeName",
     "get_runtime",
 ]

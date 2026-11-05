@@ -82,6 +82,8 @@ class Repository(Base):
     auth_secret_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("secrets.id", ondelete="SET NULL")
     )
+    last_check: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
+    """Result of the last ``git ls-remote`` check: ok, checked_at, branches, default_branch, error."""
 
     project: Mapped[Project] = relationship(back_populates="repositories")
 
@@ -120,6 +122,8 @@ class Connection(Base):
     url: Mapped[str | None] = mapped_column(Text)
     env: Mapped[dict[str, Any]] = mapped_column(default=dict)
     headers: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    last_test: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
+    """Result of the last "test connection": ok, tested_at, tools, error."""
 
 
 class AgentConnection(Base):
@@ -270,6 +274,40 @@ class Artifact(Base):
     object_key: Mapped[str] = mapped_column(Text)
 
 
+class Worker(Base):
+    """Worker heartbeats, for reporting only (liveness for recovery uses advisory locks)."""
+
+    __tablename__ = "workers"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    hostname: Mapped[str] = mapped_column(String(255))
+    started_at: Mapped[datetime] = mapped_column(Timestamp)
+    last_seen_at: Mapped[datetime] = mapped_column(Timestamp, index=True)
+    concurrency: Mapped[int] = mapped_column(Integer)
+    docker_ok: Mapped[bool] = mapped_column(default=False)
+    docker_detail: Mapped[str | None] = mapped_column(Text)
+    runner_image: Mapped[str] = mapped_column(String(255))
+    runner_image_ok: Mapped[bool] = mapped_column(default=False)
+    images: Mapped[list[Any]] = mapped_column(default=list)
+    version: Mapped[str | None] = mapped_column(String(50))
+
+
+class ProjectVerification(Base):
+    """A dry run of a project's preparation (onboarding §3.2)."""
+
+    __tablename__ = "project_verifications"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    state: Mapped[str] = mapped_column(String(20))  # pending | running | passed | failed
+    created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    ended_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    error: Mapped[str | None] = mapped_column(Text)
+    steps: Mapped[list[Any]] = mapped_column(default=list)
+    worker_id: Mapped[str | None] = mapped_column(String(64))
+
+
 class AdminUser(Base):
     __tablename__ = "admin_user"
 
@@ -291,10 +329,12 @@ __all__ = [
     "InfoRequest",
     "Project",
     "ProjectAgent",
+    "ProjectVerification",
     "Repository",
     "Run",
     "Secret",
     "Task",
     "TranscriptChunk",
+    "Worker",
     "utcnow",
 ]

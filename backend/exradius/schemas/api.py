@@ -8,6 +8,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from exradius.schemas.messages import AttachmentIn
+
 Slug = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]*$", max_length=100)]
 EnvKey = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$", max_length=255)]
 FolderName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$", max_length=255)]
@@ -67,6 +69,14 @@ class RepositoryUpdate(BaseModel):
     auth_secret_id: uuid.UUID | None = None
 
 
+class RepositoryCheckOut(BaseModel):
+    ok: bool
+    branches: list[str] = Field(default_factory=list)
+    default_branch: str | None = None
+    error: str | None = None
+    checked_at: datetime | None = None
+
+
 class RepositoryOut(_Out):
     id: uuid.UUID
     project_id: uuid.UUID
@@ -74,6 +84,7 @@ class RepositoryOut(_Out):
     url: str
     branch: str
     auth_secret_id: uuid.UUID | None
+    last_check: RepositoryCheckOut | None = None
 
 
 class EnvVarIn(BaseModel):
@@ -146,6 +157,18 @@ class ConnectionUpdate(BaseModel):
     headers: dict[str, str] | None = None
 
 
+class ToolInfo(BaseModel):
+    name: str
+    description: str = ""
+
+
+class ConnectionLastTest(BaseModel):
+    ok: bool
+    tested_at: datetime
+    tools: list[ToolInfo] = Field(default_factory=list)
+    error: str | None = None
+
+
 class ConnectionOut(_Out):
     id: uuid.UUID
     slug: str
@@ -156,6 +179,7 @@ class ConnectionOut(_Out):
     url: str | None
     env: dict[str, str]
     headers: dict[str, str]
+    last_test: ConnectionLastTest | None = None
     notice: str = (
         "Connections that reach production systems should use read-only credentials."
     )
@@ -165,6 +189,59 @@ class ConnectionTestOut(BaseModel):
     ok: bool
     tools: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
+
+
+class SecretReference(BaseModel):
+    name: str
+    """As written in ``${secret:NAME}``."""
+    resolves_to: str
+    """The secret name looked up after the attachment's secret overrides."""
+    scope: Literal["project", "global"] | None
+    """Where it was found; ``None`` when it is unresolved."""
+
+
+class ResolvedConnection(BaseModel):
+    slug: str
+    name: str
+    transport: str
+    command: str | None
+    args: list[str]
+    url: str | None
+    env: dict[str, str]
+    headers: dict[str, str]
+    overridden: bool
+    references: list[SecretReference]
+    unresolved: list[str]
+
+
+class ResolvedAgentOut(BaseModel):
+    project_id: uuid.UUID
+    agent_id: uuid.UUID
+    secret_overrides: dict[str, Any]
+    connections: list[ResolvedConnection]
+
+
+class VerificationStep(BaseModel):
+    name: str
+    state: Literal["pending", "running", "passed", "failed", "skipped"]
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    log: str = ""
+
+
+class VerificationOut(_Out):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    state: Literal["pending", "running", "passed", "failed"]
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+    error: str | None
+    steps: list[VerificationStep]
+
+
+class VerificationCreated(BaseModel):
+    verification_id: uuid.UUID
 
 
 class AgentIn(BaseModel):
@@ -263,6 +340,8 @@ class ArtifactOut(_Out):
 
 class EventOut(_Out):
     id: uuid.UUID
+    task_id: str
+    run_id: uuid.UUID | None
     type: str
     payload: dict[str, Any]
     created_at: datetime
@@ -283,3 +362,86 @@ class TaskDetailOut(TaskSummaryOut):
 class TranscriptChunkOut(_Out):
     seq: int
     payload: dict[str, Any]
+
+
+class AnswerSubmission(BaseModel):
+    request_id: str = Field(min_length=1)
+    answer: str
+    attachments: list[AttachmentIn] = Field(default_factory=list)
+
+
+class PublishedOut(BaseModel):
+    queue: str
+    message: dict[str, Any]
+    """Exactly what was published."""
+
+
+# System ----------------------------------------------------------------------------------
+
+
+class CheckOut(BaseModel):
+    ok: bool
+    detail: str | None = None
+
+
+class WorkerOut(_Out):
+    id: str
+    hostname: str
+    started_at: datetime
+    last_seen_at: datetime
+    concurrency: int
+    docker_ok: bool
+    docker_detail: str | None
+    runner_image: str
+    runner_image_ok: bool
+    version: str | None
+
+
+class AnthropicKeyOut(BaseModel):
+    configured: bool
+    source: Literal["secret", "env"] | None
+
+
+class ObjectStoreOut(BaseModel):
+    kind: Literal["filesystem", "s3"]
+    ok: bool
+    detail: str | None = None
+
+
+class SystemStatusOut(BaseModel):
+    database: CheckOut
+    broker: CheckOut
+    workers: list[WorkerOut]
+    anthropic_key: AnthropicKeyOut
+    object_store: ObjectStoreOut
+    public_api_url: str
+    version: str
+
+
+class ImageOut(BaseModel):
+    tag: str
+    created_at: str | None = None
+    size: int | None = None
+
+
+class RuntimeOut(BaseModel):
+    name: str
+    label: str
+
+
+class BrokerInfoOut(BaseModel):
+    host: str
+    port: int
+    vhost: str
+    username: str | None
+    password_set: bool
+
+
+class IntegrationOut(BaseModel):
+    broker: BrokerInfoOut
+    tasks_queue: str
+    answers_queue: str
+    events_exchange: str
+    events_exchange_type: str = "topic"
+    routing_keys: list[str]
+    public_api_url: str

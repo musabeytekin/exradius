@@ -45,6 +45,11 @@ services:
     <<: *backend
     working_dir: /opt/exradius
     entrypoint: ["/bin/sh", "-c", "alembic upgrade head && exec exradius-api"]
+    environment:
+      <<: *backend-env
+      # Broker address as integrations reach it, for the integration page.
+      EXRADIUS_PUBLIC_BROKER_HOST: ${EXRADIUS_PUBLIC_BROKER_HOST:-localhost}
+      EXRADIUS_PUBLIC_BROKER_PORT: ${EXRADIUS_PUBLIC_BROKER_PORT:-${EXRADIUS_AMQP_PORT:-5672}}
     ports:
       - "${EXRADIUS_API_PORT:-8000}:8000"
     volumes:

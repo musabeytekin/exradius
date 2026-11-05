@@ -260,6 +260,10 @@ events            id, task_id, run_id, type, payload (json), published_at
 transcript_chunks id, run_id, seq, payload (json)
 artifacts         id, run_id, name, content_type, object_key
 admin_user        id, username, password_hash
+workers           id, hostname, started_at, last_seen_at, concurrency, docker_ok, docker_detail,
+                  runner_image, runner_image_ok, images (json), version
+project_verifications  id, project_id, state, created_at, started_at, ended_at, error,
+                  steps (json), worker_id
 ```
 
 Secrets are encrypted with a key from the Exradius environment. They are decrypted only at container start and never returned by the admin API.
@@ -367,6 +371,8 @@ Details the design left open, and the simplest choice made for each in version o
   - `late_answers`: answers after the first, which are stored but not delivered.
 - `attachments.source_url`: for URL attachments.
 - `connections.headers`: for http transport.
+- `connections.last_test` and `repositories.last_check`: the latest "test connection" and repository check (see the onboarding additions below).
+- `workers` and `project_verifications`: see the onboarding additions below. These tables were added for `docs/onboarding.md` §4 and are not part of §6.
 - `events.created_at`.
 - `events.task_id` is not a foreign key, because rejected tasks are not stored in `tasks` (see below).
 - JSON columns use JSONB on Postgres. `setup_commands` and `args` are JSON lists rather than SQL arrays.
@@ -439,3 +445,34 @@ Details the design left open, and the simplest choice made for each in version o
 - Passwords are hashed with scrypt.
 - The session is a signed cookie (`exradius_session`).
 - Secrets are encrypted with Fernet using `EXRADIUS_SECRET_KEY`. The API accepts and replaces their values but never returns them.
+
+**Onboarding additions** (`docs/onboarding.md` §4)
+
+- **Heartbeats.** Every 15 s each worker upserts its row in `workers`: hostname, concurrency, version, whether its Docker daemon answers, whether `EXRADIUS_RUNNER_IMAGE` is present, and the tags of images labelled `exradius.runner=true`. `deploy/runner.Dockerfile` sets that label, and project images built `FROM` the runner image inherit it. A worker deletes its row when it shuts down cleanly. `GET /api/system/status` and `GET /api/system/images` list only workers seen in the last 60 s. The table is only for reporting: crash recovery still uses the advisory-lock presence.
+- **System status.**
+  - The database check is `SELECT 1`.
+  - The broker check is the API's own connection, which is shared with publishing.
+  - The object store check writes and reads back `system/probe`.
+  - The Anthropic key's source is `secret` if a global secret `ANTHROPIC_API_KEY` exists, otherwise `env` if the API's environment has the key. In compose, the api and worker services get the same environment.
+- **Integration info.** Username, vhost and whether a password is set come from `EXRADIUS_BROKER_URL`; the password is never returned. Host and port come from `EXRADIUS_PUBLIC_BROKER_HOST` and `EXRADIUS_PUBLIC_BROKER_PORT`, which compose sets to `localhost` and the AMQP port, because the API's own broker URL names the compose-internal host `rabbitmq`.
+- **Repository check.** `git ls-remote --symref` runs in the API container, with the repository's auth secret sent the same way as for mirrors and a 30-second timeout. Errors are redacted: the secret, its HTTP Basic form and any `user:password@` in URLs. The check fails if the configured branch is not on the remote, but still returns the branches it saw so the form can offer them. The result is stored in `repositories.last_check`, which the setup checklist reads. Changing the URL or the auth secret clears it.
+- **Verification.**
+  - `POST /api/projects/{id}/verify` stores a `pending` row and publishes `{"action": "verify"}` on `exradius.control`. If the broker cannot be reached, it answers 503 and marks the row failed.
+  - The worker that takes the message claims the row (`worker_id`) before acknowledging it. The job then occupies one of the worker's run slots.
+  - The worker records the whole plan up front as `pending` steps: create the directory, then for each repository fetch the mirror and clone, then prepare the attachments folder, run each setup command, and remove the directory. Each step then goes to `running` and then `passed` or `failed`, with ISO timestamps and a log tail of up to 4000 characters. After a failure the remaining steps are `skipped`, but the directory is always removed.
+  - The work happens in `runs/verify-<id>`, with setup containers labelled with that name. The orphan sweep keeps such a directory while its verification is `pending` or `running`.
+  - At startup, verifications claimed by a worker that is no longer alive are failed and their directory and containers removed.
+  - Setup commands see the project's variables and secrets, exactly as in a run.
+- **Resolved attachment.** It shows each connection with the project's override merged in, and env and header values as written. `references` lists every `${secret:NAME}` with the name it resolves to after `secret_overrides` and where it was found (`project`, `global` or `null`), and `unresolved` lists the names that were not found. Only secret names are read; no value is decrypted.
+- **Last test.** `POST /api/connections/{id}/test` stores `{ok, tested_at, tools: [{name, description}], error}` in `connections.last_test`. A change to transport, command, args, url, env or headers clears it; renaming the connection does not.
+- **Sending from the panel.**
+  - `POST /api/tasks` validates the body with the task schema, where `version` may be omitted, and publishes it on `exradius.tasks`.
+  - `POST /api/tasks/{task_id}/answer` builds the answer message and publishes it on `exradius.answers`.
+  - Both answer 202 with the exact message published, or 503 if the broker cannot be reached.
+  - Neither checks that the project, agent, task or request exists. The worker answers exactly as it does for an integration, for example with a `rejected` status event.
+- **Events.** `GET /api/tasks/{task_id}/events` returns the stored events of that task id oldest first, including rejections of duplicates that reused it. `GET /api/events` returns the latest `limit` events (default 100) oldest first. With `since`, it returns the first `limit` events created after that time.
+- **Stream.** `GET /api/tasks/{task_id}/stream` (`text/event-stream`) first replays everything stored for the task, then polls Postgres about once a second.
+  - Events are sent as `event: status | info_request | result`, where `data` is the stored envelope and `id` the event id. Transcript chunks are sent as `event: transcript`, with `data` `{run_id, seq, payload}`.
+  - Each poll re-reads a 5-second window behind its cursor and skips ids already sent, so an event committed out of order is still delivered.
+  - A `: heartbeat` comment is sent after 15 s of silence.
+  - The stream ends after the `result` event, or after a `rejected` status for a task id that was never stored. A task that does not exist yet is waited for, because the panel opens the stream right after sending.

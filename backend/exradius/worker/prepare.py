@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import fcntl
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Iterator
@@ -75,16 +76,50 @@ def _auth_args(auth: str | None) -> list[str]:
     return ["-c", f"http.extraHeader={header}"]
 
 
-def git(*args: str, cwd: Path | None = None, auth: str | None = None) -> str:
+_URL_USERINFO = re.compile(r"(\w+://)[^/@\s]+@")
+
+
+def redact(text: str, auth: str | None = None) -> str:
+    """Remove credentials from git output: the secret, its HTTP Basic form and any
+    ``user:password@`` in URLs."""
+    if auth:
+        credentials = auth if ":" in auth else f"x-access-token:{auth}"
+        for secret in (auth, base64.b64encode(credentials.encode()).decode(), credentials):
+            text = text.replace(secret, "***")
+    return _URL_USERINFO.sub(r"\1***@", text)
+
+
+def git(*args: str, cwd: Path | None = None, auth: str | None = None, timeout: float | None = None) -> str:
     cmd = ["git", *_auth_args(auth), *args]
-    result = subprocess.run(cmd, cwd=cwd, env=_git_env(), capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            cmd, cwd=cwd, env=_git_env(), capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PreparationError(redact(f"git {' '.join(args)} timed out after {timeout:.0f}s", auth)) from exc
     if result.returncode != 0:
-        shown = " ".join(a for a in args)
         detail = (result.stderr or result.stdout).strip()
-        if auth:
-            detail = detail.replace(auth, "***")
-        raise PreparationError(f"git {shown} failed: {detail}")
+        raise PreparationError(redact(f"git {' '.join(args)} failed: {detail}", auth))
     return result.stdout
+
+
+@dataclass(frozen=True)
+class RemoteRefs:
+    branches: list[str]
+    default_branch: str | None
+
+
+def ls_remote(url: str, auth: str | None = None, timeout: float = 30) -> RemoteRefs:
+    """Branches and default branch (HEAD) of a remote, without cloning it."""
+    output = git("ls-remote", "--symref", url, "HEAD", "refs/heads/*", auth=auth, timeout=timeout)
+    branches, default = [], None
+    for line in output.splitlines():
+        if line.startswith("ref: ") and line.endswith("\tHEAD"):
+            target = line.removeprefix("ref: ").split("\t")[0]
+            default = target.removeprefix("refs/heads/")
+        elif "\trefs/heads/" in line:
+            branches.append(line.split("\trefs/heads/", 1)[1])
+    return RemoteRefs(branches=sorted(branches), default_branch=default)
 
 
 @contextmanager

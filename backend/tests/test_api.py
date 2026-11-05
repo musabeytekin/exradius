@@ -14,11 +14,29 @@ from exradius.models import Artifact, InfoRequest, Run, Secret, Task, Transcript
 
 
 class FakeControl:
+    """Stands in for the API's broker publisher."""
+
     def __init__(self):
         self.cancelled: list[str] = []
+        self.verified: list[str] = []
+        self.published: list[tuple[str, dict]] = []
+        self.healthy = True
+
+    async def publish(self, queue: str, body: dict) -> None:
+        if not self.healthy:
+            raise ConnectionError("broker down")
+        self.published.append((queue, body))
 
     async def cancel(self, run_id: str) -> None:
         self.cancelled.append(run_id)
+
+    async def verify(self, verification_id: str) -> None:
+        if not self.healthy:
+            raise ConnectionError("broker down")
+        self.verified.append(verification_id)
+
+    async def check(self) -> tuple[bool, str]:
+        return (True, "connected") if self.healthy else (False, "ConnectionError: broker down")
 
 
 @pytest.fixture
@@ -28,7 +46,7 @@ def control():
 
 @pytest.fixture
 def client(settings, store, control):
-    app = create_app(settings, store=store, control=control)
+    app = create_app(settings, store=store, broker=control)
     with TestClient(app) as c:
         yield c
 

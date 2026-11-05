@@ -25,6 +25,7 @@ from exradius.db import SessionFactory
 from exradius.models import (
     Artifact,
     InfoRequest,
+    ProjectVerification,
     Repository,
     Run,
     Secret,
@@ -42,6 +43,9 @@ from exradius.worker.lifecycle import PendingEvent, run_event, transition
 log = logging.getLogger(__name__)
 
 Emit = Callable[[list[PendingEvent]], Awaitable[None]]
+
+VERIFY_PREFIX = "verify-"
+"""Run directories of project verifications are ``runs/verify-<verification_id>``."""
 
 
 class RunCancelled(Exception):
@@ -120,16 +124,7 @@ class RunManager:
     async def _prepare(self, run: Run) -> None:
         task = run.task
         async with self.sessions() as session:
-            repos = (
-                await session.scalars(select(Repository).where(Repository.project_id == task.project_id))
-            ).all()
-            repo_specs = []
-            for repo in repos:
-                auth = None
-                if repo.auth_secret_id:
-                    secret = await session.get(Secret, repo.auth_secret_id)
-                    auth = self.box.decrypt(secret.value_encrypted) if secret else None
-                repo_specs.append(prepare.RepoSpec(repo.name, repo.url, repo.branch, auth))
+            repo_specs = await self.repo_specs(session, task.project_id)
             env = await self._project_env(session, task.project_id)
 
         paths = await asyncio.to_thread(prepare.create_run_directory, self.settings.data_dir, str(run.id))
@@ -152,6 +147,21 @@ class RunManager:
                 raise prepare.PreparationError(
                     f"setup command {command!r} exited with {result.exit_code}:\n{tail}"
                 )
+
+    async def repo_specs(self, session, project_id: uuid.UUID) -> list[prepare.RepoSpec]:
+        repos = (
+            await session.scalars(
+                select(Repository).where(Repository.project_id == project_id).order_by(Repository.name)
+            )
+        ).all()
+        specs = []
+        for repo in repos:
+            auth = None
+            if repo.auth_secret_id:
+                secret = await session.get(Secret, repo.auth_secret_id)
+                auth = self.box.decrypt(secret.value_encrypted) if secret else None
+            specs.append(prepare.RepoSpec(repo.name, repo.url, repo.branch, auth))
+        return specs
 
     async def _hand_over(self, paths: prepare.RunPaths) -> None:
         uid, gid = self.settings.run_uid_gid
@@ -513,21 +523,30 @@ class RunManager:
         # List first, then ask Postgres: a directory is only created after its run is
         # in preparing, so a run started meanwhile cannot be swept by mistake.
         entries = await asyncio.to_thread(lambda: [p for p in runs_dir.iterdir() if p.is_dir()])
-        ids = []
+        ids, verification_ids = [], []
         for entry in entries:
+            name, target = entry.name, ids
+            if name.startswith(VERIFY_PREFIX):
+                name, target = name.removeprefix(VERIFY_PREFIX), verification_ids
             try:
-                ids.append(uuid.UUID(entry.name))
+                target.append(uuid.UUID(name))
             except ValueError:
                 pass
+        keep: set[str] = set()
         async with self.sessions() as session:
-            alive = set(
-                (
-                    await session.scalars(
-                        select(Run.id).where(Run.id.in_(ids), Run.state.not_in(list(TERMINAL)))
+            if ids:
+                rows = await session.scalars(
+                    select(Run.id).where(Run.id.in_(ids), Run.state.not_in(list(TERMINAL)))
+                )
+                keep |= {str(run_id) for run_id in rows.all()}
+            if verification_ids:
+                rows = await session.scalars(
+                    select(ProjectVerification.id).where(
+                        ProjectVerification.id.in_(verification_ids),
+                        ProjectVerification.state.in_(["pending", "running"]),
                     )
-                ).all()
-            ) if ids else set()
-        keep = {str(run_id) for run_id in alive}
+                )
+                keep |= {f"{VERIFY_PREFIX}{vid}" for vid in rows.all()}
         removed = []
         for entry in entries:
             if entry.name in keep:

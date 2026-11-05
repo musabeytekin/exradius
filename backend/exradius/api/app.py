@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from starlette.middleware.sessions import SessionMiddleware
 
 from exradius import messaging
-from exradius.api import config_routes, internal, task_routes
+from exradius.api import config_routes, internal, system_routes, task_routes
 from exradius.api.deps import DB, Admin, AppState
 from exradius.config import Settings, get_settings
 from exradius.crypto import SecretBox, hash_password, verify_password
@@ -26,8 +26,9 @@ from exradius.storage import ObjectStore, make_store
 log = logging.getLogger(__name__)
 
 
-class ControlPublisher:
-    """Sends admin actions (cancel) to the workers over the broker."""
+class BrokerPublisher:
+    """The API's one broker connection: publishes tasks and answers exactly as an
+    integration would, and admin actions (cancel, verify) to the workers."""
 
     def __init__(self, broker_url: str):
         self._url = broker_url
@@ -43,11 +44,24 @@ class ControlPublisher:
                 await messaging.declare_topology(self._channel)
             return self._channel
 
+    async def publish(self, queue: str, body: dict[str, Any]) -> None:
+        await messaging.publish_to_queue(await self._ensure(), queue, body)
+
     async def cancel(self, run_id: str) -> None:
-        channel = await self._ensure()
-        await messaging.publish_to_queue(
-            channel, messaging.CONTROL_QUEUE, {"version": 1, "action": "cancel", "run_id": run_id}
+        await self.publish(messaging.CONTROL_QUEUE, {"version": 1, "action": "cancel", "run_id": run_id})
+
+    async def verify(self, verification_id: str) -> None:
+        await self.publish(
+            messaging.CONTROL_QUEUE, {"version": 1, "action": "verify", "verification_id": verification_id}
         )
+
+    async def check(self) -> tuple[bool, str]:
+        try:
+            async with asyncio.timeout(5):
+                await self._ensure()
+        except Exception as exc:  # noqa: BLE001 - reported on the status page
+            return False, f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        return True, "connected"
 
     async def close(self) -> None:
         if self._connection is not None:
@@ -99,7 +113,7 @@ async def me(admin: Admin):
 def create_app(
     settings: Settings | None = None,
     store: ObjectStore | None = None,
-    control: Any = None,
+    broker: Any = None,
 ) -> FastAPI:
     settings = settings or get_settings()
 
@@ -109,13 +123,13 @@ def create_app(
         sessions = make_session_factory(engine)
         object_store = store or make_store(settings)
         await object_store.ensure_bucket()
-        publisher = control or ControlPublisher(settings.broker_url)
+        publisher = broker or BrokerPublisher(settings.broker_url)
         app.state.exradius = AppState(
             settings=settings,
             sessions=sessions,
             store=object_store,
             box=SecretBox(settings.secret_key),
-            control=publisher,
+            broker=publisher,
         )
         await ensure_admin(sessions, settings)
         try:
@@ -145,5 +159,6 @@ def create_app(
     app.include_router(auth)
     app.include_router(config_routes.router)
     app.include_router(task_routes.router)
+    app.include_router(system_routes.router)
     app.include_router(internal.router)
     return app

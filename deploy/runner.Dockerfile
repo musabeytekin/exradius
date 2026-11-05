@@ -9,6 +9,10 @@ FROM node:22-bookworm-slim AS node
 
 FROM python:3.14-slim-bookworm
 
+# Marks runner images for the admin panel's image pick list (GET /api/system/images).
+# Labels are inherited, so project images built FROM this one carry it too.
+LABEL exradius.runner="true"
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates curl openssh-client \
  && rm -rf /var/lib/apt/lists/*
