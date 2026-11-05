@@ -132,9 +132,11 @@ until they land.
 ```
 GET  /api/system/status
      { database: {ok, detail}, broker: {ok, detail},
-       workers: [{id, hostname, started_at, last_seen_at, concurrency, docker_ok, runner_image_ok}],
-       anthropic_key: {configured, source: "secret"|"env"|null},
-       object_store: {kind, ok}, public_api_url, version }
+       workers: [{id, hostname, started_at, last_seen_at, concurrency, docker_ok,
+                  runtimes: [{name, version, ready, image, error}]}],
+       provider: {configured, default: {id, name, kind, auth_method, last_test} | null, count},
+       public_api_url, data_dir, version }
+     (Since providers.md: `anthropic_key` and `object_store` are gone.)
      Workers heartbeat into a `workers` table every 15 s (hostname, concurrency, docker
      and image checks); a worker unseen for 60 s is not listed.
 
@@ -171,10 +173,14 @@ GET  /api/events?since=<iso>&limit=<n>       -> recent events across tasks (live
 
 GET  /api/system/images
      [{tag, created_at, size}]   images on the worker's daemon that carry the label
-     `exradius.runner=true` (set in runner.Dockerfile; child images inherit it), so the
+     (since runtime-bundles.md: every tagged image except Exradius' own backend and
+     bundle images; no label needed), so the
      project image field can be a pick list. Reported through the worker heartbeat.
 
-GET  /api/system/runtimes          -> [{name, label}]   registered runtimes
+GET  /api/system/runtimes          -> [{name, label, providers: [...]}]   registered runtimes
+     with the provider kinds and auth methods each accepts (providers.md §2.1); each auth
+     method has {name, label, credential_label, settings: [{name, label, required}],
+     notice | null}
 
 Connections keep their last test: `ConnectionOut` gains
      last_test: {ok, tested_at, tools: [{name, description}], error} | null
@@ -198,8 +204,22 @@ exact reference):
 - `GET /api/events` without `since` returns the latest `limit` events, oldest first.
   `EventOut` carries `task_id` and `run_id`.
 - Verification steps may also be `skipped`. Resolved connections carry `references` and
-  `overridden` besides `unresolved`. Workers carry `docker_detail`, `runner_image` and
+  `overridden` besides `unresolved`. Workers carry `docker_detail`, `runtimes` (which replaced `runner_image` and
+  `runner_image_ok`) and
   `version`.
+
+Providers (docs/providers.md §5) were added later, on 2026-11-05, with these details:
+
+- `ProviderOut` also has `created_at` and `updated_at`. `agent_count` includes, for the
+  default provider, the agents without a provider of their own.
+- PATCH takes the create fields (slug, name, kind, auth_method, credential, settings), not
+  `is_default`; use `POST /api/providers/{id}/default`. Changing the kind or auth method
+  needs a new credential in the same request.
+- `GET /api/providers/{id}/tests/{tid}` returns
+  `{id, provider_id, state: pending|running|passed|failed, created_at, started_at, ended_at,
+  detail, error}`.
+- `POST /api/auth/password` answers 400 when the current password is wrong and 422 when
+  the new one is shorter than 8 characters.
 
 Connection reference validation is done in the frontend from `GET /api/secrets` and
 `GET /api/projects/{id}/secrets`; no API change.
@@ -234,7 +254,7 @@ fields.
 | Form | Field | Assistance |
 |---|---|---|
 | Project | slug | Derived from the name as it is typed; editable; uniqueness checked live. |
-| Project | image | Pick list from `GET /api/system/images`, default `exradius-runner:latest` preselected. Custom tag allowed. |
+| Project | image | Pick list from `GET /api/system/images`, empty means `exradius-project-default`. Any glibc image with bash and git; Alpine/musl is not supported (say so in the help text). Custom tag allowed. |
 | Project | setup commands | Free text, one per line. Chips offer common commands by ecosystem (`npm ci`, `pnpm install`, `uv sync`, `pip install -r requirements.txt`, `go mod download`, `bundle install`, `composer install`); a chip appends a line. The verify tab shows the result. |
 | Repository | name | Derived from the URL's last path segment without `.git`; editable. |
 | Repository | branch | After the check runs: pick list of the branches it returned, default branch preselected. Before the check: a text field with "run check to list branches". |

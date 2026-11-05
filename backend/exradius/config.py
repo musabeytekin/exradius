@@ -6,8 +6,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from exradius.version import package_version
 
 
 class Settings(BaseSettings):
@@ -44,13 +46,12 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     admin_username: str = "admin"
     admin_password: str | None = None
-    """When set, the admin user is created (or its password reset) at API start."""
+    """Seeds the admin user at API start when none exists. It does not change an existing
+    password; that is done in the panel."""
 
-    # The single, global Anthropic API key handed to every run container.
-    anthropic_api_key: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("EXRADIUS_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
-    )
+    anthropic_api_key: str | None = None
+    """Legacy: read once, at API start, to create the default provider "Anthropic
+    (migrated)" when no provider exists (docs/providers.md §3). Never passed to runs."""
 
     # API server
     api_host: str = "0.0.0.0"
@@ -63,7 +64,12 @@ class Settings(BaseSettings):
     """The same directory as the Docker daemon sees it. Defaults to ``data_dir``."""
     worker_concurrency: int = 4
     """Prefetch count of the task consumer: how many runs one worker executes at once."""
-    runner_image: str = "exradius-runner:latest"
+    runtime_image_claude_code: str = Field(default_factory=lambda: f"exradius-runtime-claude-code:{package_version()}")
+    """Image holding the Claude Code runtime bundle (deploy/runtime-claude-code.Dockerfile)."""
+    project_default_image: str = Field(default_factory=lambda: f"exradius-project-default:{package_version()}")
+    """Image of run containers of projects without an image, and of provider probes."""
+    runtime_mount: str = "/opt/exradius/runtime"
+    """Where run containers see the runtime bundle (read-only)."""
     run_network: str | None = None
     run_api_url: str = "http://api:8000"
     """``EXRADIUS_API_URL`` given to run containers."""
@@ -76,6 +82,10 @@ class Settings(BaseSettings):
     @classmethod
     def _empty_is_unset(cls, value: str | None) -> str | None:
         return value or None
+
+    def runtime_image(self, runtime: str) -> str:
+        """The bundle image of a runtime (``EXRADIUS_RUNTIME_IMAGE_<NAME>``)."""
+        return getattr(self, f"runtime_image_{runtime}")
 
     @property
     def objects_dir(self) -> Path:

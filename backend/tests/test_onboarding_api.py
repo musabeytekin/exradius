@@ -24,8 +24,9 @@ def add_worker(db, worker_id: str, seen_ago: float, images=(), docker_ok=True):
         Worker(
             id=worker_id, hostname=f"host-{worker_id}", started_at=NOW - timedelta(hours=1),
             last_seen_at=datetime.now(UTC) - timedelta(seconds=seen_ago), concurrency=4,
-            docker_ok=docker_ok, docker_detail="reachable", runner_image="exradius-runner:latest",
-            runner_image_ok=True, images=list(images), version="0.1.0",
+            docker_ok=docker_ok, docker_detail="reachable", images=list(images), version="0.1.0",
+            runtimes=[{"name": "claude_code", "version": "0.1.0", "ready": True,
+                       "image": "exradius-runtime-claude-code:0.1.0", "error": None}],
         )
     )
     db.commit()
@@ -42,18 +43,15 @@ def test_system_status(admin, sync_db, control, settings):
     assert status["broker"] == {"ok": True, "detail": "connected"}
     assert [w["id"] for w in status["workers"]] == ["w-live"]  # unseen for 60 s: not listed
     worker = status["workers"][0]
-    assert (worker["hostname"], worker["concurrency"], worker["docker_ok"], worker["runner_image_ok"]) == (
-        "host-w-live", 4, True, True,
-    )
-    assert status["anthropic_key"] == {"configured": False, "source": None}
-    assert status["object_store"] == {"kind": "filesystem", "ok": True, "detail": None}
+    assert (worker["hostname"], worker["concurrency"], worker["docker_ok"]) == ("host-w-live", 4, True)
+    assert worker["runtimes"] == [{"name": "claude_code", "version": "0.1.0", "ready": True,
+                                   "image": "exradius-runtime-claude-code:0.1.0", "error": None}]
+    assert "runner_image_ok" not in worker
+    assert status["provider"] == {"configured": False, "default": None, "count": 0}
+    assert "anthropic_key" not in status and "object_store" not in status
     assert status["public_api_url"] == settings.public_api_url
+    assert status["data_dir"] == str(settings.data_dir)
     assert status["version"]
-
-    settings.anthropic_api_key = "sk-env"
-    assert admin.get("/api/system/status").json()["anthropic_key"] == {"configured": True, "source": "env"}
-    admin.post("/api/secrets", json={"key": "ANTHROPIC_API_KEY", "value": "sk-secret"})
-    assert admin.get("/api/system/status").json()["anthropic_key"] == {"configured": True, "source": "secret"}
 
     control.healthy = False
     broker = admin.get("/api/system/status").json()["broker"]
@@ -66,7 +64,7 @@ def test_system_requires_login(client):
 
 
 def test_system_images_from_live_heartbeats(admin, sync_db):
-    runner = {"tag": "exradius-runner:latest", "created_at": "2026-11-05T10:00:00Z", "size": 1000}
+    runner = {"tag": "python:3.14", "created_at": "2026-11-05T10:00:00Z", "size": 1000}
     node = {"tag": "acme/node-project:1", "created_at": "2026-11-05T11:00:00Z", "size": 2000}
     old = {"tag": "acme/old:1", "created_at": None, "size": 3}
     add_worker(sync_db, "w1", seen_ago=1, images=[runner, node])
@@ -76,9 +74,9 @@ def test_system_images_from_live_heartbeats(admin, sync_db):
 
 
 def test_system_runtimes(admin):
-    assert admin.get("/api/system/runtimes").json() == [
-        {"name": "claude_code", "label": "Claude Code (Claude Agent SDK)"}
-    ]
+    [runtime] = admin.get("/api/system/runtimes").json()
+    assert (runtime["name"], runtime["label"]) == ("claude_code", "Claude Code")
+    assert [p["kind"] for p in runtime["providers"]] == ["anthropic"]  # details in test_providers.py
 
 
 def test_system_integration_never_returns_the_password(admin, settings):

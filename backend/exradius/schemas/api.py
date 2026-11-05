@@ -29,6 +29,11 @@ class AdminOut(_Out):
     username: str
 
 
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+
 # Projects ----------------------------------------------------------------------------
 
 
@@ -250,6 +255,8 @@ class AgentIn(BaseModel):
     prompt: str = ""
     runtime: Literal["claude_code"] = "claude_code"
     connection_ids: list[uuid.UUID] = Field(default_factory=list)
+    provider_id: uuid.UUID | None = None
+    """``None`` uses the default provider."""
 
 
 class AgentUpdate(BaseModel):
@@ -258,6 +265,7 @@ class AgentUpdate(BaseModel):
     prompt: str | None = None
     runtime: Literal["claude_code"] | None = None
     connection_ids: list[uuid.UUID] | None = None
+    provider_id: uuid.UUID | None = None
 
 
 class AgentOut(_Out):
@@ -268,6 +276,76 @@ class AgentOut(_Out):
     runtime: str
     created_at: datetime
     connection_ids: list[uuid.UUID]
+    provider_id: uuid.UUID | None
+
+
+# Providers (docs/providers.md) -----------------------------------------------------------
+
+
+class ProviderIn(BaseModel):
+    slug: Slug
+    name: str = Field(min_length=1)
+    kind: str
+    auth_method: str
+    credential: str = Field(min_length=1)
+    """Write-only: stored encrypted, never returned."""
+    settings: dict[str, str] = Field(default_factory=dict)
+
+
+class ProviderUpdate(BaseModel):
+    slug: Slug | None = None
+    name: str | None = Field(default=None, min_length=1)
+    kind: str | None = None
+    auth_method: str | None = None
+    credential: str | None = Field(default=None, min_length=1)
+    """Replaces the stored credential when given."""
+    settings: dict[str, str] | None = None
+
+
+class ProviderLastTest(BaseModel):
+    ok: bool
+    tested_at: datetime
+    detail: str | None = None
+    error: str | None = None
+
+
+class ProviderOut(_Out):
+    id: uuid.UUID
+    slug: str
+    name: str
+    kind: str
+    auth_method: str
+    settings: dict[str, Any]
+    is_default: bool
+    last_test: ProviderLastTest | None
+    agent_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProviderTestResult(BaseModel):
+    """``POST /api/providers/{id}/test`` for checks the API makes itself (``api_key``)."""
+
+    ok: bool
+    detail: str | None = None
+    error: str | None = None
+
+
+class ProviderTestCreated(BaseModel):
+    """``POST /api/providers/{id}/test`` for checks a worker makes (``oauth_token``)."""
+
+    test_id: uuid.UUID
+
+
+class ProviderTestOut(_Out):
+    id: uuid.UUID
+    provider_id: uuid.UUID
+    state: Literal["pending", "running", "passed", "failed"]
+    created_at: datetime
+    started_at: datetime | None
+    ended_at: datetime | None
+    detail: str | None
+    error: str | None
 
 
 class ProjectAgentIn(BaseModel):
@@ -384,6 +462,14 @@ class CheckOut(BaseModel):
     detail: str | None = None
 
 
+class RuntimeBundleOut(BaseModel):
+    name: str
+    version: str | None
+    ready: bool
+    image: str | None = None
+    error: str | None = None
+
+
 class WorkerOut(_Out):
     id: str
     hostname: str
@@ -392,29 +478,31 @@ class WorkerOut(_Out):
     concurrency: int
     docker_ok: bool
     docker_detail: str | None
-    runner_image: str
-    runner_image_ok: bool
+    runtimes: list[RuntimeBundleOut]
     version: str | None
 
 
-class AnthropicKeyOut(BaseModel):
+class DefaultProviderOut(_Out):
+    id: uuid.UUID
+    name: str
+    kind: str
+    auth_method: str
+    last_test: ProviderLastTest | None
+
+
+class ProviderStatusOut(BaseModel):
     configured: bool
-    source: Literal["secret", "env"] | None
-
-
-class ObjectStoreOut(BaseModel):
-    kind: Literal["filesystem", "s3"]
-    ok: bool
-    detail: str | None = None
+    default: DefaultProviderOut | None
+    count: int
 
 
 class SystemStatusOut(BaseModel):
     database: CheckOut
     broker: CheckOut
     workers: list[WorkerOut]
-    anthropic_key: AnthropicKeyOut
-    object_store: ObjectStoreOut
+    provider: ProviderStatusOut
     public_api_url: str
+    data_dir: str
     version: str
 
 
@@ -424,9 +512,30 @@ class ImageOut(BaseModel):
     size: int | None = None
 
 
+class SettingFieldOut(BaseModel):
+    name: str
+    label: str
+    required: bool
+
+
+class AuthMethodOut(BaseModel):
+    name: str
+    label: str
+    credential_label: str
+    settings: list[SettingFieldOut]
+    notice: str | None = None
+
+
+class ProviderKindOut(BaseModel):
+    kind: str
+    label: str
+    auth_methods: list[AuthMethodOut]
+
+
 class RuntimeOut(BaseModel):
     name: str
     label: str
+    providers: list[ProviderKindOut]
 
 
 class BrokerInfoOut(BaseModel):

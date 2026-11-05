@@ -19,6 +19,7 @@ class FakeControl:
     def __init__(self):
         self.cancelled: list[str] = []
         self.verified: list[str] = []
+        self.provider_tests: list[str] = []
         self.published: list[tuple[str, dict]] = []
         self.healthy = True
 
@@ -34,6 +35,11 @@ class FakeControl:
         if not self.healthy:
             raise ConnectionError("broker down")
         self.verified.append(verification_id)
+
+    async def test_provider(self, test_id: str) -> None:
+        if not self.healthy:
+            raise ConnectionError("broker down")
+        self.provider_tests.append(test_id)
 
     async def check(self) -> tuple[bool, str]:
         return (True, "connected") if self.healthy else (False, "ConnectionError: broker down")

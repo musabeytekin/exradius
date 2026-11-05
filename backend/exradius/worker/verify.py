@@ -68,7 +68,7 @@ class ProjectVerifier:
                 return
             repos = await self.runs.repo_specs(session, project.id)
             env = await self.runs._project_env(session, project.id)
-            slug, image = project.slug, project.image or self.settings.runner_image
+            slug, image = project.slug, project.image or self.settings.project_default_image
             setup_commands = list(project.setup_commands or [])
 
         label = self.directory_name(verification_id)

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Launcher of the Claude Code runtime bundle: runs the exradius runner on the bundle's own
+# Python, isolated from whatever Python the project image has (-I ignores PYTHON* variables,
+# the user site and the working directory). Needs only /bin/sh and glibc; uses no PATH
+# lookups. The only variable it adds, EXRADIUS_RUNTIME_DIR, the runner removes again, so the
+# agent sees the container's environment (docs/runtime-bundles.md §5).
+case "$0" in
+  */*) bin_dir=${0%/*} ;;
+  *) bin_dir=. ;;
+esac
+EXRADIUS_RUNTIME_DIR=${bin_dir%/bin}
+export EXRADIUS_RUNTIME_DIR
+exec "$EXRADIUS_RUNTIME_DIR/python/bin/python3" -I -B -m exradius.runner.main "$@"

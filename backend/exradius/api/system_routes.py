@@ -11,16 +11,14 @@ from fastapi import APIRouter
 
 from exradius import messaging
 from exradius.api.deps import DB, Admin, State
-from exradius.models import Secret, Worker, utcnow
-from exradius.runtimes import RUNTIME_LABELS
+from exradius.models import Worker, utcnow
+from exradius.providers import default_provider, provider_count
+from exradius.runtimes import all_runtimes
 from exradius.schemas import api as s
 from exradius.schemas.messages import ROUTING_KEYS
 from exradius.worker.heartbeat import WORKER_TIMEOUT_SECONDS, package_version
 
 router = APIRouter(prefix="/api/system")
-
-PROBE_KEY = "system/probe"
-
 
 async def live_workers(session) -> list[Worker]:
     cutoff = utcnow() - timedelta(seconds=WORKER_TIMEOUT_SECONDS)
@@ -37,32 +35,26 @@ async def system_status(session: DB, state: State, _: Admin):
         database = s.CheckOut(ok=False, detail=f"{type(exc).__name__}: {exc}")
     broker_ok, broker_detail = await state.broker.check()
 
-    secret = await session.scalar(
-        select(Secret.id).where(Secret.project_id.is_(None), Secret.key == "ANTHROPIC_API_KEY")
-    )
-    source = "secret" if secret else ("env" if state.settings.anthropic_api_key else None)
-
-    try:
-        await state.store.put(PROBE_KEY, b"ok", "text/plain")
-        store_ok = await state.store.get(PROBE_KEY) == b"ok"
-        store_detail = None if store_ok else "read back a different value"
-    except Exception as exc:  # noqa: BLE001 - reported
-        store_ok, store_detail = False, f"{type(exc).__name__}: {exc}"
-
+    default = await default_provider(session)
     return s.SystemStatusOut(
         database=database,
         broker=s.CheckOut(ok=broker_ok, detail=broker_detail),
         workers=[s.WorkerOut.model_validate(w) for w in await live_workers(session)],
-        anthropic_key=s.AnthropicKeyOut(configured=source is not None, source=source),
-        object_store=s.ObjectStoreOut(kind=state.settings.object_store, ok=store_ok, detail=store_detail),
+        provider=s.ProviderStatusOut(
+            configured=default is not None,
+            default=s.DefaultProviderOut.model_validate(default) if default else None,
+            count=await provider_count(session),
+        ),
         public_api_url=state.settings.public_api_url,
+        data_dir=str(state.settings.data_dir),
         version=package_version(),
     )
 
 
 @router.get("/images", response_model=list[s.ImageOut])
 async def system_images(session: DB, _: Admin):
-    """Runner images (label ``exradius.runner=true``) reported by live workers."""
+    """Every tagged image on the live workers' daemons, as project image suggestions
+    (Exradius' own backend and runtime bundle images are left out)."""
     images: dict[str, dict] = {}
     for worker in await live_workers(session):
         for image in worker.images or []:
@@ -70,9 +62,34 @@ async def system_images(session: DB, _: Admin):
     return [s.ImageOut.model_validate(images[tag]) for tag in sorted(images)]
 
 
+def runtime_out(runtime) -> s.RuntimeOut:
+    return s.RuntimeOut(
+        name=runtime.name,
+        label=runtime.label,
+        providers=[
+            s.ProviderKindOut(
+                kind=kind.kind,
+                label=kind.label,
+                auth_methods=[
+                    s.AuthMethodOut(
+                        name=m.name,
+                        label=m.label,
+                        credential_label=m.credential_label,
+                        settings=[s.SettingFieldOut(name=f.name, label=f.label, required=f.required) for f in m.settings],
+                        notice=m.notice,
+                    )
+                    for m in kind.auth_methods
+                ],
+            )
+            for kind in runtime.capabilities.providers
+        ],
+    )
+
+
 @router.get("/runtimes", response_model=list[s.RuntimeOut])
 async def system_runtimes(_: Admin):
-    return [s.RuntimeOut(name=name.value, label=label) for name, label in RUNTIME_LABELS.items()]
+    """Each runtime with the provider kinds and auth methods it accepts (providers.md §2.1)."""
+    return [runtime_out(runtime) for runtime in all_runtimes()]
 
 
 @router.get("/integration", response_model=s.IntegrationOut)

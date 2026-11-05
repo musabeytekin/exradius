@@ -7,20 +7,21 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from starlette.middleware.sessions import SessionMiddleware
 
 from exradius import messaging
-from exradius.api import config_routes, internal, system_routes, task_routes
+from exradius.api import config_routes, internal, provider_routes, system_routes, task_routes
 from exradius.api.deps import DB, Admin, AppState
 from exradius.config import Settings, get_settings
 from exradius.crypto import SecretBox, hash_password, verify_password
 from exradius.db import SessionFactory, make_engine, make_session_factory
 from exradius.models import AdminUser
-from exradius.schemas.api import AdminOut, LoginIn
+from exradius.providers import bootstrap_provider
+from exradius.schemas.api import AdminOut, LoginIn, PasswordChange
 from exradius.storage import ObjectStore, make_store
 
 log = logging.getLogger(__name__)
@@ -55,6 +56,9 @@ class BrokerPublisher:
             messaging.CONTROL_QUEUE, {"version": 1, "action": "verify", "verification_id": verification_id}
         )
 
+    async def test_provider(self, test_id: str) -> None:
+        await self.publish(messaging.CONTROL_QUEUE, {"version": 1, "action": "test_provider", "test_id": test_id})
+
     async def check(self) -> tuple[bool, str]:
         try:
             async with asyncio.timeout(5):
@@ -69,22 +73,23 @@ class BrokerPublisher:
 
 
 async def ensure_admin(sessions: SessionFactory, settings: Settings) -> None:
+    """Seed the admin user from ``EXRADIUS_ADMIN_PASSWORD`` when none exists. After that the
+    password is changed in the panel (``POST /api/auth/password``), never from the
+    environment."""
     if not settings.admin_password:
         return
     async with sessions() as session:
-        admin = await session.scalar(
-            select(AdminUser).where(AdminUser.username == settings.admin_username)
+        if await session.scalar(select(AdminUser.id).limit(1)) is not None:
+            return
+        session.add(
+            AdminUser(username=settings.admin_username, password_hash=hash_password(settings.admin_password))
         )
-        if admin is None:
-            session.add(
-                AdminUser(
-                    username=settings.admin_username,
-                    password_hash=hash_password(settings.admin_password),
-                )
-            )
-        elif not verify_password(settings.admin_password, admin.password_hash):
-            admin.password_hash = hash_password(settings.admin_password)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:  # another API process seeded it first
+            await session.rollback()
+            return
+        log.info("created admin user %r", settings.admin_username)
 
 
 auth = APIRouter(prefix="/api/auth")
@@ -110,6 +115,15 @@ async def me(admin: Admin):
     return admin
 
 
+@auth.post("/password", status_code=204)
+async def change_password(body: PasswordChange, admin: Admin, session: DB):
+    if not verify_password(body.current_password, admin.password_hash):
+        raise HTTPException(400, "the current password is not correct")
+    admin.password_hash = hash_password(body.new_password)
+    await session.commit()
+    return Response(status_code=204)
+
+
 def create_app(
     settings: Settings | None = None,
     store: ObjectStore | None = None,
@@ -132,6 +146,7 @@ def create_app(
             broker=publisher,
         )
         await ensure_admin(sessions, settings)
+        await bootstrap_provider(sessions, settings, app.state.exradius.box)
         try:
             yield
         finally:
@@ -158,6 +173,7 @@ def create_app(
 
     app.include_router(auth)
     app.include_router(config_routes.router)
+    app.include_router(provider_routes.router)
     app.include_router(task_routes.router)
     app.include_router(system_routes.router)
     app.include_router(internal.router)

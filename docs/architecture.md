@@ -192,12 +192,12 @@ Nothing is shared between concurrent runs except the read-only mirrors. Any numb
 
 ### 5.2 Running
 
-The worker starts a container from the project's image (default: the `exradius-runner` base image with Python 3.14, Node, git and the Claude Agent SDK) with:
+The worker starts a container from the project's image with the agent's runtime bundle mounted into it (`docs/runtime-bundles.md`). The project image is any glibc-based Linux image with `bash` and `git` on `PATH` (Claude Code's shell tool uses bash), for example `python:3.14` or `maven:3-eclipse-temurin-21`; musl images such as Alpine are not supported. A project without an image gets `exradius-project-default` (Ubuntu LTS with git, curl, ca-certificates and build-essential), which is a default, not a base. Nothing has to inherit from an Exradius image. The container gets:
 
 - `project/` mounted at `/work`, the working directory;
 - `state/` mounted at the runtime's state location;
-- environment: the project's variables, the project's secrets (decrypted at this moment only), the global Anthropic API key, `EXRADIUS_RUN_TOKEN` and `EXRADIUS_API_URL`;
-- the runner as entrypoint, receiving the run id.
+- environment: the project's variables, the project's secrets (decrypted at this moment only), the variables of the agent's model provider (or the default provider; see `docs/providers.md`), `EXRADIUS_RUN_TOKEN` and `EXRADIUS_API_URL`;
+- the runtime bundle volume mounted read-only at `/opt/exradius/runtime`, with `/opt/exradius/runtime/bin/exradius-runner` as entrypoint, receiving the run id.
 
 The runner fetches the run spec from the internal API (prompt, connections, task instructions, context, attachment list), assembles the Claude Agent SDK options and starts the session. The prompt layout is:
 
@@ -249,7 +249,9 @@ repositories      id, project_id, name (folder), url, branch, auth_secret_id
 env_vars          id, project_id, key, value
 secrets           id, project_id (nullable = global), key, value_encrypted
 connections       id, slug, name, transport (stdio|http), command, args[], url, env (json, may reference secrets by name)
-agents            id, slug, name, prompt, runtime (enum), created_at
+agents            id, slug, name, prompt, runtime (enum), provider_id (nullable = default), created_at
+providers         id, slug, name, kind, auth_method, credential_encrypted, settings (json),
+                  is_default, last_test (json), created_at, updated_at
 agent_connections agent_id, connection_id
 project_agents    project_id, agent_id, connection_overrides (json), secret_overrides (json)
 tasks             id (user task_id), project_id, agent_id, instructions, context (json), correlation (json), state, received_at
@@ -261,19 +263,27 @@ transcript_chunks id, run_id, seq, payload (json)
 artifacts         id, run_id, name, content_type, object_key
 admin_user        id, username, password_hash
 workers           id, hostname, started_at, last_seen_at, concurrency, docker_ok, docker_detail,
-                  runner_image, runner_image_ok, images (json), version
+                  images (json), runtimes (json), version
 project_verifications  id, project_id, state, created_at, started_at, ended_at, error,
                   steps (json), worker_id
+provider_tests    id, provider_id, state, created_at, started_at, ended_at, detail, error,
+                  fingerprint, worker_id
 ```
 
-Secrets are encrypted with a key from the Exradius environment. They are decrypted only at container start and never returned by the admin API.
+Secrets and provider credentials are encrypted with a key from the Exradius environment. They are decrypted only at container start and never returned by the admin API.
 
 ## 7. Runtime interface
 
 ```python
 class Runtime(Protocol):
     name: str
+    label: ClassVar[str]
+    capabilities: ClassVar[RuntimeCapabilities]      # provider kinds and auth methods it accepts
+    credential_variables: ClassVar[frozenset[str]]   # every variable a provider mapping may set
 
+    @classmethod
+    def provider_environment(cls, provider: ProviderCredential) -> dict[str, str]: ...
+    async def probe(self) -> ProbeResult: ...        # "Reply with OK", for provider tests
     async def start(self, spec: RunSpec, events: EventSink) -> RunOutcome: ...
     async def resume(self, spec: RunSpec, session_id: str, message: str,
                      events: EventSink) -> RunOutcome: ...
@@ -312,6 +322,7 @@ Version one scope:
 - Agents get exactly the connections attached to them. Capability is tool availability; there are no per-action permission flags.
 - Connections that reach production systems (logs, databases) should be configured with read-only credentials. The panel displays a reminder on the connection form; it does not enforce it.
 - Containers run with no privileges, a read-only root filesystem except `/work`, `/tmp` and the state mount, and outbound network allowed (agents need git remotes and MCP endpoints).
+- The runtime bundle is mounted read-only and is world-readable and executable, so the unprivileged run user (uid 1000 by default) runs it whatever users the project image defines. The project image cannot change the runtime, and the runtime does not depend on anything in the image except glibc and `/bin/sh`. Setup commands run without the bundle.
 - The internal run API accepts only the per-run token, which is revoked when the run ends.
 
 ## 10. Repository layout and stack
@@ -324,14 +335,18 @@ exradius/
     exradius/
       api/            admin API + internal run API
       worker/         broker consumer, run preparation, container control
-      runner/         container entrypoint, SDK session, exradius MCP server
+      runner/         run container entrypoint (inside the runtime bundle), exradius MCP server
       runtimes/       Runtime protocol, ClaudeCodeRuntime
       models/, schemas/, messaging/
     tests/
   frontend/           React + TypeScript + Vite
   deploy/
-    docker-compose.yml   api, worker, frontend, postgres, rabbitmq
-    runner.Dockerfile    exradius-runner base image
+    docker-compose.yml               api, worker, frontend, postgres, rabbitmq; builds the images below
+    backend.Dockerfile               exradius-backend: api and worker (no Node, no Agent SDK)
+    runtime-claude-code.Dockerfile   exradius-runtime-claude-code: the Claude Code runtime bundle
+    runtime-claude-code/             the bundle's launcher script
+    project-default.Dockerfile       exradius-project-default: image for projects without one
+    Makefile                         make bundle-claude-code: the bundle directory alone
   docs/
 ```
 
@@ -354,7 +369,8 @@ Details the design left open, and the simplest choice made for each in version o
 **Layout and images**
 
 - The package lives at `backend/exradius/` as in §10. Shared modules sit next to the listed folders: `config.py` (`EXRADIUS_*` settings), `crypto.py`, `states.py` (the §5 state machine), `resolve.py` (secrets and connections), `storage.py`, `db.py` and `cli.py`.
-- One image, `exradius-runner`, serves three roles. It is the run container base image, and the api and worker services run from it with a different command. The API needs Node to start stdio MCP servers for "test connection", and the worker needs git.
+- Three images (`docs/runtime-bundles.md`). `exradius-backend` runs the api and worker; it has git and the Docker SDK, but no Node and no Agent SDK (the `runner` dependency group is not installed). `exradius-runtime-claude-code` holds only the Claude Code bundle. `exradius-project-default` is the run container image of projects that name none. Compose builds the last two through build-only services (`scale: 0`). `EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE` and `EXRADIUS_PROJECT_DEFAULT_IMAGE` override their tags.
+- Because the backend image has no Node, "test connection" can only start stdio servers whose command exists in that image: `python` and `uv` are there, `npx` and `uvx` are not. An `npx` server fails its test there, while it can still work in a run whose project image has Node. In the same way, a stdio connection in a run needs its command in the project image.
 - The object store is the filesystem by default (`EXRADIUS_OBJECT_STORE=filesystem`): objects live at `<EXRADIUS_DATA_DIR>/objects/<bucket>/<key>`, written atomically (temporary file, then rename). Keys are validated before use: no empty, `.` or `..` segments, no leading `/`, backslash or NUL, and the resolved path must stay inside the bucket directory, so a key or a symlink cannot escape it. The API server and the worker both mount the data directory. `EXRADIUS_OBJECT_STORE=s3` selects any S3 API through the `EXRADIUS_S3_*` variables instead. Compose ships no object store service, because MinIO no longer publishes community server images.
 - Download URLs in `task.result` are signed with an HMAC-SHA256 of the URL path, keyed by a value derived from `EXRADIUS_SECRET_KEY`. `GET /api/artifacts/{id}/content` and `GET /api/runs/{run_id}/transcript` accept a valid `sig` or the admin session. A signature is bound to its path and does not expire in version one. The transcript endpoint serves the stored JSON lines file once the run has ended, and assembles it from the stored chunks while the run is still going. Behind a reverse proxy that adds a path prefix, include the prefix in `EXRADIUS_PUBLIC_API_URL`; the signature covers only the API path.
 
@@ -436,24 +452,24 @@ Details the design left open, and the simplest choice made for each in version o
 - `project_agents.connection_overrides` maps a connection slug to fields that replace `command`, `args` and `url`, or that merge into `env` and `headers`.
 - The connection slug `exradius` is reserved for the built-in server.
 - Only project-scoped secrets are exported into the container environment. Global secrets are used only by reference.
-- The global Anthropic key is the global secret `ANTHROPIC_API_KEY` if one exists. Otherwise it comes from `EXRADIUS_ANTHROPIC_API_KEY` or `ANTHROPIC_API_KEY` in the worker's environment.
+- The model credential comes only from a provider (`docs/providers.md`). Global secrets have no special names; a global secret called `ANTHROPIC_API_KEY` is used only by reference, like any other.
 - "Test connection" runs in the API container with a 60-second timeout. It can take `project_id` and `agent_id` to apply that project's secrets and overrides.
 
 **Admin**
 
-- The admin user is created at API start from `EXRADIUS_ADMIN_USERNAME` and `EXRADIUS_ADMIN_PASSWORD`. Its password is reset if that value changes.
+- The admin user is created at API start from `EXRADIUS_ADMIN_USERNAME` and `EXRADIUS_ADMIN_PASSWORD`, only when no admin user exists. The variable never changes an existing password. `POST /api/auth/password` (`current_password`, `new_password` of at least 8 characters) changes it and answers 204, or 400 if the current password is wrong.
 - Passwords are hashed with scrypt.
 - The session is a signed cookie (`exradius_session`).
 - Secrets are encrypted with Fernet using `EXRADIUS_SECRET_KEY`. The API accepts and replaces their values but never returns them.
 
 **Onboarding additions** (`docs/onboarding.md` §4)
 
-- **Heartbeats.** Every 15 s each worker upserts its row in `workers`: hostname, concurrency, version, whether its Docker daemon answers, whether `EXRADIUS_RUNNER_IMAGE` is present, and the tags of images labelled `exradius.runner=true`. `deploy/runner.Dockerfile` sets that label, and project images built `FROM` the runner image inherit it. A worker deletes its row when it shuts down cleanly. `GET /api/system/status` and `GET /api/system/images` list only workers seen in the last 60 s. The table is only for reporting: crash recovery still uses the advisory-lock presence.
+- **Heartbeats.** Every 15 s each worker upserts its row in `workers`: hostname, concurrency, version, whether its Docker daemon answers, its runtime bundles (`runtimes: [{name, version, ready, image, error}]`, see Runtime bundles below), and the tags of every image on its daemon except Exradius' own backend and bundle images (label `exradius.role`). A worker deletes its row when it shuts down cleanly. `GET /api/system/status` and `GET /api/system/images` list only workers seen in the last 60 s. The table is only for reporting: crash recovery still uses the advisory-lock presence.
 - **System status.**
   - The database check is `SELECT 1`.
   - The broker check is the API's own connection, which is shared with publishing.
-  - The object store check writes and reads back `system/probe`.
-  - The Anthropic key's source is `secret` if a global secret `ANTHROPIC_API_KEY` exists, otherwise `env` if the API's environment has the key. In compose, the api and worker services get the same environment.
+  - `provider` reports the default provider and the number of providers (see Providers below). The object store and the Anthropic key are no longer reported.
+  - `data_dir` is the API's `EXRADIUS_DATA_DIR`, for the Settings page.
 - **Integration info.** Username, vhost and whether a password is set come from `EXRADIUS_BROKER_URL`; the password is never returned. Host and port come from `EXRADIUS_PUBLIC_BROKER_HOST` and `EXRADIUS_PUBLIC_BROKER_PORT`, which compose sets to `localhost` and the AMQP port, because the API's own broker URL names the compose-internal host `rabbitmq`.
 - **Repository check.** `git ls-remote --symref` runs in the API container, with the repository's auth secret sent the same way as for mirrors and a 30-second timeout. Errors are redacted: the secret, its HTTP Basic form and any `user:password@` in URLs. The check fails if the configured branch is not on the remote, but still returns the branches it saw so the form can offer them. The result is stored in `repositories.last_check`, which the setup checklist reads. Changing the URL or the auth secret clears it.
 - **Verification.**
@@ -476,3 +492,39 @@ Details the design left open, and the simplest choice made for each in version o
   - Each poll re-reads a 5-second window behind its cursor and skips ids already sent, so an event committed out of order is still delivered.
   - A `: heartbeat` comment is sent after 15 s of silence.
   - The stream ends after the `result` event, or after a `rejected` status for a task id that was never stored. A task that does not exist yet is waited for, because the panel opens the stream right after sending.
+
+**Providers** (`docs/providers.md`)
+
+- **Model.** `providers` holds named credential profiles. `credential_encrypted` is Fernet-encrypted like secrets and never returned. A partial unique index on `is_default` allows at most one default. The API makes the first provider the default and moves the flag with `POST /api/providers/{id}/default`, which clears the old default before setting the new one. `agents.provider_id` is nullable (`null` uses the default) with `ON DELETE RESTRICT`.
+- **Rules.** `kind`, `auth_method` and `settings` are validated against the auth methods the runtimes declare: unknown setting names and missing required ones are refused. Changing the kind or auth method needs a new credential, and agents whose runtime cannot use the new pair block the change. `last_test` is cleared when the credential, settings, kind or auth method change, but not on a rename. Delete answers 409 while agents name the provider, or while it is the default and others exist. The last provider can be deleted. `agent_count` counts the agents that name the provider, plus, for the default, the agents without a provider of their own.
+- **Capabilities.** Each runtime class declares `capabilities` (provider kinds, auth methods, their settings fields and notice), and `GET /api/system/runtimes` returns them. `ClaudeCodeRuntime` accepts `anthropic` with `api_key` and `oauth_token`.
+- **Injection.** At every container start (first start and each resume), the worker resolves the agent's provider or the default, decrypts its credential and adds the runtime's mapping: `ANTHROPIC_API_KEY` for `api_key`, `CLAUDE_CODE_OAUTH_TOKEN` for `oauth_token`. Project variables and secrets named like any provider variable of the runtime (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) are dropped with a warning, so the run gets only its provider's credential. Setup command containers get no provider. Intake rejects a task with `no provider configured` when the agent has no provider and there is no default. A run whose provider has disappeared by container start fails with the same message.
+- **Tests.** `POST /api/providers/{id}/test` for `api_key` calls `GET https://api.anthropic.com/v1/models` from the API container (20-second timeout) and answers 200 `{ok, detail, error}`, with up to five model ids in `detail`. For `oauth_token` it stores a `pending` row in `provider_tests`, publishes `{"action": "test_provider", "test_id"}` on `exradius.control` and answers 202 `{test_id}` (503, with the row failed, if the broker is down). The worker claims the row before acknowledging and, in a run slot, starts a container from the default project image with the runtime bundle mounted, only the provider's variables and no run mounts, running `exradius-runner --probe claude_code`. That is a one-turn Claude Code session with no tools, sent "Reply with OK", with a 180-second limit. The probe prints one `EXRADIUS_PROBE {ok, detail, error}` line, which the worker records on the test. `GET /api/providers/{id}/tests/{test_id}` reports it. Both kinds of test store `last_test`, but only if the provider's credential and settings are unchanged since the test began (`fingerprint`). Tests held by a worker that died are failed at startup.
+- **Migration.** At API start, when no provider exists, a global secret `ANTHROPIC_API_KEY` (preferred) or `EXRADIUS_ANTHROPIC_API_KEY` becomes the default provider "Anthropic (migrated)" (`api_key`), and a warning is logged. After that neither is read. The secret itself is left in place as an ordinary global secret. Compose passes an `ANTHROPIC_API_KEY` from an older `deploy/.env` to the api service for this purpose only.
+
+**Runtime bundles** (`docs/runtime-bundles.md`)
+
+- **The bundle.** `deploy/runtime-claude-code.Dockerfile` builds `/opt/exradius/runtime` in a Debian stage and copies it into a `scratch` image labelled `exradius.role=runtime-bundle`, `exradius.runtime=claude_code` and `exradius.version`:
+  - `python/`: a relocatable CPython 3.14.8 from python-build-standalone (installed by uv), which needs glibc 2.17 or later. The `exradius` package goes in without its server dependencies, plus the `runner` dependency group: the Agent SDK, `httpx` and `pydantic`. Compiled wheels are limited to `manylinux_2_28`, so project images need glibc 2.28 or later. The SDK's own copy of the CLI is deleted.
+  - `bin/claude`: native Claude Code 2.1.318, downloaded from `downloads.claude.ai/claude-code-releases` (the installer's source) and checked against the release manifest's SHA-256 for `linux-x64` or `linux-arm64`. That is the version Agent SDK 0.2.178 bundles; the SDK pin and this pin move together.
+  - `bin/exradius-runner`: a `/bin/sh` launcher with no `PATH` lookups. It sets `EXRADIUS_RUNTIME_DIR` to its own bundle directory, then runs `python/bin/python3 -I -B -m exradius.runner.main`. `-I` keeps the project image's Python, `PYTHON*` variables, user site and `/work` out of the runner. The launcher sets no `DISABLE_AUTOUPDATER`, because that would reach the agent (see Isolation). The CLI is started by path from a read-only bundle, so an update could not take effect anyway.
+  - `VERSION`: `exradius <version>`, `runtime claude_code`, `claude-code <version>`.
+  - `ClaudeCodeRuntime` passes `$EXRADIUS_RUNTIME_DIR/bin/claude` as the SDK's `cli_path`. Outside a bundle (tests, development) it leaves `cli_path` unset.
+  - The packaging is python-build-standalone plus a launcher rather than PyInstaller: nothing has to be frozen, and the SDK and `mcp` load exactly as in development. `make -C deploy bundle-claude-code` exports the directory to `deploy/build/runtime-claude-code/`.
+- **Extraction.** The worker inspects the bundle image named by `EXRADIUS_RUNTIME_IMAGE_<RUNTIME>`:
+  - It does this at start, at every container start and at every heartbeat. Once a build is extracted this is one image inspect.
+  - Each bundle build gets a volume `exradius-runtime-<runtime>-<version>-<first 12 hex digits of the image id>`, labelled with the runtime, version and image id. The image id is in the name so that rebuilding the same version never changes a volume that running containers use.
+  - To fill a new volume, the worker creates (but does not start) a container from the bundle image with the volume mounted over `/opt/exradius/runtime`; Docker copies the image's content into an empty volume at that moment.
+  - It then reads `VERSION` through that container. The volume is ready if `VERSION` names the image's version.
+  - After startup, the worker removes bundle volumes of other builds, skipping any that a container still uses (Docker refuses to remove them).
+  - A missing bundle image does not stop the worker: the heartbeat reports the runtime as not ready, with the error, and runs fail with `runtime claude_code is not available: …`.
+- **Run containers.** The bundle volume is mounted read-only at `EXRADIUS_RUNTIME_MOUNT` (`/opt/exradius/runtime`) in run containers and provider probes, but not in setup containers.
+  - Every container gets `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=safe.directory` and `GIT_CONFIG_VALUE_0=*`. This command-line level git config replaces the system setting the old runner image carried. Without it, git in a stock image rejects the checkout on Docker Desktop, where the bind-mounted `/work` does not appear owned by the run user.
+  - Projects that still name an image built `FROM exradius-runner` keep working: it is a glibc image with git.
+- **Isolation** (runtime-bundles.md §5, `exradius/runner/environment.py`). The runner's first act is `isolate()`:
+  - It removes `EXRADIUS_RUNTIME_DIR` (the launcher's) and `EXRADIUS_RUN_TOKEN` from its process, and keeps a copy of everything else as the container's environment.
+  - It then removes `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `VIRTUAL_ENV`, `NODE_OPTIONS` and `NODE_PATH` from its own process only.
+  - `RunSpec.env` is that copy. `ClaudeCodeRuntime` passes it, plus `CLAUDE_CONFIG_DIR`, as the SDK's `env`. The SDK starts the CLI with the runner's cleaned environment overlaid by `env`, so the CLI, and the agent's shell and stdio MCP servers, get exactly the container's environment (the project's variables and secrets, and the provider credential the worker put there) plus `CLAUDE_CONFIG_DIR`.
+  - The only other variables are the SDK's own markers (`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_AGENT_SDK_VERSION`, `CLAUDE_CODE_SDK_READS_SESSION_STATE`, `PWD`).
+  - The bundle is never on `PATH`, so `python`, `node`, `cargo` or `mvn` are the project image's.
+  - `tests/test_runner_environment.py` checks this through the real SDK transport against a fake CLI that records its environment. A Docker test checks that a project `PYTHONPATH` holding an `exradius` package, `sitecustomize.py` and `json.py` does not affect the bundle's runner.

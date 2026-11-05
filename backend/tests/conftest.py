@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from exradius.config import Settings
 from exradius.crypto import SecretBox, generate_secret_key
 from exradius.db import make_engine, make_session_factory
-from exradius.models import Agent, Base, Connection, Project, ProjectAgent
+from exradius.models import Agent, Base, Connection, Project, ProjectAgent, Provider
 from exradius.storage import MemoryObjectStore
 
 
@@ -54,9 +54,13 @@ def box(settings: Settings) -> SecretBox:
 
 
 @pytest.fixture
-async def configured(sessions):
-    """A project 'billing-platform' with agent 'bug-fixer' attached, plus an unattached agent."""
+async def configured(sessions, box):
+    """A project 'billing-platform' with agent 'bug-fixer' attached, plus an unattached agent,
+    and a default provider 'anthropic' (API key ``sk-test``)."""
     async with sessions() as session:
+        provider = Provider(slug="anthropic", name="Anthropic", kind="anthropic", auth_method="api_key",
+                            credential_encrypted=box.encrypt("sk-test"), settings={}, is_default=True)
+        session.add(provider)
         connection = Connection(slug="docs", name="Docs", transport="http", url="https://mcp.example/mcp")
         project = Project(slug="billing-platform", name="Billing", setup_commands=[])
         agent = Agent(slug="bug-fixer", name="Bug fixer", prompt="You fix bugs.", connections=[connection])
@@ -65,7 +69,7 @@ async def configured(sessions):
         await session.flush()
         session.add(ProjectAgent(project_id=project.id, agent_id=agent.id))
         await session.commit()
-        return {"project": project, "agent": agent, "loner": loner, "connection": connection}
+        return {"project": project, "agent": agent, "loner": loner, "connection": connection, "provider": provider}
 
 
 def git(*args: str, cwd: Path | None = None) -> str:

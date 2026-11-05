@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from types import SimpleNamespace
 
 import pytest
-from docker.errors import NotFound
 from sqlalchemy import select
 
-from exradius.config import Settings
 from exradius.models import Project, ProjectVerification, Repository, Worker
 from exradius.worker import prepare
-from exradius.worker.containers import ContainerManager
 from exradius.worker.heartbeat import Heartbeat
 from exradius.worker.verify import ProjectVerifier
 from tests.test_run_manager import containers, manager, published  # noqa: F401 - fixtures
@@ -173,10 +169,13 @@ async def test_sweep_keeps_verifications_in_progress(manager, sessions, project,
 # Heartbeats ------------------------------------------------------------------------------------
 
 
+RUNTIMES = [{"name": "claude_code", "version": "0.1.0", "ready": True, "image": "exradius-runtime-claude-code:0.1.0", "error": None}]
+
+
 class FakeReporter:
     def __init__(self):
-        self.report = {"docker_ok": True, "docker_detail": "reachable", "runner_image_ok": True,
-                       "images": [{"tag": "exradius-runner:latest", "created_at": "2026-11-05T10:00:00Z", "size": 1}]}
+        self.report = {"docker_ok": True, "docker_detail": "reachable", "runtimes": list(RUNTIMES),
+                       "images": [{"tag": "python:3.14", "created_at": "2026-11-05T10:00:00Z", "size": 1}]}
 
     async def docker_report(self):
         return dict(self.report)
@@ -184,60 +183,19 @@ class FakeReporter:
 
 async def test_heartbeat_upserts_and_removes_its_row(sessions):
     reporter = FakeReporter()
-    heartbeat = Heartbeat(sessions, reporter, worker_id="w1", concurrency=3, runner_image="exradius-runner:latest")
+    heartbeat = Heartbeat(sessions, reporter, worker_id="w1", concurrency=3)
     await heartbeat.beat()
     async with sessions() as session:
         first = await session.get(Worker, "w1")
-        assert (first.concurrency, first.docker_ok, first.runner_image_ok) == (3, True, True)
-        assert first.images[0]["tag"] == "exradius-runner:latest" and first.hostname
+        assert (first.concurrency, first.docker_ok, first.runtimes) == (3, True, RUNTIMES)
+        assert first.images[0]["tag"] == "python:3.14" and first.hostname
     reporter.report["docker_ok"] = False
+    reporter.report["runtimes"] = [{**RUNTIMES[0], "ready": False, "error": "Docker is not reachable"}]
     await heartbeat.beat()
     async with sessions() as session:
         rows = (await session.scalars(select(Worker))).all()
-        assert len(rows) == 1 and rows[0].docker_ok is False
+        assert len(rows) == 1 and rows[0].docker_ok is False and rows[0].runtimes[0]["ready"] is False
         assert rows[0].last_seen_at >= first.last_seen_at and rows[0].started_at == first.started_at
     await heartbeat.stop()
     async with sessions() as session:
         assert await session.get(Worker, "w1") is None
-
-
-def fake_image(tags, created="2026-11-05T10:00:00Z", size=42):
-    return SimpleNamespace(tags=tags, attrs={"Created": created, "Size": size})
-
-
-class FakeDocker:
-    def __init__(self, ping_error=None, runner_present=True, images=()):
-        self.ping_error = ping_error
-        self.filters = None
-        outer = self
-
-        class Images:
-            def get(self, name):
-                if not runner_present:
-                    raise NotFound("no such image")
-
-            def list(self, filters=None):
-                outer.filters = filters
-                return list(images)
-
-        self.images = Images()
-
-    def ping(self):
-        if self.ping_error:
-            raise self.ping_error
-
-
-async def test_docker_report_lists_labelled_images():
-    client = FakeDocker(images=[fake_image(["exradius-runner:latest"]), fake_image(["acme/a:1", "acme/a:latest"]), fake_image([])])
-    report = await ContainerManager(Settings(), client).docker_report()
-    assert client.filters == {"label": "exradius.runner=true"}
-    assert report["docker_ok"] and report["runner_image_ok"]
-    assert [i["tag"] for i in report["images"]] == ["acme/a:1", "acme/a:latest", "exradius-runner:latest"]
-    assert report["images"][0] == {"tag": "acme/a:1", "created_at": "2026-11-05T10:00:00Z", "size": 42}
-
-
-async def test_docker_report_when_daemon_or_image_is_missing():
-    down = await ContainerManager(Settings(), FakeDocker(ping_error=ConnectionError("no socket"))).docker_report()
-    assert down["docker_ok"] is False and "no socket" in down["docker_detail"] and down["images"] == []
-    no_image = await ContainerManager(Settings(), FakeDocker(runner_present=False)).docker_report()
-    assert no_image["docker_ok"] is True and no_image["runner_image_ok"] is False

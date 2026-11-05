@@ -9,8 +9,10 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     MetaData,
     String,
@@ -18,6 +20,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
 )
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -126,6 +129,54 @@ class Connection(Base):
     """Result of the last "test connection": ok, tested_at, tools, error."""
 
 
+class Provider(Base):
+    """A named credential profile a runtime injects into run containers (providers.md §2)."""
+
+    __tablename__ = "providers"
+    __table_args__ = (
+        # At most one default; the API keeps exactly one once any provider exists.
+        Index(
+            "uq_providers_default",
+            "is_default",
+            unique=True,
+            postgresql_where=text("is_default"),
+            sqlite_where=text("is_default"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    slug: Mapped[str] = mapped_column(String(100), unique=True)
+    name: Mapped[str] = mapped_column(String(255))
+    kind: Mapped[str] = mapped_column(String(50))
+    auth_method: Mapped[str] = mapped_column(String(50))
+    credential_encrypted: Mapped[str] = mapped_column(Text)
+    settings: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_test: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
+    """ok, tested_at, detail, error; cleared when the credential or settings change."""
+    created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow, onupdate=utcnow)
+
+
+class ProviderTest(Base):
+    """A provider test that needs a run container (``oauth_token``), run by a worker."""
+
+    __tablename__ = "provider_tests"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    provider_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("providers.id", ondelete="CASCADE"), index=True)
+    state: Mapped[str] = mapped_column(String(20))  # pending | running | passed | failed
+    created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    ended_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    detail: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    """Of the provider's credential and settings when the test was requested; the result
+    is stored as the provider's ``last_test`` only if they are unchanged."""
+    worker_id: Mapped[str | None] = mapped_column(String(64))
+
+
 class AgentConnection(Base):
     __tablename__ = "agent_connections"
 
@@ -145,6 +196,10 @@ class Agent(Base):
     name: Mapped[str] = mapped_column(String(255))
     prompt: Mapped[str] = mapped_column(Text, default="")
     runtime: Mapped[str] = mapped_column(String(50), default="claude_code")
+    provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("providers.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    """``None`` uses the default provider."""
     created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
 
     connections: Mapped[list[Connection]] = relationship(
@@ -286,9 +341,9 @@ class Worker(Base):
     concurrency: Mapped[int] = mapped_column(Integer)
     docker_ok: Mapped[bool] = mapped_column(default=False)
     docker_detail: Mapped[str | None] = mapped_column(Text)
-    runner_image: Mapped[str] = mapped_column(String(255))
-    runner_image_ok: Mapped[bool] = mapped_column(default=False)
     images: Mapped[list[Any]] = mapped_column(default=list)
+    runtimes: Mapped[list[Any]] = mapped_column(default=list)
+    """Runtime bundles: [{name, version, ready, image, error}] (runtime-bundles.md §3)."""
     version: Mapped[str | None] = mapped_column(String(50))
 
 
@@ -330,6 +385,8 @@ __all__ = [
     "Project",
     "ProjectAgent",
     "ProjectVerification",
+    "Provider",
+    "ProviderTest",
     "Repository",
     "Run",
     "Secret",

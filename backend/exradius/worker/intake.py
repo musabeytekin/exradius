@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from exradius.db import SessionFactory
 from exradius.models import Agent, Attachment, InfoRequest, Project, ProjectAgent, Run, Task, utcnow
+from exradius.providers import NO_PROVIDER, resolve_provider
 from exradius.schemas.messages import AnswerMessage, AttachmentIn, TaskMessage, status_payload
 from exradius.states import State
 from exradius.storage import ObjectStore
@@ -97,6 +98,8 @@ async def accept_task(sessions: SessionFactory, store: ObjectStore, body: bytes)
             return await rejected(f"unknown agent {message.agent!r}")
         if await session.get(ProjectAgent, (project.id, agent.id)) is None:
             return await rejected(f"agent {agent.slug!r} is not attached to project {project.slug!r}")
+        if await resolve_provider(session, agent) is None:
+            return await rejected(NO_PROVIDER)
 
         task = Task(
             id=message.task_id,

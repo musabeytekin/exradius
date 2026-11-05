@@ -21,10 +21,14 @@ from exradius.worker.intake import accept_answer, accept_task
 from exradius.worker.lifecycle import PendingEvent
 from exradius.worker.heartbeat import Heartbeat
 from exradius.worker.presence import make_presence, new_worker_id
+from exradius.worker.provider_test import ProviderTester
 from exradius.worker.verify import ProjectVerifier
 from exradius.worker.runs import RunManager
 
 log = logging.getLogger("exradius.worker")
+
+TARGET_KEYS = {"cancel": "run_id", "verify": "verification_id", "test_provider": "test_id"}
+"""Control actions and the key of the id each one carries."""
 
 
 class Worker:
@@ -40,6 +44,7 @@ class Worker:
         self.containers = ContainerManager(settings)
         self.runs = RunManager(settings, self.sessions, self.store, self.containers, self.emit)
         self.verifier = ProjectVerifier(self.runs)
+        self.provider_tester = ProviderTester(self.runs)
         self._background: set[asyncio.Task] = set()
         self.worker_id = new_worker_id()
         self.runs.worker_id = self.worker_id
@@ -49,7 +54,6 @@ class Worker:
             self.containers,
             worker_id=self.worker_id,
             concurrency=settings.worker_concurrency,
-            runner_image=settings.runner_image,
         )
 
     async def emit(self, events: list[PendingEvent]) -> None:
@@ -115,6 +119,13 @@ class Worker:
             except Exception:
                 log.exception("verification %s crashed", verification_id)
 
+    async def _test_provider(self, test_id: uuid.UUID) -> None:
+        async with self.slots:
+            try:
+                await self.provider_tester.run(test_id)
+            except Exception:
+                log.exception("provider test %s crashed", test_id)
+
     async def recover(self) -> None:
         """Crash recovery before consuming: re-attach to or fail runs that a dead
         worker left mid-flight, sweep orphaned run directories, and resume waiting runs
@@ -122,18 +133,28 @@ class Worker:
         for run_id, container_id in await self.runs.reconcile(self.presence.is_alive):
             self._spawn(self._reattach(run_id, container_id))
         await self.verifier.reconcile(self.presence.is_alive)
+        await self.provider_tester.reconcile(self.presence.is_alive)
         removed = await self.runs.sweep_orphans()
         if removed:
             log.info("removed %d orphaned run directories", len(removed))
         for run_id in await self.runs.resumable_runs():
             self._spawn(self._resume(run_id))
 
+    async def prepare_runtimes(self) -> None:
+        """Extract the runtime bundles now rather than at the first run, and remove the
+        volumes of older bundles that no container uses."""
+        await self.containers.bundles.ensure_all()
+        try:
+            await self.containers.bundles.remove_unused()
+        except Exception:  # noqa: BLE001 - cleanup only; retried at the next start
+            log.exception("could not remove old runtime bundle volumes")
+
     async def on_control(self, message: AbstractIncomingMessage) -> None:
         async with message.process(requeue=False):
             try:
                 command = json.loads(message.body)
                 action = command["action"]
-                target = uuid.UUID(command["run_id" if action == "cancel" else "verification_id"])
+                target = uuid.UUID(command[TARGET_KEYS[action]])
             except (ValueError, KeyError, TypeError):
                 log.warning("dropping invalid control message")
                 return
@@ -145,8 +166,10 @@ class Worker:
                 if await self.verifier.claim(target, self.worker_id):
                     log.info("verifying project (verification %s)", target)
                     self._spawn(self._verify(target))
-            else:
-                log.warning("dropping control message with unknown action %r", action)
+            elif action == "test_provider":
+                if await self.provider_tester.claim(target, self.worker_id):
+                    log.info("testing provider (test %s)", target)
+                    self._spawn(self._test_provider(target))
 
     # -- lifecycle ------------------------------------------------------------------------
 
@@ -166,6 +189,7 @@ class Worker:
             control_queue = await other_channel.declare_queue(messaging.CONTROL_QUEUE, durable=True)
 
             await self.presence.start()
+            await self.prepare_runtimes()
             self.heartbeat.start()
             await self.recover()
 

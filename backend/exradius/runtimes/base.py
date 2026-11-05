@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, ClassVar, Literal, Protocol
 
 
 @dataclass
@@ -60,8 +60,90 @@ class EventSink(Protocol):
         ...
 
 
+# Providers (docs/providers.md §2.1) -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SettingField:
+    """A non-secret setting of an auth method (region, project, base URL ...)."""
+
+    name: str
+    label: str
+    required: bool = True
+
+
+@dataclass(frozen=True)
+class AuthMethod:
+    name: str
+    label: str
+    credential_label: str
+    settings: tuple[SettingField, ...] = ()
+    notice: str | None = None
+
+
+@dataclass(frozen=True)
+class ProviderKind:
+    kind: str
+    label: str
+    auth_methods: tuple[AuthMethod, ...]
+
+    def auth_method(self, name: str) -> AuthMethod | None:
+        return next((m for m in self.auth_methods if m.name == name), None)
+
+
+@dataclass(frozen=True)
+class RuntimeCapabilities:
+    providers: tuple[ProviderKind, ...]
+
+    def provider_kind(self, kind: str) -> ProviderKind | None:
+        return next((p for p in self.providers if p.kind == kind), None)
+
+    def accepts(self, kind: str, auth_method: str) -> bool:
+        provider = self.provider_kind(kind)
+        return provider is not None and provider.auth_method(auth_method) is not None
+
+
+@dataclass
+class ProviderCredential:
+    """A provider with its credential decrypted, at container start only."""
+
+    kind: str
+    auth_method: str
+    credential: str
+    settings: dict[str, Any] = field(default_factory=dict)
+
+
+PROBE_PREFIX = "EXRADIUS_PROBE "
+"""The provider probe prints its result as one line ``EXRADIUS_PROBE {"ok": ..., ...}``."""
+
+
+@dataclass
+class ProbeResult:
+    ok: bool
+    detail: str | None = None
+    error: str | None = None
+
+
 class Runtime(Protocol):
     name: str
+    label: ClassVar[str]
+    capabilities: ClassVar[RuntimeCapabilities]
+    """The provider kinds and auth methods this runtime can inject."""
+    credential_variables: ClassVar[frozenset[str]]
+    """Every environment variable any provider mapping may set; removed from the project
+    environment so a run gets only its provider's credential."""
+
+    @classmethod
+    def provider_environment(cls, provider: ProviderCredential) -> dict[str, str]:
+        """The container environment for ``provider`` (providers.md §2.2)."""
+        ...
+
+    def __init__(self, runtime_dir: Path | None = None) -> None:
+        """``runtime_dir``: the runtime bundle the runner runs from (``None`` outside one)."""
+
+    async def probe(self, env: dict[str, str]) -> ProbeResult:
+        """A minimal session ("Reply with OK") with ``env``, which carries the provider."""
+        ...
 
     async def start(self, spec: RunSpec, events: EventSink) -> RunOutcome: ...
 

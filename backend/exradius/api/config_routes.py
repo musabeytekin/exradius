@@ -19,10 +19,12 @@ from exradius.models import (
     Project,
     ProjectAgent,
     ProjectVerification,
+    Provider,
     Repository,
     Secret,
     utcnow,
 )
+from exradius.runtimes import runtime_class
 from exradius.resolve import (
     MissingSecret,
     SecretValues,
@@ -378,7 +380,19 @@ def _agent_out(agent: Agent) -> s.AgentOut:
         runtime=agent.runtime,
         created_at=agent.created_at,
         connection_ids=[c.id for c in agent.connections],
+        provider_id=agent.provider_id,
     )
+
+
+async def _check_provider(session, provider_id: uuid.UUID | None, runtime: str) -> None:
+    """An agent's own provider must exist and be one its runtime can use."""
+    if provider_id is None:
+        return
+    provider = await session.get(Provider, provider_id)
+    if provider is None:
+        raise HTTPException(422, f"unknown provider id {provider_id}")
+    if not runtime_class(runtime).capabilities.accepts(provider.kind, provider.auth_method):
+        raise HTTPException(422, f"runtime {runtime} cannot use a {provider.kind}/{provider.auth_method} provider")
 
 
 async def _connections(session, ids: list[uuid.UUID]) -> list[Connection]:
@@ -396,6 +410,7 @@ async def list_agents(session: DB, _: Admin):
 
 @router.post("/agents", response_model=s.AgentOut, status_code=201)
 async def create_agent(body: s.AgentIn, session: DB, _: Admin):
+    await _check_provider(session, body.provider_id, body.runtime)
     agent = Agent(**body.model_dump(exclude={"connection_ids"}))
     agent.connections = await _connections(session, body.connection_ids)
     session.add(agent)
@@ -414,6 +429,8 @@ async def update_agent(agent_id: uuid.UUID, body: s.AgentUpdate, session: DB, _:
     data = body.model_dump(exclude_unset=True)
     if "connection_ids" in data:
         agent.connections = await _connections(session, data.pop("connection_ids") or [])
+    if "provider_id" in data or "runtime" in data:
+        await _check_provider(session, data.get("provider_id", agent.provider_id), data.get("runtime") or agent.runtime)
     for key, value in data.items():
         setattr(agent, key, value)
     await session.commit()

@@ -448,7 +448,6 @@ dependencies = [
     { name = "alembic" },
     { name = "asyncpg" },
     { name = "boto3" },
-    { name = "claude-agent-sdk" },
     { name = "cryptography" },
     { name = "docker" },
     { name = "fastapi" },
@@ -464,8 +463,16 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "aiosqlite" },
+    { name = "claude-agent-sdk" },
+    { name = "httpx" },
+    { name = "pydantic" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+]
+runner = [
+    { name = "claude-agent-sdk" },
+    { name = "httpx" },
+    { name = "pydantic" },
 ]
 
 [package.metadata]
@@ -474,7 +481,6 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.14" },
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "boto3", specifier = ">=1.35" },
-    { name = "claude-agent-sdk", specifier = ">=0.1" },
     { name = "cryptography", specifier = ">=43" },
     { name = "docker", specifier = ">=7.1" },
     { name = "fastapi", specifier = ">=0.115" },
@@ -490,8 +496,16 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "aiosqlite", specifier = ">=0.20" },
+    { name = "claude-agent-sdk", specifier = ">=0.1" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pydantic", specifier = ">=2.9" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
+]
+runner = [
+    { name = "claude-agent-sdk", specifier = ">=0.1" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pydantic", specifier = ">=2.9" },
 ]
 
 [[package]]

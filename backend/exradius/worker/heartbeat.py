@@ -9,25 +9,18 @@ import asyncio
 import logging
 import socket
 from datetime import datetime
-from importlib.metadata import version
 
 from sqlalchemy import delete
 
 from exradius.db import SessionFactory
 from exradius.models import Worker, utcnow
+from exradius.version import package_version
 from exradius.worker.containers import ContainerManager
 
 log = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS = 15
 WORKER_TIMEOUT_SECONDS = 60
-
-
-def package_version() -> str:
-    try:
-        return version("exradius")
-    except Exception:  # noqa: BLE001 - not installed as a distribution
-        return "unknown"
 
 
 class Heartbeat:
@@ -38,14 +31,12 @@ class Heartbeat:
         *,
         worker_id: str,
         concurrency: int,
-        runner_image: str,
         interval: float = HEARTBEAT_SECONDS,
     ):
         self.sessions = sessions
         self.containers = containers
         self.worker_id = worker_id
         self.concurrency = concurrency
-        self.runner_image = runner_image
         self.interval = interval
         self.started_at: datetime = utcnow()
         self.hostname = socket.gethostname()
@@ -61,7 +52,6 @@ class Heartbeat:
                     started_at=self.started_at,
                     last_seen_at=utcnow(),
                     concurrency=self.concurrency,
-                    runner_image=self.runner_image,
                     version=package_version(),
                     **report,
                 )

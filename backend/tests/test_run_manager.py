@@ -13,6 +13,7 @@ from exradius import downloads
 from exradius.crypto import hash_token
 from exradius.models import Artifact, EnvVar, InfoRequest, Project, Repository, Run, Secret, Task, TranscriptChunk
 from exradius.states import State
+from exradius.worker.bundles import RuntimeMount
 from exradius.worker.containers import ContainerExit, RunContainer
 from exradius.worker.intake import accept_answer, accept_task
 from exradius.worker.runs import RunManager
@@ -28,13 +29,18 @@ class FakeContainers:
         self.setup_exit = 0
         self.stopped: list[str] = []
         self.removed: list[str] = []
+        self.runtimes_ensured: list[str] = []
         self.existing: dict[str, list[RunContainer]] = {}  # containers left on the daemon
         self._pending: dict[str, tuple[Behaviour, uuid.UUID, dict]] = {}
 
-    async def start_runner(self, *, image, run_id, paths, env):
+    async def ensure_runtime(self, runtime):
+        self.runtimes_ensured.append(runtime)
+        return RuntimeMount(runtime, "0.1.0", f"exradius-runtime-{runtime}-0.1.0-test")
+
+    async def start_runner(self, *, image, run_id, paths, env, runtime):
         assert paths.project.is_dir()
         cid = f"c{len(self.started)}"
-        self.started.append({"image": image, "run_id": run_id, "env": env, "paths": paths})
+        self.started.append({"image": image, "run_id": run_id, "env": env, "paths": paths, "runtime": runtime})
         self._pending[cid] = (self.behaviours.pop(0), uuid.UUID(run_id), env)
         return cid
 
@@ -75,8 +81,6 @@ def published():
 
 @pytest.fixture
 def manager(settings, sessions, store, containers, published):
-    settings.anthropic_api_key = "sk-test"
-
     async def emit(events):
         published.extend(e.envelope for e in events)
 
@@ -159,7 +163,8 @@ async def test_completed_run(manager, sessions, store, containers, published, se
     assert env["ANTHROPIC_API_KEY"] == "sk-test"
     assert env["LOG_LEVEL"] == "debug" and env["DB_PASSWORD"] == "hunter2"
     assert env["EXRADIUS_API_URL"] == settings.run_api_url and env["EXRADIUS_RUN_ID"] == str(run_id)
-    assert containers.started[0]["image"] == settings.runner_image
+    assert containers.started[0]["image"] == settings.project_default_image
+    assert containers.started[0]["runtime"].volume == "exradius-runtime-claude_code-0.1.0-test"
 
     async with sessions() as session:
         run = await session.get(Run, run_id)

@@ -32,6 +32,7 @@ from exradius.models import (
     TranscriptChunk,
     utcnow,
 )
+from exradius.providers import NO_PROVIDER, resolve_provider, runtime_environment, strip_credentials
 from exradius.resolve import load_secrets, project_environment
 from exradius.schemas.messages import ArtifactRef, InfoRequestPayload, ResultPayload
 from exradius.states import ACTIVE, TERMINAL, State, can_transition, is_terminal
@@ -135,7 +136,7 @@ class RunManager:
         await asyncio.to_thread(prepare.write_attachments, paths.attachments, files)
         await self._hand_over(paths)
 
-        image = task.project.image or self.settings.runner_image
+        image = task.project.image or self.settings.project_default_image
         for command in task.project.setup_commands or []:
             if await self._state(run.id) != State.PREPARING:
                 raise RunCancelled("cancelled during setup")
@@ -190,22 +191,26 @@ class RunManager:
             run = await self._lock(session, run_id)
             if run is None or run.state != from_state:
                 raise RunCancelled(f"run is {run.state if run else 'gone'}")
-            run.token_hash = hash_token(token)
             task = run.task
-            env = await self._project_env(session, task.project_id)
-            anthropic_key = await self._anthropic_key(session)
-            image = task.project.image or self.settings.runner_image
+            provider = await resolve_provider(session, task.agent)
+            if provider is None:
+                raise prepare.PreparationError(NO_PROVIDER)
+            runtime = task.agent.runtime
+            # Only this provider's variables reach the container, decrypted now.
+            env = strip_credentials(runtime, await self._project_env(session, task.project_id))
+            env.update(runtime_environment(runtime, self.box, provider))
+            run.token_hash = hash_token(token)
+            image = task.project.image or self.settings.project_default_image
             await session.commit()
 
-        if anthropic_key:
-            env["ANTHROPIC_API_KEY"] = anthropic_key
         env.update(
             EXRADIUS_RUN_ID=str(run_id),
             EXRADIUS_RUN_TOKEN=token,
             EXRADIUS_API_URL=self.settings.run_api_url,
         )
+        runtime_mount = await self.containers.ensure_runtime(runtime)
         container_id = await self.containers.start_runner(
-            image=image, run_id=str(run_id), paths=self.paths(run_id), env=env
+            image=image, run_id=str(run_id), paths=self.paths(run_id), env=env, runtime=runtime_mount
         )
         try:
             await self._move(
@@ -219,14 +224,6 @@ class RunManager:
             await self.containers.stop_run_containers(str(run_id))
             await self.containers.wait(container_id)
             raise
-
-    async def _anthropic_key(self, session) -> str | None:
-        secret = await session.scalar(
-            select(Secret).where(Secret.project_id.is_(None), Secret.key == "ANTHROPIC_API_KEY")
-        )
-        if secret is not None:
-            return self.box.decrypt(secret.value_encrypted)
-        return self.settings.anthropic_api_key
 
     async def _settle(self, run_id: uuid.UUID, container_id: str | None = None, *, wait: bool = True) -> None:
         """Wait for the runner container to exit and act on what it reported.

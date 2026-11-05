@@ -1,10 +1,15 @@
-# Exradius stack: api, worker, postgres and rabbitmq (with management UI).
+# Exradius stack: api, worker, frontend (admin panel), postgres and rabbitmq (with management UI).
 #
 #   cp deploy/.env.example deploy/.env    # then fill in the secrets
 #   docker compose -f deploy/docker-compose.yml up -d --build
 #
 # The worker starts run containers on the host's Docker daemon, attached to the
 # `exradius` network so they can reach the API at http://api:8000.
+#
+# Agents run in run containers started from the project's image (any glibc-based image
+# with git; exradius-project-default when a project names none), with the runtime bundle
+# (exradius-runtime-claude-code) mounted read-only at /opt/exradius/runtime. Compose builds
+# those two images too; their services are build-only (scale 0).
 #
 # Transcripts, artifacts and attachments are stored on the filesystem under
 # $EXRADIUS_DATA_DIR/objects/, which both api and worker mount. To use an S3 API instead,
@@ -13,10 +18,10 @@
 name: exradius
 
 x-backend: &backend
-  image: exradius-runner:latest
+  image: exradius-backend:0.1.0
   build:
     context: ..
-    dockerfile: deploy/runner.Dockerfile
+    dockerfile: deploy/backend.Dockerfile
   user: root
   restart: unless-stopped
   environment: &backend-env
@@ -33,7 +38,6 @@ x-backend: &backend
     EXRADIUS_SECRET_KEY: ${EXRADIUS_SECRET_KEY:?set EXRADIUS_SECRET_KEY in deploy/.env (exradius generate-key)}
     EXRADIUS_ADMIN_USERNAME: ${EXRADIUS_ADMIN_USERNAME:-admin}
     EXRADIUS_ADMIN_PASSWORD: ${EXRADIUS_ADMIN_PASSWORD:?set EXRADIUS_ADMIN_PASSWORD in deploy/.env}
-    EXRADIUS_ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   depends_on:
     postgres:
       condition: service_healthy
@@ -50,6 +54,10 @@ services:
       # Broker address as integrations reach it, for the integration page.
       EXRADIUS_PUBLIC_BROKER_HOST: ${EXRADIUS_PUBLIC_BROKER_HOST:-localhost}
       EXRADIUS_PUBLIC_BROKER_PORT: ${EXRADIUS_PUBLIC_BROKER_PORT:-${EXRADIUS_AMQP_PORT:-5672}}
+      # Legacy: an ANTHROPIC_API_KEY left in an older deploy/.env becomes the default
+      # provider "Anthropic (migrated)" at the first start without providers; it is not
+      # read after that. Providers are managed in the admin panel.
+      EXRADIUS_ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ports:
       - "${EXRADIUS_API_PORT:-8000}:8000"
     volumes:
@@ -69,12 +77,45 @@ services:
       # so the worker must know the host path of its data directory.
       EXRADIUS_HOST_DATA_DIR: ${EXRADIUS_DATA_DIR:-/var/lib/exradius}
       EXRADIUS_WORKER_CONCURRENCY: ${EXRADIUS_WORKER_CONCURRENCY:-4}
-      EXRADIUS_RUNNER_IMAGE: exradius-runner:latest
+      EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE: ${EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE:-exradius-runtime-claude-code:0.1.0}
+      EXRADIUS_PROJECT_DEFAULT_IMAGE: ${EXRADIUS_PROJECT_DEFAULT_IMAGE:-exradius-project-default:0.1.0}
       EXRADIUS_RUN_NETWORK: exradius
       EXRADIUS_RUN_API_URL: http://api:8000
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${EXRADIUS_DATA_DIR:-/var/lib/exradius}:/var/lib/exradius
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Build-only: the Claude Code runtime bundle, which the worker extracts into a volume.
+  runtime-claude-code:
+    image: ${EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE:-exradius-runtime-claude-code:0.1.0}
+    build:
+      context: ..
+      dockerfile: deploy/runtime-claude-code.Dockerfile
+      args:
+        EXRADIUS_VERSION: 0.1.0
+    scale: 0
+
+  # Build-only: the image of run containers for projects that name no image.
+  project-default:
+    image: ${EXRADIUS_PROJECT_DEFAULT_IMAGE:-exradius-project-default:0.1.0}
+    build:
+      context: ..
+      dockerfile: deploy/project-default.Dockerfile
+    scale: 0
+
+  frontend:
+    image: exradius-frontend:latest
+    build:
+      context: ../frontend
+    restart: unless-stopped
+    environment:
+      # nginx serves the panel and proxies /api here, so the session cookie is same-origin.
+      EXRADIUS_API_UPSTREAM: http://api:8000
+    ports:
+      - "${EXRADIUS_FRONTEND_PORT:-3000}:80"
     depends_on:
       api:
         condition: service_healthy
