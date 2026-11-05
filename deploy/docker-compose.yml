@@ -1,0 +1,117 @@
+# Exradius stack: api, worker, postgres and rabbitmq (with management UI).
+#
+#   cp deploy/.env.example deploy/.env    # then fill in the secrets
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#
+# The worker starts run containers on the host's Docker daemon, attached to the
+# `exradius` network so they can reach the API at http://api:8000.
+#
+# Transcripts, artifacts and attachments are stored on the filesystem under
+# $EXRADIUS_DATA_DIR/objects/, which both api and worker mount. To use an S3 API instead,
+# set EXRADIUS_OBJECT_STORE=s3 and the EXRADIUS_S3_* variables in deploy/.env.
+
+name: exradius
+
+x-backend: &backend
+  image: exradius-runner:latest
+  build:
+    context: ..
+    dockerfile: deploy/runner.Dockerfile
+  user: root
+  restart: unless-stopped
+  environment: &backend-env
+    EXRADIUS_DATABASE_URL: postgresql+asyncpg://exradius:${POSTGRES_PASSWORD:-exradius}@postgres:5432/exradius
+    EXRADIUS_BROKER_URL: amqp://${RABBITMQ_USER:-exradius}:${RABBITMQ_PASSWORD:-exradius}@rabbitmq:5672/
+    EXRADIUS_DATA_DIR: /var/lib/exradius
+    EXRADIUS_OBJECT_STORE: ${EXRADIUS_OBJECT_STORE:-filesystem}
+    EXRADIUS_S3_ENDPOINT_URL: ${EXRADIUS_S3_ENDPOINT_URL:-}
+    EXRADIUS_S3_ACCESS_KEY: ${EXRADIUS_S3_ACCESS_KEY:-}
+    EXRADIUS_S3_SECRET_KEY: ${EXRADIUS_S3_SECRET_KEY:-}
+    EXRADIUS_S3_BUCKET: ${EXRADIUS_S3_BUCKET:-exradius}
+    EXRADIUS_S3_REGION: ${EXRADIUS_S3_REGION:-us-east-1}
+    EXRADIUS_PUBLIC_API_URL: ${EXRADIUS_PUBLIC_API_URL:-http://localhost:8000}
+    EXRADIUS_SECRET_KEY: ${EXRADIUS_SECRET_KEY:?set EXRADIUS_SECRET_KEY in deploy/.env (exradius generate-key)}
+    EXRADIUS_ADMIN_USERNAME: ${EXRADIUS_ADMIN_USERNAME:-admin}
+    EXRADIUS_ADMIN_PASSWORD: ${EXRADIUS_ADMIN_PASSWORD:?set EXRADIUS_ADMIN_PASSWORD in deploy/.env}
+    EXRADIUS_ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+
+services:
+  api:
+    <<: *backend
+    working_dir: /opt/exradius
+    entrypoint: ["/bin/sh", "-c", "alembic upgrade head && exec exradius-api"]
+    ports:
+      - "${EXRADIUS_API_PORT:-8000}:8000"
+    volumes:
+      - ${EXRADIUS_DATA_DIR:-/var/lib/exradius}:/var/lib/exradius
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    <<: *backend
+    entrypoint: ["exradius-worker"]
+    environment:
+      <<: *backend-env
+      # Run directories are bind-mounted into run containers by the host's Docker daemon,
+      # so the worker must know the host path of its data directory.
+      EXRADIUS_HOST_DATA_DIR: ${EXRADIUS_DATA_DIR:-/var/lib/exradius}
+      EXRADIUS_WORKER_CONCURRENCY: ${EXRADIUS_WORKER_CONCURRENCY:-4}
+      EXRADIUS_RUNNER_IMAGE: exradius-runner:latest
+      EXRADIUS_RUN_NETWORK: exradius
+      EXRADIUS_RUN_API_URL: http://api:8000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${EXRADIUS_DATA_DIR:-/var/lib/exradius}:/var/lib/exradius
+    depends_on:
+      api:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: exradius
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-exradius}
+      POSTGRES_DB: exradius
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${EXRADIUS_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U exradius -d exradius"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-exradius}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-exradius}
+    volumes:
+      - rabbitmq:/var/lib/rabbitmq
+    ports:
+      - "${EXRADIUS_AMQP_PORT:-5672}:5672"
+      - "${EXRADIUS_RABBITMQ_UI_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+networks:
+  default:
+    name: exradius
+
+volumes:
+  postgres:
+  rabbitmq:

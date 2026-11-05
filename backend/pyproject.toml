@@ -1,0 +1,48 @@
+[project]
+name = "exradius"
+version = "0.1.0"
+description = "Self-hosted execution harness for AI agents"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "itsdangerous>=2.2",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "aio-pika>=9.4",
+    "docker>=7.1",
+    "cryptography>=43",
+    "boto3>=1.35",
+    "httpx>=0.27",
+    "claude-agent-sdk>=0.1",
+    "mcp>=1.2",
+]
+
+[project.scripts]
+exradius-api = "exradius.api.main:run"
+exradius-worker = "exradius.worker.main:run"
+exradius-runner = "exradius.runner.main:run"
+exradius = "exradius.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "aiosqlite>=0.20",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "exradius"
+module-root = ""
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
