@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from exradius.runner.prompt import build_prompt, build_resume_message
+from exradius.runner.prompt import OPERATING_RULES, build_resume_message, build_system_prompt, build_task_message
 from exradius.runner.tools import SUSPEND_MESSAGE, ExradiusTools
 from exradius.schemas.internal import (
     ArtifactUpload,
@@ -130,25 +130,56 @@ def spec(**kwargs) -> RunSpecResponse:
     return RunSpecResponse(**{**base, **kwargs})
 
 
-def test_prompt_layout():
-    prompt = build_prompt(
+def test_task_message_is_only_the_ticket():
+    message = build_task_message(
         spec(
             context={"customer": "ACME", "since": "Monday"},
             attachments=[AttachmentPath(path=".exradius/attachments/screenshot.png", content_type="image/png")],
         )
     )
-    assert prompt == (
-        "You are a careful engineer.\n\n"
+    assert message == (
         "# Task\nFix the negative totals.\n\n"
         '# Context\n{\n  "customer": "ACME",\n  "since": "Monday"\n}\n\n'
         "# Attachments\n- .exradius/attachments/screenshot.png (image/png)"
     )
+    assert "careful engineer" not in message and "submit_result" not in message
 
 
-def test_prompt_omits_empty_sections_and_internals():
-    prompt = build_prompt(spec())
-    assert prompt == "You are a careful engineer.\n\n# Task\nFix the negative totals."
-    assert "workspace" not in prompt.lower()
+def test_task_message_omits_empty_sections_and_internals():
+    message = build_task_message(spec())
+    assert message == "# Task\nFix the negative totals."
+    assert "workspace" not in message.lower() and "exradius" not in message.lower()
+
+
+def test_system_prompt_is_rules_then_role():
+    assert build_system_prompt(spec()) == OPERATING_RULES + "\n\nYou are a careful engineer."
+    assert build_system_prompt(spec(agent_prompt="  ")) == OPERATING_RULES
+    assert OPERATING_RULES.startswith("You are working unattended on a task")
+    assert "request_information" in OPERATING_RULES and "submit_result" in OPERATING_RULES
+    assert "exradius" not in OPERATING_RULES.lower()
+
+
+def test_rules_match_the_architecture_document():
+    import re
+    from pathlib import Path
+
+    doc = (Path(__file__).parents[2] / "docs" / "architecture.md").read_text()
+    section = doc[doc.index("## 13. Operating rules"):]
+    assert re.search(r"```\n(.*?)\n```", section, re.S).group(1) == OPERATING_RULES
+
+
+def test_claude_code_options_append_the_system_prompt(tmp_path):
+    from exradius.runtimes import RunSpec
+    from exradius.runtimes.claude_code import ClaudeCodeRuntime
+
+    run_spec = RunSpec(run_id="r", working_dir=tmp_path, state_dir=tmp_path, prompt=build_task_message(spec()),
+                       connections=[], env={}, system_prompt=build_system_prompt(spec()))
+    options = ClaudeCodeRuntime().options(run_spec)
+    assert options.system_prompt == {
+        "type": "preset", "preset": "claude_code", "append": OPERATING_RULES + "\n\nYou are a careful engineer.",
+    }
+    resumed = ClaudeCodeRuntime().options(run_spec, resume="sess-1")
+    assert resumed.system_prompt == options.system_prompt and resumed.resume == "sess-1"
 
 
 def test_resume_message():
@@ -165,3 +196,41 @@ def test_resume_message():
     assert "Did a migration run?" in message
     assert "Yes, Monday 03:00 UTC." in message
     assert ".exradius/attachments/a7c1/log.txt (text/plain)" in message
+
+
+@pytest.mark.parametrize("mode", ["start", "resume"])
+async def test_runner_starts_sessions_with_rules_in_the_system_prompt(api, tmp_path, monkeypatch, mode):
+    """What the runner hands the runtime: the ticket as the message, rules and role as the
+    system prompt; a resume sends the answer message and keeps the same system prompt."""
+    from exradius.runner import main as runner_main
+    from exradius.runtimes import RunOutcome
+
+    seen = {}
+
+    class FakeRuntime:
+        async def start(self, run_spec, events):
+            seen.update(message=run_spec.prompt, system=run_spec.system_prompt)
+            return RunOutcome("completed", "s1", "done", None)
+
+        async def resume(self, run_spec, session_id, message, events):
+            seen.update(message=message, system=run_spec.system_prompt, session=session_id)
+            return RunOutcome("completed", session_id, "done", None)
+
+    the_spec = spec(mode=mode, session_id="s1" if mode == "resume" else None,
+                    context={"customer": "ACME"},
+                    answers=[DeliveredAnswer(request_id="q1", question="Which region?", answer="eu", attachments=[])]
+                    if mode == "resume" else [])
+
+    async def get_spec():
+        return the_spec
+
+    api.get_spec = get_spec
+    monkeypatch.setattr(runner_main, "get_runtime", lambda name, runtime_dir=None: FakeRuntime())
+    outcome = await runner_main.execute(api, "r", tmp_path, tmp_path)
+    assert outcome.status == "completed"
+    assert seen["system"] == OPERATING_RULES + "\n\nYou are a careful engineer."
+    if mode == "start":
+        assert seen["message"] == '# Task\nFix the negative totals.\n\n# Context\n{\n  "customer": "ACME"\n}'
+    else:
+        assert seen["message"] == build_resume_message(the_spec.answers) and seen["session"] == "s1"
+    assert "careful engineer" not in seen["message"] and "unattended" not in seen["message"]

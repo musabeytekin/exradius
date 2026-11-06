@@ -1,3 +1,4 @@
+import { UnreachableBanner } from "./ApiStatus";
 import { workerHealthy } from "@/lib/workers";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
@@ -129,6 +130,7 @@ export function AppShell() {
         </div>
       </aside>
       <main className="min-w-0 flex-1">
+        <UnreachableBanner />
         <div className="mx-auto w-full max-w-[1240px] px-8 pb-16 pt-8">
           <Outlet />
         </div>

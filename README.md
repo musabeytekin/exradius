@@ -284,5 +284,10 @@ client-side routes. To rebuild only the panel:
 docker compose -f deploy/docker-compose.yml up -d --build frontend
 ```
 
+nginx resolves the API's name per request through Docker's embedded DNS, so a rebuilt `api`
+container is picked up without restarting the panel. While the API does not answer, the
+panel shows "Exradius API is not reachable" and retries.
+
 Outside compose, set `EXRADIUS_API_UPSTREAM` on the image to the API's address, for
-example `http://exradius-api:8000`.
+example `http://exradius-api:8000`, and `EXRADIUS_RESOLVER` to a DNS server that resolves
+it (default `127.0.0.11`, Docker's embedded DNS).

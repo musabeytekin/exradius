@@ -166,7 +166,8 @@ class ClaudeCodeRuntime:
         return ClaudeAgentOptions(
             cli_path=self.cli_path,
             cwd=spec.working_dir,
-            system_prompt={"type": "preset", "preset": "claude_code"},
+            # Claude Code's own system prompt, then the operating rules and the role (§13).
+            system_prompt={"type": "preset", "preset": "claude_code", **({"append": spec.system_prompt} if spec.system_prompt else {})},
             mcp_servers={c.name: mcp_server_config(c) for c in spec.connections},
             strict_mcp_config=True,
             # Capability is tool availability: the agent may use everything it is given.

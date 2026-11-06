@@ -15,7 +15,7 @@ import { qk, useAgents, useConnections, useProjects, useProviders, useRuntimes }
 import { SLUG_RE, slugify } from "@/lib/slug";
 import { emailError, needsEmail } from "@/lib/identity";
 import { runtimeAccepts } from "@/lib/providers";
-import { BUILTIN_TOOLS, TASK_LAYOUT, TEMPLATES } from "@/lib/templates";
+import { OPERATING_RULES, TASK_LAYOUT, TEMPLATES } from "@/lib/templates";
 import { toast } from "@/lib/toast";
 import type { Agent, Connection } from "@/lib/types";
 
@@ -293,7 +293,7 @@ function AgentEditor({ agent }: { agent: Agent | null }) {
           <Card>
             <CardHeader
               title="Prompt"
-              description="Prepended to every task's text. The task layout is in the guide."
+              description="The agent's role. Exradius adds its operating rules before it; see the guide."
               actions={<span className="text-xs tabular text-subtle">{prompt.length.toLocaleString()} chars</span>}
             />
             <div className="flex flex-wrap gap-1.5 border-b border-border px-4 py-2.5">
@@ -382,18 +382,14 @@ function GuidePanel({ connections }: { connections: Connection[] }) {
   return (
     <aside className="sticky top-6 flex max-h-[calc(100vh-48px)] flex-col gap-4 self-start overflow-y-auto">
       <Card>
-        <CardHeader title="Built-in tools" description="Every agent has these, from the exradius server." />
-        <div className="flex flex-col gap-3 p-4">
-          {BUILTIN_TOOLS.map((t) => (
-            <div key={t.name}>
-              <code className="block font-mono text-[11.5px] text-fg">{t.signature}</code>
-              <p className="mt-1 text-xs text-muted">{t.effect}</p>
-            </div>
-          ))}
+        <CardHeader title="Exradius adds these rules to every agent" description="System prompt: Claude Code's preset, then these rules, then your prompt." />
+        <div className="p-3">
+          <CodeBlock code={OPERATING_RULES} wrap />
+          <p className="mt-2 text-xs text-muted">So your prompt only needs the role. It does not need to explain questions or results.</p>
         </div>
       </Card>
       <Card>
-        <CardHeader title="What the agent receives" description="The runner assembles this text." />
+        <CardHeader title="What the agent receives" description="The first message of a run: the task as it arrived." />
         <div className="p-3">
           <CodeBlock code={TASK_LAYOUT} wrap />
           <p className="mt-2 text-xs text-muted">It starts in <code className="font-mono">/work</code>, which holds one folder per repository.</p>

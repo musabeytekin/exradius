@@ -1,4 +1,9 @@
-"""Prompt assembly (architecture §5.2). Never mentions workspaces or Exradius internals."""
+"""Prompt assembly (architecture §13).
+
+System prompt: the runtime's preset, then ``OPERATING_RULES``, then the agent's prompt (its
+role). First user message: the ticket only (task, context, attachments). Neither mentions
+workspaces or Exradius internals.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +11,33 @@ import json
 
 from exradius.schemas.internal import DeliveredAnswer, RunSpecResponse
 
+OPERATING_RULES = """\
+You are working unattended on a task that was assigned through an external system such as
+an issue tracker. The task text below was written by a person who does not know how you
+run and who will see only two things from you: the questions you ask and the result you
+deliver.
 
-def build_prompt(spec: RunSpecResponse) -> str:
-    parts = [spec.agent_prompt.strip(), f"# Task\n{spec.instructions.strip()}"]
+- You start inside the project's directory, which contains its repositories.
+- If you cannot proceed without something only that person can tell you, call
+  request_information with one clear question written for them, then stop; you will be
+  resumed with the answer. Each question is a round trip through their system, so ask
+  only when necessary and never more than one question at a time.
+- When you are done, call submit_result with a result written for that person: what you
+  found, what you changed, and what they should do next. Attach files that help.
+- Nobody is watching. Do not ask for confirmation or permission; decide and act. If the
+  task cannot be done, say why in the result."""
+"""How every agent runs, whatever its prompt or the ticket says (architecture §13). The
+admin panel's guide shows this text verbatim."""
+
+
+def build_system_prompt(spec: RunSpecResponse) -> str:
+    """Appended to the runtime's own system prompt: the operating rules, then the role."""
+    return "\n\n".join(part for part in (OPERATING_RULES, spec.agent_prompt.strip()) if part)
+
+
+def build_task_message(spec: RunSpecResponse) -> str:
+    """The first user message: the ticket as it arrived, and nothing else."""
+    parts = [f"# Task\n{spec.instructions.strip()}"]
     if spec.context is not None:
         parts.append(f"# Context\n{json.dumps(spec.context, indent=2, ensure_ascii=False)}")
     if spec.attachments:

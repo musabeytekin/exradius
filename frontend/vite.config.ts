@@ -15,7 +15,19 @@ export default defineConfig({
     port: 5173,
     proxy: {
       // Same-origin /api keeps the session cookie first-party, as nginx does in compose.
-      "/api": { target: apiTarget, changeOrigin: false },
+      "/api": {
+        target: apiTarget,
+        changeOrigin: false,
+        // Answer 502 when the API is down, as nginx does, so the panel shows its own message.
+        configure: (proxy) => {
+          proxy.on("error", (_err, _req, res) => {
+            if ("writeHead" in res && !res.headersSent) {
+              res.writeHead(502, { "content-type": "text/plain" });
+              res.end("Bad Gateway");
+            }
+          });
+        },
+      },
     },
   },
   build: {

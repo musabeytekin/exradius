@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { createRootRouteWithContext, createRoute, createRouter, Outlet, redirect } from "@tanstack/react-router";
 import { AppShell } from "@/components/AppShell";
+import { RouteError } from "@/components/ApiStatus";
 import { api, ApiError } from "@/lib/api";
 import { qk } from "@/lib/queries";
 import { AgentsPage } from "@/pages/Agents";
@@ -137,6 +138,7 @@ export function makeRouter(queryClient: QueryClient) {
     routeTree,
     context: { queryClient },
     defaultPreload: "intent",
+    defaultErrorComponent: RouteError,
     scrollRestoration: true,
   });
 }

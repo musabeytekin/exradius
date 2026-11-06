@@ -10,6 +10,37 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The API did not answer: the network failed, or the proxy in front of it returned a gateway
+ * error page (502/503/504 without the API's JSON body), typically while the api container
+ * restarts. A 503 the API itself sends, such as a broker outage, stays an ordinary ApiError.
+ */
+export class ApiUnreachableError extends ApiError {
+  constructor(status: number) {
+    super(status, UNREACHABLE_MESSAGE);
+  }
+}
+export const UNREACHABLE_MESSAGE = "Exradius API is not reachable.";
+export const isUnreachable = (e: unknown): e is ApiUnreachableError => e instanceof ApiUnreachableError;
+
+// Whether the last request reached the API, for the shell's banner.
+let reachable = true;
+const reachListeners = new Set<() => void>();
+function setReachable(v: boolean) {
+  if (v === reachable) return;
+  reachable = v;
+  reachListeners.forEach((l) => l());
+}
+export const reachability = {
+  get: () => reachable,
+  subscribe: (l: () => void) => {
+    reachListeners.add(l);
+    return () => reachListeners.delete(l);
+  },
+};
+
+const GATEWAY = new Set([502, 503, 504]);
+
 /** FastAPI returns `detail` as a string or as a list of validation errors. */
 function describeDetail(status: number, detail: unknown): string {
   if (typeof detail === "string") return detail;
@@ -41,15 +72,30 @@ async function request<R>(method: string, path: string, body?: unknown, query?: 
     const qs = params.toString();
     if (qs) url += `?${qs}`;
   }
-  const res = await fetch(url, {
-    method,
-    credentials: "same-origin",
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (res.status === 204) return undefined as R;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      credentials: "same-origin",
+      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    setReachable(false);
+    throw new ApiUnreachableError(0);
+  }
+  if (res.status === 204) {
+    setReachable(true);
+    return undefined as R;
+  }
   const text = await res.text();
   const data = text ? safeJson(text) : undefined;
+  const fromApi = typeof data === "object" && data !== null;
+  if (GATEWAY.has(res.status) && !fromApi) {
+    setReachable(false);
+    throw new ApiUnreachableError(res.status);
+  }
+  setReachable(true);
   if (!res.ok) {
     if (res.status === 401 && path !== "/auth/login" && path !== "/auth/me") onUnauthorized();
     const detail = data && typeof data === "object" && "detail" in data ? (data as { detail: unknown }).detail : text;

@@ -199,11 +199,9 @@ The worker starts a container from the project's image with the agent's runtime 
 - environment: the project's variables, the project's secrets (decrypted at this moment only), the variables of the agent's model provider (or the default provider; see `docs/providers.md`), `EXRADIUS_RUN_TOKEN` and `EXRADIUS_API_URL`;
 - the runtime bundle volume mounted read-only at `/opt/exradius/runtime`, with `/opt/exradius/runtime/bin/exradius-runner` as entrypoint, receiving the run id.
 
-The runner fetches the run spec from the internal API (prompt, connections, task instructions, context, attachment list), assembles the Claude Agent SDK options and starts the session. The prompt layout is:
+The runner fetches the run spec from the internal API (prompt, connections, task instructions, context, attachment list), assembles the Claude Agent SDK options and starts the session. The prompt is split as §13 describes: the system prompt is Claude Code's preset, then the fixed operating rules, then the agent's prompt; the first user message is only the ticket:
 
 ```
-<agent prompt>
-
 # Task
 <instructions>
 
@@ -214,7 +212,7 @@ The runner fetches the run spec from the internal API (prompt, connections, task
 - .exradius/attachments/screenshot.png (image/png)
 ```
 
-The prompt never mentions workspaces or Exradius internals beyond the `exradius` tools below. The agent simply starts in a directory that contains the project's repositories.
+Neither part mentions workspaces or Exradius internals beyond the `exradius` tools below. The agent simply starts in a directory that contains the project's repositories.
 
 Every event from the SDK stream is forwarded to the internal API and stored as the transcript.
 
@@ -294,9 +292,10 @@ class RunSpec:
     run_id: str
     working_dir: Path
     state_dir: Path
-    prompt: str
+    prompt: str                         # the first user message: the ticket
     connections: list[ConnectionSpec]   # includes the built-in exradius server
     env: dict[str, str]
+    system_prompt: str = ""             # appended to the runtime's own (§13)
 
 @dataclass
 class RunOutcome:
@@ -435,10 +434,10 @@ Details the design left open, and the simplest choice made for each in version o
 
 **Prompt and runtime**
 
-- `# Context` is omitted when `context` is null, and `# Attachments` when there are none.
+- `# Context` is omitted when `context` is null, and `# Attachments` when there are none. The run spec already carries `agent_prompt` apart from the ticket, so the internal API did not change. The runner builds both parts (`build_system_prompt`, `build_task_message` in `exradius/runner/prompt.py`). An empty agent prompt leaves the rules alone in the append. A test checks that `OPERATING_RULES` matches the block in §13 word for word.
 - The resume message reads "Answer to your question: <question>", then the answer, then the paths of any answer attachments.
 - `ClaudeCodeRuntime` uses these SDK options:
-  - the `claude_code` system prompt preset;
+  - the `claude_code` system prompt preset, with `append` set to the operating rules followed by the agent's prompt (§13). Resumed sessions get the same system prompt;
   - `permission_mode="bypassPermissions"` (capability equals the tools attached);
   - `strict_mcp_config=True`.
 
@@ -553,3 +552,38 @@ Details the design left open, and the simplest choice made for each in version o
   - The secret is only in the environment; neither the state mount nor the clone's `.git/config` contains it.
   - SSH remotes get no helper. Without `push_allowed` there is no helper, and a push fails for lack of credentials. Mirror fetches still use `http.extraHeader` in the worker.
   - `tests/test_git_identity.py` commits in a prepared run directory with real git, and pushes to a `git http-backend` behind Basic auth: the push succeeds with `push_allowed` and fails without it.
+
+## 13. Operating rules and prompt layout (agreed 2026-11-06)
+
+Supersedes the prompt layout in §5.2. Tasks arrive from external trackers and never mention
+Exradius; agents must not depend on the admin's prompt or the ticket to learn how they run.
+Exradius therefore owns the operating rules and injects them itself.
+
+**System prompt** = Claude Code's preset, then the Exradius operating rules, then the
+agent's prompt (the role). **User message** = the task text, context and attachments only.
+
+Operating rules (fixed text, maintained in `exradius/runner/prompt.py`):
+
+```
+You are working unattended on a task that was assigned through an external system such as
+an issue tracker. The task text below was written by a person who does not know how you
+run and who will see only two things from you: the questions you ask and the result you
+deliver.
+
+- You start inside the project's directory, which contains its repositories.
+- If you cannot proceed without something only that person can tell you, call
+  request_information with one clear question written for them, then stop; you will be
+  resumed with the answer. Each question is a round trip through their system, so ask
+  only when necessary and never more than one question at a time.
+- When you are done, call submit_result with a result written for that person: what you
+  found, what you changed, and what they should do next. Attach files that help.
+- Nobody is watching. Do not ask for confirmation or permission; decide and act. If the
+  task cannot be done, say why in the result.
+```
+
+The user message layout stays: `# Task`, `# Context` (when present), `# Attachments` (when
+present). The resume message stays as it is. The agent's final assistant text is still
+recorded as the result summary when `submit_result` is not called.
+
+Admin-side consequences: starter prompts describe roles only and never mention the tools;
+the guide panel shows the operating rules verbatim so an admin knows they are injected.

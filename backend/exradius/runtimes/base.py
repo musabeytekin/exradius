@@ -32,8 +32,12 @@ class RunSpec:
     working_dir: Path
     state_dir: Path
     prompt: str
+    """The first user message: the ticket (task, context, attachments)."""
     connections: list[ConnectionSpec]  # includes the built-in exradius server
     env: dict[str, str]
+    system_prompt: str = ""
+    """Appended to the runtime's own system prompt: the operating rules and the agent's
+    role (architecture §13). Applies to resumed sessions too."""
 
 
 @dataclass

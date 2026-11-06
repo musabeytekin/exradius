@@ -19,7 +19,7 @@ from typing import Any
 
 from exradius.runner.client import HttpRunApi, RunApi
 from exradius.runner.environment import RunnerEnvironment, isolate
-from exradius.runner.prompt import build_prompt, build_resume_message
+from exradius.runner.prompt import build_resume_message, build_system_prompt, build_task_message
 from exradius.runner.tools import SERVER_NAME, ExradiusTools
 from exradius.runtimes import ConnectionSpec, RunSpec, get_runtime
 from exradius.runtimes.base import PROBE_PREFIX
@@ -74,7 +74,8 @@ async def execute(
         run_id=run_id,
         working_dir=working_dir,
         state_dir=state_dir,
-        prompt=build_prompt(spec),
+        prompt=build_task_message(spec),
+        system_prompt=build_system_prompt(spec),
         connections=connections,
         env=environment.container,  # the agent gets the project's environment, not the runner's
     )
