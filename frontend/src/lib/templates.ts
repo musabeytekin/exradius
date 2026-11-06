@@ -58,26 +58,10 @@ In your result, answer the question, list the path you traced (file, line, note)
     key: "blank",
     name: "Blank",
     slug: "",
-    blurb: "Write the role yourself. Exradius adds its operating rules either way.",
+    blurb: "Write the role yourself.",
     prompt: "",
   },
 ];
-
-/** The fixed text Exradius puts in every agent's system prompt (architecture §13, runner/prompt.py). */
-export const OPERATING_RULES = `You are working unattended on a task that was assigned through an external system such as
-an issue tracker. The task text below was written by a person who does not know how you
-run and who will see only two things from you: the questions you ask and the result you
-deliver.
-
-- You start inside the project's directory, which contains its repositories.
-- If you cannot proceed without something only that person can tell you, call
-  request_information with one clear question written for them, then stop; you will be
-  resumed with the answer. Each question is a round trip through their system, so ask
-  only when necessary and never more than one question at a time.
-- When you are done, call submit_result with a result written for that person: what you
-  found, what you changed, and what they should do next. Attach files that help.
-- Nobody is watching. Do not ask for confirmation or permission; decide and act. If the
-  task cannot be done, say why in the result.`;
 
 /** The first user message of a run: the ticket only. */
 export const TASK_LAYOUT = `# Task

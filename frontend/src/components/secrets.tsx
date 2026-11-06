@@ -1,13 +1,15 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
+import { secretLabel } from "@/lib/catalog";
 import { cn } from "@/lib/cn";
 import { qk, useGlobalSecrets, useProjectSecrets } from "@/lib/queries";
 import { findRefs, insertRef, worstOf, type SecretIndex } from "@/lib/secretRefs";
 import { ENV_KEY_RE, secretKey } from "@/lib/slug";
+import { storeCredential } from "@/lib/credentials";
 import { toast } from "@/lib/toast";
 import type { Secret } from "@/lib/types";
-import { PickList, Segmented } from "./ui/controls";
+import { Segmented } from "./ui/controls";
 import { Icon } from "./ui/icons";
 import { Dialog, Popover } from "./ui/overlays";
 import { Button, Field, Input, Textarea } from "./ui/primitives";
@@ -86,7 +88,7 @@ function CreateSecretForm({
           </Field>
         )}
         <Field label="Key" htmlFor="secret-key" error={keyError} hint={pid ? "Exported into the run container's environment under this name." : "Global secrets are used only by reference: ${secret:NAME}."}>
-          <Input id="secret-key" mono value={key} onChange={(e) => setKey(secretKey(e.target.value))} placeholder="GITHUB_TOKEN" autoFocus={!defaultKey} invalid={!!keyError} />
+          <Input id="secret-key" mono value={key} onChange={(e) => setKey(secretKey(e.target.value))} placeholder="MY_API_KEY" autoFocus={!defaultKey} invalid={!!keyError} />
         </Field>
         <Field label="Value" htmlFor="secret-value" hint="Write-only. Paste it once; Exradius never returns it.">
           <Textarea
@@ -103,45 +105,6 @@ function CreateSecretForm({
         </Field>
       </div>
     </Dialog>
-  );
-}
-
-/** Pick list of secrets (project first, then global) with inline create. */
-export function SecretPicker({
-  projectId, projectSlug, value, onChange, noneLabel = "None (public repository)", defaultCreateKey, invalid, id,
-}: {
-  projectId: string; projectSlug?: string; value: string | null; onChange: (id: string | null) => void;
-  noneLabel?: string; defaultCreateKey?: string; invalid?: boolean; id?: string;
-}) {
-  const project = useProjectSecrets(projectId);
-  const globals = useGlobalSecrets();
-  const [creating, setCreating] = useState(false);
-  const options = [
-    ...(project.data ?? []).map((s) => ({ value: s.id, label: s.key, group: "This project" })),
-    ...(globals.data ?? []).map((s) => ({ value: s.id, label: s.key, group: "Global" })),
-  ];
-  return (
-    <>
-      <PickList
-        id={id}
-        mono
-        value={value}
-        onChange={onChange}
-        options={options}
-        noneLabel={noneLabel}
-        invalid={invalid}
-        actions={[{ key: "create", label: "Create a secret…", onSelect: () => setCreating(true) }]}
-      />
-      <CreateSecretDialog
-        open={creating}
-        onOpenChange={setCreating}
-        projectId={projectId}
-        projectSlug={projectSlug}
-        defaultKey={defaultCreateKey}
-        allowScopeChoice
-        onCreated={(s) => onChange(s.id)}
-      />
-    </>
   );
 }
 
@@ -217,8 +180,11 @@ export function SecretRefInput({
                   onClick={() => insert(n.name)}
                   className="flex h-8 w-full items-center justify-between gap-2 rounded-md px-2 text-left hover:bg-surface-2"
                 >
-                  <span className="font-mono text-[12.5px] text-fg">{n.name}</span>
-                  <span className="truncate text-2xs text-subtle">{n.scope === "global" ? "global" : n.where}</span>
+                  <span className="min-w-0 truncate">
+                    <span className="font-mono text-[12.5px] text-fg">{n.name}</span>
+                    {secretLabel(n.name) && <span className="ml-1.5 text-2xs text-subtle">{secretLabel(n.name)}</span>}
+                  </span>
+                  <span className="shrink-0 truncate text-2xs text-subtle">{n.scope === "global" ? "global" : n.where}</span>
                 </button>
               ))}
             </div>
@@ -261,5 +227,110 @@ export function SecretRefInput({
         }}
       />
     </div>
+  );
+}
+
+/** State of one labelled credential field: what was typed, and whether a saved value is being replaced. */
+export interface CredentialDraft {
+  value: string;
+  replacing: boolean;
+}
+
+/**
+ * A credential asked for by its label (catalog connections, repository tokens). The secret
+ * name it is stored under stays internal. When a value was saved earlier, the field shows
+ * that and offers Replace instead of an empty input.
+ */
+export function CredentialInput({
+  id, label, help, createUrl, saved, draft, onChange, error, autoFocus,
+}: {
+  id: string; label: string; help?: string; createUrl?: string;
+  /** A secret with this name already exists. */
+  saved: boolean;
+  draft: CredentialDraft; onChange: (d: CredentialDraft) => void; error?: string | null; autoFocus?: boolean;
+}) {
+  const editing = !saved || draft.replacing;
+  return (
+    <Field
+      label={label}
+      htmlFor={editing ? id : undefined}
+      error={editing ? error : null}
+      hint={help}
+      aside={createUrl && editing ? (
+        <a href={createUrl} target="_blank" rel="noreferrer noopener" className="inline-flex items-center gap-0.5 text-xs text-accent hover:underline">
+          Create one<Icon name="arrowUpRight" size={12} />
+        </a>
+      ) : undefined}
+    >
+      {editing ? (
+        <div className="flex gap-1.5">
+          <Input
+            id={id}
+            type="password"
+            mono
+            autoFocus={autoFocus}
+            autoComplete="new-password"
+            spellCheck={false}
+            value={draft.value}
+            invalid={!!error}
+            onChange={(e) => onChange({ ...draft, value: e.target.value })}
+            placeholder={saved ? "New value" : undefined}
+            className="min-w-0 flex-1"
+          />
+          {saved && <Button variant="ghost" onClick={() => onChange({ value: "", replacing: false })}>Keep saved</Button>}
+        </div>
+      ) : (
+        <div className="flex h-8 items-center gap-2 rounded-md border border-border bg-surface-2/50 px-2.5 text-sm">
+          <Icon name="lock" size={13} className="text-subtle" />
+          <span className="text-muted">Saved earlier</span>
+          <Button size="xs" variant="ghost" icon="refresh" className="ml-auto" onClick={() => onChange({ value: "", replacing: true })}>Replace</Button>
+        </div>
+      )}
+    </Field>
+  );
+}
+
+/** Ask for one token by its label and store it under `secretName` in the given scope. */
+export function TokenDialog({
+  label, title, help, createUrl, secretName, projectId, onClose, onSaved,
+}: {
+  label: string; title?: string; help?: string; createUrl?: string; secretName: string;
+  /** Scope: a project id, or null for a global secret. */
+  projectId: string | null;
+  onClose: () => void; onSaved: (s: Secret) => void;
+}) {
+  const qc = useQueryClient();
+  const project = useProjectSecrets(projectId);
+  const globals = useGlobalSecrets();
+  const existing = (projectId ? project.data : globals.data) ?? [];
+  const [draft, setDraft] = useState<CredentialDraft>({ value: "", replacing: true });
+  const save = useMutation({
+    mutationFn: () => storeCredential(projectId, secretName, draft.value, existing),
+    onSuccess: (s) => {
+      qc.invalidateQueries({ queryKey: projectId ? qk.projectSecrets(projectId) : qk.globalSecrets });
+      qc.invalidateQueries({ queryKey: qk.status });
+      toast.ok(`${label} saved`);
+      onSaved(s);
+      onClose();
+    },
+    onError: (e) => toast.err(`Could not save the ${label}`, e),
+  });
+  return (
+    <Dialog
+      open
+      onOpenChange={(o) => !o && onClose()}
+      title={title ?? `Add a ${label}`}
+      description="The value is encrypted at rest and never shown again."
+      onSubmit={() => draft.value && save.mutate()}
+      width={480}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" loading={save.isPending} disabled={!draft.value}>Save</Button>
+        </>
+      }
+    >
+      <CredentialInput id="token-value" label={label} help={help} createUrl={createUrl} saved={false} draft={draft} onChange={setDraft} autoFocus />
+    </Dialog>
   );
 }

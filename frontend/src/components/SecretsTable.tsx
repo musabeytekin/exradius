@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
+import { secretLabel } from "@/lib/catalog";
 import { useConfirm } from "@/lib/confirm";
 import { qk, useConnections, useGlobalSecrets, useProjectSecrets } from "@/lib/queries";
 import { findRefs, buildSecretIndex } from "@/lib/secretRefs";
@@ -43,7 +44,7 @@ export function SecretsTable({
     onSuccess: (_, s) => {
       qc.invalidateQueries({ queryKey: projectId ? qk.projectSecrets(projectId) : qk.globalSecrets });
       qc.invalidateQueries({ queryKey: qk.status });
-      toast.ok(`Secret ${s.key} deleted`);
+      toast.ok(`${secretLabel(s.key) ?? `Secret ${s.key}`} deleted`);
     },
     onError: (e) => toast.err("Could not delete the secret", e),
   });
@@ -65,7 +66,7 @@ export function SecretsTable({
         <Table.Root>
           <Table.Head>
             <tr>
-              <Table.Th>Key</Table.Th>
+              <Table.Th>Name</Table.Th>
               <Table.Th>Value</Table.Th>
               <Table.Th>Referenced by</Table.Th>
               <Table.Th />
@@ -74,7 +75,16 @@ export function SecretsTable({
           <tbody>
             {secrets.data.map((s) => (
               <Table.Row key={s.id}>
-                <Table.Td><Mono className="font-medium">{s.key}</Mono></Table.Td>
+                <Table.Td>
+                  {secretLabel(s.key) ? (
+                    <div className="flex flex-col">
+                      <span className="font-medium">{secretLabel(s.key)}</span>
+                      <Mono className="text-[11px] text-subtle">{s.key}</Mono>
+                    </div>
+                  ) : (
+                    <Mono className="font-medium">{s.key}</Mono>
+                  )}
+                </Table.Td>
                 <Table.Td>
                   <span className="inline-flex items-center gap-1.5 text-xs text-subtle">
                     <Icon name="lock" size={12} />
@@ -97,11 +107,11 @@ export function SecretsTable({
                     variant="ghost"
                     square
                     icon="trash"
-                    aria-label={`Delete ${s.key}`}
+                    aria-label={`Delete ${secretLabel(s.key) ?? s.key}`}
                     onClick={async () => {
                       const users = usedBy.get(s.key);
                       const ok = await confirm({
-                        title: `Delete ${s.key}?`,
+                        title: `Delete ${secretLabel(s.key) ?? s.key}?`,
                         description: users?.length
                           ? `Connections ${users.join(", ")} reference it and will fail to start where nothing else resolves the name. The value cannot be recovered.`
                           : "The value cannot be recovered.",
@@ -127,7 +137,7 @@ function ReplaceDialog({ secret, projectId, onClose }: { secret: Secret; project
   const replace = useMutation({
     mutationFn: () => api.secrets.replace(projectId, secret.id, value),
     onSuccess: () => {
-      toast.ok(`${secret.key} replaced`, "Runs started from now on use the new value.");
+      toast.ok(`${secretLabel(secret.key) ?? secret.key} replaced`, "Runs started from now on use the new value.");
       onClose();
     },
     onError: (e) => toast.err("Could not replace the value", e),
@@ -136,7 +146,7 @@ function ReplaceDialog({ secret, projectId, onClose }: { secret: Secret; project
     <Dialog
       open
       onOpenChange={(o) => !o && onClose()}
-      title={<>Replace <span className="font-mono">{secret.key}</span></>}
+      title={secretLabel(secret.key) ? `Replace the ${secretLabel(secret.key)}` : <>Replace <span className="font-mono">{secret.key}</span></>}
       description="The current value is overwritten. It is never shown, so there is nothing to compare against."
       onSubmit={() => value && replace.mutate()}
       footer={

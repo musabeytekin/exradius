@@ -2,6 +2,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { KeyValueEditor } from "@/components/KeyValueEditor";
+import { CredentialInput, type CredentialDraft } from "@/components/secrets";
+import { storeCredential } from "@/lib/credentials";
 import { newRow, rowsFrom, rowsTo, type Row } from "@/lib/rows";
 import { useSecretIndex } from "@/lib/useSecretIndex";
 import { Checkbox, PickList, Segmented, SuggestInput } from "@/components/ui/controls";
@@ -10,7 +12,7 @@ import { Icon } from "@/components/ui/icons";
 import { Dialog, Menu, Sheet, Tooltip } from "@/components/ui/overlays";
 import { Banner, Button, Card, Chip, EmptyState, Field, Input, Mono, PageHeader, SkeletonRows, Spinner, Textarea } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
-import { CATALOG, COMMAND_SUGGESTIONS, fieldValue, parseMcpServers, type CatalogEntry, type ImportedServer } from "@/lib/catalog";
+import { CATALOG, COMMAND_SUGGESTIONS, credentialFields, fieldValue, parseMcpServers, type CatalogEntry, type ImportedServer } from "@/lib/catalog";
 import { cn } from "@/lib/cn";
 import { useConfirm } from "@/lib/confirm";
 import { pretty, relativeTime } from "@/lib/format";
@@ -186,6 +188,8 @@ interface Draft {
   url: string;
   env: Row[];
   headers: Row[];
+  /** Catalog credentials by secret name; their env and header entries are not in the rows. */
+  credentials: Record<string, CredentialDraft>;
 }
 
 function draftFrom(c: Connection | null): Draft {
@@ -200,6 +204,7 @@ function draftFrom(c: Connection | null): Draft {
     url: c?.url ?? "",
     env: rowsFrom(c?.env ?? {}),
     headers: rowsFrom(c?.headers ?? {}),
+    credentials: {},
   };
 }
 
@@ -213,12 +218,20 @@ function draftFromCatalog(e: CatalogEntry): Draft {
     command: e.command ?? "",
     args: (e.args ?? []).join("\n"),
     url: e.url ?? "",
-    env: (e.env ?? []).map((f) => newRow(f.key, fieldValue(f))),
-    headers: (e.headers ?? []).map((f) => newRow(f.key, fieldValue(f))),
+    env: (e.env ?? []).filter((f) => !f.secret).map((f) => newRow(f.key, fieldValue(f))),
+    headers: (e.headers ?? []).filter((f) => !f.secret).map((f) => newRow(f.key, fieldValue(f))),
+    credentials: Object.fromEntries(credentialFields(e).map((f) => [f.secret, { value: "", replacing: false }])),
   };
 }
 
+function catalogOf(d: Draft): CatalogEntry | undefined {
+  return CATALOG.find((e) => e.key === d.catalog);
+}
+
 function bodyOf(d: Draft): ConnectionIn {
+  const entry = catalogOf(d);
+  const creds = entry ? credentialFields(entry) : [];
+  const credsOf = (target: "env" | "headers") => Object.fromEntries(creds.filter((f) => f.target === target).map((f) => [f.key, fieldValue(f)]));
   return {
     name: d.name.trim(),
     slug: d.slugTouched ? d.slug : slugify(d.name),
@@ -226,8 +239,8 @@ function bodyOf(d: Draft): ConnectionIn {
     command: d.transport === "stdio" ? d.command.trim() || null : null,
     args: d.transport === "stdio" ? d.args.split("\n").map((a) => a.trim()).filter(Boolean) : [],
     url: d.transport === "http" ? d.url.trim() || null : null,
-    env: rowsTo(d.env),
-    headers: d.transport === "http" ? rowsTo(d.headers) : {},
+    env: { ...rowsTo(d.env), ...credsOf("env") },
+    headers: d.transport === "http" ? { ...rowsTo(d.headers), ...credsOf("headers") } : {},
   };
 }
 
@@ -246,12 +259,24 @@ function ConnectionSheet({ connection, existing, onClose }: { connection: Connec
   const body = bodyOf(draft);
   const slugTaken = existing.some((c) => c.slug === body.slug && c.id !== saved?.id);
   const slugError = !body.slug ? null : body.slug === "exradius" ? "exradius is reserved for the built-in server." : !SLUG_RE.test(body.slug) ? "Lowercase letters, digits, dot, dash and underscore." : slugTaken ? "Another connection uses this slug." : null;
-  const validations = useMemo(() => validateFields({ ...body.env, ...body.headers }, index), [body.env, body.headers, index]);
+  // Only what the user wrote is validated; catalog credentials are created on save.
+  const rowEnv = rowsTo(draft.env);
+  const rowHeaders = draft.transport === "http" ? rowsTo(draft.headers) : {};
+  const validations = validateFields({ ...rowEnv, ...rowHeaders }, index);
   const refs = summarize(validations);
-  const catalogEntry = CATALOG.find((e) => e.key === draft.catalog);
-  const createKeys = Object.fromEntries([...(catalogEntry?.env ?? []), ...(catalogEntry?.headers ?? [])].filter((f) => f.secret).map((f) => [f.key, f.secret!]));
+  const catalogEntry = catalogOf(draft);
+  const creds = (catalogEntry ? credentialFields(catalogEntry) : []).filter((f) => f.target === "env" || draft.transport === "http");
+  const savedCred = (name: string) => globals.some((s) => s.key === name);
+  const credError = (f: (typeof creds)[number]) => {
+    const c = draft.credentials[f.secret];
+    const needed = !savedCred(f.secret) || c?.replacing;
+    return needed && !c?.value.trim() ? `Enter the ${f.label}.` : null;
+  };
+  const [showCredErrors, setShowCredErrors] = useState(false);
+  const credMissing = creds.filter((f) => credError(f));
   const missingTarget = draft.transport === "stdio" ? !body.command : !body.url;
   const canSave = !!body.name && !!body.slug && !slugError && !missingTarget && refs.invalid.length === 0;
+  const setCred = (name: string, c: CredentialDraft) => setDraft((d) => ({ ...d, credentials: { ...d.credentials, [name]: c } }));
 
   const insertNames = [
     ...globals.map((s) => ({ name: s.key, scope: "global" as const })),
@@ -259,9 +284,24 @@ function ConnectionSheet({ connection, existing, onClose }: { connection: Connec
   ];
 
   const saveAndTest = async () => {
+    if (credMissing.length) {
+      setShowCredErrors(true);
+      return;
+    }
     setBusy("save");
     setResult(null);
     try {
+      // Catalog credentials first: the test needs them.
+      for (const f of creds) {
+        const v = draft.credentials[f.secret]?.value.trim();
+        if (!v) continue;
+        await storeCredential(null, f.secret, v, globals);
+        setCred(f.secret, { value: "", replacing: false });
+      }
+      if (creds.length) {
+        await qc.invalidateQueries({ queryKey: qk.globalSecrets });
+        qc.invalidateQueries({ queryKey: qk.status });
+      }
       const c = saved ? await api.connections.update(saved.id, body) : await api.connections.create(body);
       setSaved(c);
       qc.invalidateQueries({ queryKey: qk.connections });
@@ -296,7 +336,7 @@ function ConnectionSheet({ connection, existing, onClose }: { connection: Connec
     >
       {picking ? (
         <div className="px-6 py-5">
-          <p className="mb-4 text-sm text-muted">Start from a common server. Picking one fills the command and lists the secrets it needs.</p>
+          <p className="mb-4 text-sm text-muted">Start from a common server. Picking one fills the command and asks for the credentials it needs.</p>
           <div className="grid grid-cols-3 gap-2">
             {CATALOG.map((e) => (
               <button
@@ -318,10 +358,10 @@ function ConnectionSheet({ connection, existing, onClose }: { connection: Connec
                     <Icon name="alert" size={10} />needs {e.requires} in the image
                   </span>
                 )}
-                {[...(e.env ?? []), ...(e.headers ?? [])].some((f) => f.secret) && (
+                {credentialFields(e).length > 0 && (
                   <span className="mt-1 flex flex-wrap gap-1">
-                    {[...(e.env ?? []), ...(e.headers ?? [])].filter((f) => f.secret).map((f) => (
-                      <span key={f.secret} className="inline-flex items-center gap-1 font-mono text-[10.5px] text-subtle"><Icon name="key" size={10} />{f.secret}</span>
+                    {credentialFields(e).map((f) => (
+                      <span key={f.secret} className="inline-flex items-center gap-1 text-[10.5px] text-subtle"><Icon name="key" size={10} />{f.label}</span>
                     ))}
                   </span>
                 )}
@@ -379,12 +419,36 @@ function ConnectionSheet({ connection, existing, onClose }: { connection: Connec
           ) : (
             <Field label="URL"><Input mono value={draft.url} onChange={(e) => set({ url: e.target.value })} placeholder="https://mcp.example.com/mcp" spellCheck={false} /></Field>
           )}
-          <Field label="Environment" hint={<>Use <code className="font-mono">{"${secret:NAME}"}</code> for credentials. The key button inserts one.</>}>
-            <KeyValueEditor rows={draft.env} onChange={(env) => set({ env })} index={index} names={insertNames} keyPlaceholder="VARIABLE" valuePlaceholder="value or ${secret:NAME}" createKeys={createKeys} />
+          {creds.length > 0 && (
+            <div className="flex flex-col gap-3 rounded-lg border border-border p-3">
+              <div>
+                <div className="text-sm font-medium">Credentials</div>
+                <div className="text-xs text-muted">Stored encrypted and shared by every connection and repository that needs them.</div>
+              </div>
+              {creds.map((f) => (
+                <CredentialInput
+                  key={f.secret}
+                  id={`cred-${f.secret}`}
+                  label={f.label}
+                  help={f.help}
+                  createUrl={f.createUrl}
+                  saved={savedCred(f.secret)}
+                  draft={draft.credentials[f.secret] ?? { value: "", replacing: false }}
+                  onChange={(c) => setCred(f.secret, c)}
+                  error={showCredErrors ? credError(f) : null}
+                />
+              ))}
+            </div>
+          )}
+          <Field
+            label="Environment"
+            hint={catalogEntry ? undefined : <>Use <code className="font-mono">{"${secret:NAME}"}</code> for credentials. The key button inserts one.</>}
+          >
+            <KeyValueEditor rows={draft.env} onChange={(env) => set({ env })} index={index} names={insertNames} keyPlaceholder="VARIABLE" valuePlaceholder="value or ${secret:NAME}" />
           </Field>
           {draft.transport === "http" && (
             <Field label="Headers">
-              <KeyValueEditor rows={draft.headers} onChange={(headers) => set({ headers })} index={index} names={insertNames} keyPlaceholder="Authorization" valuePlaceholder="Bearer ${secret:TOKEN}" createKeys={createKeys} addLabel="Add header" />
+              <KeyValueEditor rows={draft.headers} onChange={(headers) => set({ headers })} index={index} names={insertNames} keyPlaceholder="Authorization" valuePlaceholder="Bearer ${secret:TOKEN}" addLabel="Add header" />
             </Field>
           )}
           {(refs.unknown.length > 0 || refs.projectOnly.length > 0) && (

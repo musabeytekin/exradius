@@ -83,8 +83,12 @@ The project page has tabs: Repositories, Environment, Secrets, Agents, Verify.
 
 - **Catalog** of common MCP servers (static, in the frontend): GitHub, GitLab, filesystem,
   Postgres, Slack, Sentry, Linear, Jira, fetch, Playwright, and "custom". Picking one
-  fills the command and args and lists the secrets it needs, each with an inline "create
-  secret" that inserts `${secret:NAME}`.
+  fills the command and args and asks for the credentials it needs by label ("GitHub
+  token", "Jira API token"), each with one line on the scopes it needs and a "Create one"
+  link. On save the panel stores each as a global secret under an internal name and writes
+  `${secret:NAME}` into the env or header value; the user never sees or types the name.
+  A credential saved earlier shows as "Saved earlier" with Replace. Custom connections
+  still reference secrets by name.
 - **Import JSON**: paste a standard `mcpServers` block; each entry becomes a connection.
 - **Test** is part of the form: saving runs the test and shows the tool list, or the error.
 - **Reference check**: the form resolves every `${secret:NAME}` against existing global
@@ -251,6 +255,10 @@ derived default or an inline "create" that returns to the form. Assistance stops
 no autocomplete for prose, no wizards for one-field forms, no tooltips on self-explanatory
 fields.
 
+Credentials follow the same rule: the user types a secret's value, never its name where
+the panel can choose one. A form that needs a known credential asks for it by its label
+and stores it under an internal name.
+
 | Form | Field | Assistance |
 |---|---|---|
 | Project | slug | Derived from the name as it is typed; editable; uniqueness checked live. |
@@ -258,10 +266,10 @@ fields.
 | Project | setup commands | Free text, one per line. Chips offer common commands by ecosystem (`npm ci`, `pnpm install`, `uv sync`, `pip install -r requirements.txt`, `go mod download`, `bundle install`, `composer install`); a chip appends a line. The verify tab shows the result. |
 | Repository | name | Derived from the URL's last path segment without `.git`; editable. |
 | Repository | branch | After the check runs: pick list of the branches it returned, default branch preselected. Before the check: a text field with "run check to list branches". |
-| Repository | auth secret | Pick list of secrets (project ones first, then global) plus "create a secret" inline. |
-| Secret | key | Free text, uppercase enforced, uniqueness checked live. Where a secret is created inline from another form, the key is prefilled from context (for example `GITHUB_TOKEN` from the catalog entry). |
+| Repository | auth secret | Pick list of secrets by label. On github.com and gitlab.com the catalog's global token ("GitHub token") comes first, the same one connections use; when it does not exist, "Add a GitHub token" asks for it by label. Other hosts add a project "Repository token". |
+| Secret | key | Free text, uppercase enforced, uniqueness checked live, only where the user creates a secret for their own references (Secrets pages, custom connections). Catalog connections and repositories ask for a credential by label; its name is internal. The Secrets pages show the label for names the catalog knows, with the key as secondary text. |
 | Connection | transport | Two choices, shown as a segmented control, not a dropdown. |
-| Connection | catalog entry | Picking one fills slug, name, transport, command, args, and the env or header keys it needs. |
+| Connection | catalog entry | Picking one fills slug, name, transport, command, args, and the env or header keys it needs; credentials become labelled password fields (§3.3). |
 | Connection | command | For stdio: suggestions `npx`, `uvx`, `docker`, `node`, `python`; free text allowed. |
 | Connection | env and header values | A value field with an "insert secret" control that inserts `${secret:NAME}` from a pick list of existing secrets, plus "create a secret" inline. Unknown references are flagged on the field. |
 | Agent | slug | Derived from the name; editable. |

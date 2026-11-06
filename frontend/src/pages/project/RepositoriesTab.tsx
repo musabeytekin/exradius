@@ -1,18 +1,19 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { SecretPicker } from "@/components/secrets";
+import { TokenDialog } from "@/components/secrets";
 import { Checkbox, PickList, Table } from "@/components/ui/controls";
 import { Icon } from "@/components/ui/icons";
 import { Dialog, Tooltip } from "@/components/ui/overlays";
 import { Banner, Button, Card, CardHeader, Chip, EmptyState, Field, Input, Mono, SkeletonRows, Spinner } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
+import { REPO_TOKEN_SECRET, repoCredential, secretLabel } from "@/lib/catalog";
 import { cn } from "@/lib/cn";
 import { useConfirm } from "@/lib/confirm";
 import { relativeTime } from "@/lib/format";
 import { qk, useGlobalSecrets, useProjectSecrets, useRepositories } from "@/lib/queries";
 import { FOLDER_RE, repoNameFromUrl } from "@/lib/slug";
 import { toast } from "@/lib/toast";
-import type { Project, Repository, RepositoryCheck } from "@/lib/types";
+import type { Project, Repository, RepositoryCheck, Secret } from "@/lib/types";
 
 export function RepositoriesTab({ project }: { project: Project }) {
   const repos = useRepositories(project.id);
@@ -22,8 +23,10 @@ export function RepositoriesTab({ project }: { project: Project }) {
   const [checking, setChecking] = useState<Set<string>>(new Set());
   const qc = useQueryClient();
   const confirm = useConfirm();
-  const secretName = (id: string | null) =>
-    id ? [...(projectSecrets.data ?? []), ...(globals.data ?? [])].find((s) => s.id === id)?.key ?? "unknown secret" : null;
+  const secretName = (id: string) => {
+    const key = [...(projectSecrets.data ?? []), ...(globals.data ?? [])].find((s) => s.id === id)?.key;
+    return key ? secretLabel(key) ?? key : "unknown secret";
+  };
 
   const runCheck = async (r: Repository) => {
     setChecking((s) => new Set(s).add(r.id));
@@ -91,7 +94,7 @@ export function RepositoriesTab({ project }: { project: Project }) {
                 </Table.Td>
                 <Table.Td>
                   {r.auth_secret_id ? (
-                    <span className="inline-flex items-center gap-1.5 font-mono text-xs text-muted">
+                    <span className="inline-flex items-center gap-1.5 text-xs text-muted">
                       <Icon name="lock" size={12} />{secretName(r.auth_secret_id)}
                       {r.push_allowed && <Chip tone="accent">push</Chip>}
                     </span>
@@ -251,13 +254,7 @@ function RepositoryDialog({ project, repo, existing, onClose }: { project: Proje
           </Field>
         </div>
         <Field label="Credential" hint={pushAllowed ? "A token with write access to this repository. Never written into the clone." : "A token with read access. Used to fetch the mirror; never written into the clone."}>
-          <SecretPicker
-            projectId={project.id}
-            projectSlug={project.slug}
-            value={secretId}
-            onChange={setSecretId}
-            defaultCreateKey={/github\.com/.test(url) ? "GITHUB_TOKEN" : /gitlab/.test(url) ? "GITLAB_TOKEN" : "GIT_TOKEN"}
-          />
+          <CredentialPicker project={project} url={url} value={secretId} onChange={setSecretId} />
         </Field>
         <label className={cn("flex items-start gap-3 rounded-lg border border-border px-3 py-2.5", secretId ? "cursor-pointer hover:bg-surface-2/50" : "opacity-60")}>
           <Checkbox checked={pushAllowed} disabled={!secretId} onChange={setPush} aria-label="Allow push" />
@@ -288,5 +285,64 @@ function RepositoryDialog({ project, repo, existing, onClose }: { project: Proje
         )}
       </div>
     </Dialog>
+  );
+}
+
+const REPO_TOKEN_HELP = "A token the git host accepts over HTTPS: read access, or write access if push is allowed.";
+
+/** First free name for another repository token in a project: GIT_TOKEN, GIT_TOKEN_2, … */
+function freeRepoTokenName(taken: Secret[]): string {
+  const keys = new Set(taken.map((s) => s.key));
+  if (!keys.has(REPO_TOKEN_SECRET)) return REPO_TOKEN_SECRET;
+  let n = 2;
+  while (keys.has(`${REPO_TOKEN_SECRET}_${n}`)) n++;
+  return `${REPO_TOKEN_SECRET}_${n}`;
+}
+
+/**
+ * The repository credential, picked by label. On github.com and gitlab.com the catalog's
+ * global token comes first (the one GitHub and GitLab connections use), and adding one
+ * asks for that token by name. Other hosts add a project "Repository token".
+ */
+function CredentialPicker({ project, url, value, onChange }: { project: Project; url: string; value: string | null; onChange: (id: string | null) => void }) {
+  const projectSecrets = useProjectSecrets(project.id);
+  const globals = useGlobalSecrets();
+  const [adding, setAdding] = useState(false);
+  const known = repoCredential(url);
+  const shared = known ? globals.data?.find((s) => s.key === known.secret) : undefined;
+  const option = (s: Secret, group: string) => {
+    const label = secretLabel(s.key);
+    return { value: s.id, label: label ?? s.key, text: label ?? s.key, meta: label ? undefined : "custom", group };
+  };
+  const options = [
+    ...(shared && known ? [{ value: shared.id, label: known.label, text: known.label, description: "Saved earlier; also used by connections", group: "Suggested" }] : []),
+    ...(projectSecrets.data ?? []).map((s) => option(s, "This project")),
+    ...(globals.data ?? []).filter((s) => s.id !== shared?.id).map((s) => option(s, "Global")),
+  ];
+  const addLabel = known ? known.label : "repository token";
+  return (
+    <>
+      <PickList
+        id="repo-credential"
+        value={value}
+        onChange={onChange}
+        options={options}
+        noneLabel="None (public repository)"
+        actions={known && shared ? [] : [{ key: "add", label: `Add a ${addLabel}…`, onSelect: () => setAdding(true) }]}
+      />
+      {adding && (
+        <TokenDialog
+          label={known ? known.label : "Repository token"}
+          title={known ? undefined : "Add a repository token"}
+          help={known ? known.help : REPO_TOKEN_HELP}
+          createUrl={known?.createUrl}
+          // The catalog token is global, so connections reuse it; others stay with the project.
+          secretName={known ? known.secret : freeRepoTokenName(projectSecrets.data ?? [])}
+          projectId={known ? null : project.id}
+          onClose={() => setAdding(false)}
+          onSaved={(s) => onChange(s.id)}
+        />
+      )}
+    </>
   );
 }

@@ -15,7 +15,7 @@ import { qk, useAgents, useConnections, useProjects, useProviders, useRuntimes }
 import { SLUG_RE, slugify } from "@/lib/slug";
 import { emailError, needsEmail } from "@/lib/identity";
 import { runtimeAccepts } from "@/lib/providers";
-import { OPERATING_RULES, TASK_LAYOUT, TEMPLATES } from "@/lib/templates";
+import { TASK_LAYOUT, TEMPLATES } from "@/lib/templates";
 import { toast } from "@/lib/toast";
 import type { Agent, Connection } from "@/lib/types";
 
@@ -293,7 +293,7 @@ function AgentEditor({ agent }: { agent: Agent | null }) {
           <Card>
             <CardHeader
               title="Prompt"
-              description="The agent's role. Exradius adds its operating rules before it; see the guide."
+              description="Describe the agent's role and how it should work. It already knows how to ask questions, report results and use git."
               actions={<span className="text-xs tabular text-subtle">{prompt.length.toLocaleString()} chars</span>}
             />
             <div className="flex flex-wrap gap-1.5 border-b border-border px-4 py-2.5">
@@ -381,13 +381,6 @@ function ConnectionsChecklist({ all, selected, onChange }: { all: Connection[]; 
 function GuidePanel({ connections }: { connections: Connection[] }) {
   return (
     <aside className="sticky top-6 flex max-h-[calc(100vh-48px)] flex-col gap-4 self-start overflow-y-auto">
-      <Card>
-        <CardHeader title="Exradius adds these rules to every agent" description="System prompt: Claude Code's preset, then these rules, then your prompt." />
-        <div className="p-3">
-          <CodeBlock code={OPERATING_RULES} wrap />
-          <p className="mt-2 text-xs text-muted">So your prompt only needs the role. It does not need to explain questions or results.</p>
-        </div>
-      </Card>
       <Card>
         <CardHeader title="What the agent receives" description="The first message of a run: the task as it arrived." />
         <div className="p-3">

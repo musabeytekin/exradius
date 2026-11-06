@@ -15,8 +15,8 @@ export function SecretsPage() {
         title="Secrets"
         openCreate={!!create}
         createKey={create && create !== "1" ? create : undefined}
-        description={<>Referenced as <code className="font-mono">{"${secret:NAME}"}</code> in connection env and header values. A project secret with the same name wins.</>}
-        emptyHint={<>Tokens that connections in every project reference, such as <code className="font-mono text-xs">GITHUB_TOKEN</code>.</>}
+        description={<>Catalog connections and repositories create these for you. Custom connections reference them by name as <code className="font-mono">{"${secret:NAME}"}</code>; a project secret with the same name wins.</>}
+        emptyHint="Tokens that catalog connections and repositories use. Adding a GitHub or Jira connection creates them for you."
       />
     </>
   );
