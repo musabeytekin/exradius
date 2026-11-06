@@ -128,7 +128,7 @@ def test_exactly_one_default(admin, sync_db):
 
 def test_delete_refusals(admin):
     default, other = create(admin), create(admin, **OAUTH)
-    agent = admin.post("/api/agents", json={"slug": "a", "name": "A", "provider_id": other["id"]}).json()
+    agent = admin.post("/api/agents", json={"slug": "a", "name": "A", "identity_email": "a@agents.example", "provider_id": other["id"]}).json()
 
     refused = admin.delete(f"/api/providers/{other['id']}")
     assert refused.status_code == 409 and "used by agents a" in refused.json()["detail"]
@@ -144,9 +144,9 @@ def test_delete_refusals(admin):
 
 def test_agent_count_includes_agents_on_the_default(admin):
     default, other = create(admin), create(admin, **OAUTH)
-    admin.post("/api/agents", json={"slug": "a", "name": "A"})
-    admin.post("/api/agents", json={"slug": "b", "name": "B", "provider_id": other["id"]})
-    admin.post("/api/agents", json={"slug": "c", "name": "C", "provider_id": default["id"]})
+    admin.post("/api/agents", json={"slug": "a", "name": "A", "identity_email": "a@agents.example"})
+    admin.post("/api/agents", json={"slug": "b", "name": "B", "identity_email": "b@agents.example", "provider_id": other["id"]})
+    admin.post("/api/agents", json={"slug": "c", "name": "C", "identity_email": "c@agents.example", "provider_id": default["id"]})
     counts = {slug: p["agent_count"] for slug, p in providers(admin).items()}
     assert counts == {"anthropic": 2, "subscription": 1}
 
@@ -231,9 +231,9 @@ def test_oauth_test_is_handed_to_a_worker(admin, control, sync_db):
 
 def test_agent_provider_id(admin):
     provider = create(admin)
-    agent = admin.post("/api/agents", json={"slug": "a", "name": "A"}).json()
+    agent = admin.post("/api/agents", json={"slug": "a", "name": "A", "identity_email": "a@agents.example"}).json()
     assert agent["provider_id"] is None
-    assert admin.post("/api/agents", json={"slug": "b", "name": "B", "provider_id": str(uuid.uuid4())}).status_code == 422
+    assert admin.post("/api/agents", json={"slug": "b", "name": "B", "identity_email": "b@agents.example", "provider_id": str(uuid.uuid4())}).status_code == 422
     updated = admin.patch(f"/api/agents/{agent['id']}", json={"provider_id": provider["id"]}).json()
     assert updated["provider_id"] == provider["id"]
     assert admin.get(f"/api/agents/{agent['id']}").json()["provider_id"] == provider["id"]

@@ -111,7 +111,7 @@ def setup_configuration(admin) -> dict:
     ).json()
     agent = admin.post(
         "/api/agents",
-        json={"slug": "bug-fixer", "name": "Bug fixer", "prompt": "You fix bugs.",
+        json={"slug": "bug-fixer", "name": "Bug fixer", "prompt": "You fix bugs.", "identity_email": "bug-fixer@agents.example",
               "connection_ids": [docs["id"], sentry["id"]]},
     ).json()
     link = admin.post(

@@ -87,6 +87,11 @@ async def _repo(session, project_id: uuid.UUID, repo_id: uuid.UUID) -> Repositor
     return repo
 
 
+def _check_push(repo_or_body) -> None:
+    if repo_or_body.push_allowed and not repo_or_body.auth_secret_id:
+        raise HTTPException(422, "push_allowed needs an auth secret (auth_secret_id)")
+
+
 async def _check_auth_secret(session, project_id: uuid.UUID, secret_id: uuid.UUID | None) -> None:
     if secret_id is None:
         return
@@ -105,6 +110,7 @@ async def list_repositories(project_id: uuid.UUID, session: DB, _: Admin):
 async def create_repository(project_id: uuid.UUID, body: s.RepositoryIn, session: DB, _: Admin):
     await get_or_404(session, Project, project_id)
     await _check_auth_secret(session, project_id, body.auth_secret_id)
+    _check_push(body)
     repo = Repository(project_id=project_id, **body.model_dump())
     session.add(repo)
     await session.commit()
@@ -118,7 +124,10 @@ async def update_repository(
     repo = await _repo(session, project_id, repo_id)
     await _check_auth_secret(session, project_id, body.auth_secret_id)
     before = (repo.url, repo.auth_secret_id)
+    if body.push_allowed is None and "push_allowed" in body.model_fields_set:
+        body.push_allowed = False
     apply_update(repo, body)
+    _check_push(repo)
     if (repo.url, repo.auth_secret_id) != before:
         repo.last_check = None
     await session.commit()
@@ -381,6 +390,8 @@ def _agent_out(agent: Agent) -> s.AgentOut:
         created_at=agent.created_at,
         connection_ids=[c.id for c in agent.connections],
         provider_id=agent.provider_id,
+        identity_name=agent.identity_name,
+        identity_email=agent.identity_email,
     )
 
 
@@ -411,7 +422,8 @@ async def list_agents(session: DB, _: Admin):
 @router.post("/agents", response_model=s.AgentOut, status_code=201)
 async def create_agent(body: s.AgentIn, session: DB, _: Admin):
     await _check_provider(session, body.provider_id, body.runtime)
-    agent = Agent(**body.model_dump(exclude={"connection_ids"}))
+    agent = Agent(**body.model_dump(exclude={"connection_ids", "identity_name"}))
+    agent.identity_name = body.identity_name or body.name
     agent.connections = await _connections(session, body.connection_ids)
     session.add(agent)
     await session.commit()
@@ -429,6 +441,9 @@ async def update_agent(agent_id: uuid.UUID, body: s.AgentUpdate, session: DB, _:
     data = body.model_dump(exclude_unset=True)
     if "connection_ids" in data:
         agent.connections = await _connections(session, data.pop("connection_ids") or [])
+    for key in ("identity_name", "identity_email"):
+        if key in data and data[key] is None:
+            data.pop(key)  # required columns: null means "unchanged"
     if "provider_id" in data or "runtime" in data:
         await _check_provider(session, data.get("provider_id", agent.provider_id), data.get("runtime") or agent.runtime)
     for key, value in data.items():

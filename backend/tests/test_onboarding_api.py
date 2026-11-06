@@ -205,7 +205,7 @@ def test_resolved_attachment_shows_references_not_values(admin):
 
 def test_resolved_requires_attachment(admin):
     cfg = setup_configuration(admin)
-    loner = admin.post("/api/agents", json={"slug": "loner", "name": "L"}).json()
+    loner = admin.post("/api/agents", json={"slug": "loner", "name": "L", "identity_email": "loner@agents.example"}).json()
     assert admin.get(f"/api/projects/{cfg['project']['id']}/agents/{loner['id']}/resolved").status_code == 404
 
 

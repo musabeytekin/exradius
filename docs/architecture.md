@@ -245,11 +245,12 @@ A cancelled run that was `waiting_for_input` also frees its directory. There is 
 
 ```
 projects          id, slug, name, image, setup_commands[], created_at
-repositories      id, project_id, name (folder), url, branch, auth_secret_id
+repositories      id, project_id, name (folder), url, branch, auth_secret_id, push_allowed
 env_vars          id, project_id, key, value
 secrets           id, project_id (nullable = global), key, value_encrypted
 connections       id, slug, name, transport (stdio|http), command, args[], url, env (json, may reference secrets by name)
-agents            id, slug, name, prompt, runtime (enum), provider_id (nullable = default), created_at
+agents            id, slug, name, prompt, runtime (enum), provider_id (nullable = default),
+                  identity_name, identity_email, created_at
 providers         id, slug, name, kind, auth_method, credential_encrypted, settings (json),
                   is_default, last_test (json), created_at, updated_at
 agent_connections agent_id, connection_id
@@ -528,3 +529,27 @@ Details the design left open, and the simplest choice made for each in version o
   - The only other variables are the SDK's own markers (`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_AGENT_SDK_VERSION`, `CLAUDE_CODE_SDK_READS_SESSION_STATE`, `PWD`).
   - The bundle is never on `PATH`, so `python`, `node`, `cargo` or `mvn` are the project image's.
   - `tests/test_runner_environment.py` checks this through the real SDK transport against a fake CLI that records its environment. A Docker test checks that a project `PYTHONPATH` holding an `exradius` package, `sitecustomize.py` and `json.py` does not affect the bundle's runner.
+
+**Agent identity** (`docs/agent-identity.md`, `exradius/worker/git_identity.py`)
+
+- **Model.**
+  - `agents.identity_name` defaults to the agent's name when it is created; renaming the agent later does not change it.
+  - `agents.identity_email` is required on create. Migration 0006 backfilled existing agents with their name and `<slug>@exradius.invalid`.
+  - Both are validated as git idents: no angle brackets, no control characters, and an `x@y` email.
+  - `repositories.push_allowed` (default false) needs an auth secret. Creating or updating a repository so that it would push without one answers 422.
+- **At every run container start** (first start and each resume) the worker adds:
+  - `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`, `EXRADIUS_AGENT` (slug) and `EXRADIUS_TASK_ID`;
+  - `GIT_CONFIG_GLOBAL=<state>/git/config`. These override project variables of the same names.
+  - Setup containers and the provider probe get none of this: they have no agent or task, and the probe has no state mount.
+- **Global git config in the state mount.**
+  - `$HOME` is a tmpfs that starts empty in every container, so the run's global config lives at `<state>/git/config`, named by `GIT_CONFIG_GLOBAL` (git 2.32 or later; Ubuntu 22.04 and Debian bookworm images have it). With older git, only the identity variables apply.
+  - The worker creates `config` once with just `[include] path = exradius.gitconfig`, and rewrites `exradius.gitconfig` at every start. So the agent's own `git config --global` changes survive resume, and the managed settings follow the current agent and repositories.
+  - `exradius.gitconfig` sets `user.name`, `user.email`, `core.hooksPath=<state>/git-hooks`, `push.autoSetupRemote=true`, `init.defaultBranch=main` and the credential helpers. All values are quoted.
+- **Commit trailers.** `<state>/git-hooks/prepare-commit-msg` runs `git interpret-trailers --if-exists doNothing` for `Exradius-Task: $EXRADIUS_TASK_ID` and `Exradius-Agent: $EXRADIUS_AGENT`, so amending or rebasing never duplicates them. Because `core.hooksPath` replaces the hooks directory, a repository's own hooks (and any husky-style setup) do not run in v1.
+- **Push.**
+  - For each repository (in name order, index N) with `push_allowed`, an auth secret and an `http(s)` URL, the token goes into `EXRADIUS_GIT_CREDENTIAL_<N>`.
+  - The username is the part before `:` of a `user:token` secret, otherwise `x-access-token`, as for mirrors. Only the token goes into the variable.
+  - `exradius.gitconfig` gets `credential.<scheme://host>.useHttpPath=true`, so two repositories on one host can carry different credentials. Each repository URL gets an empty `helper` (which drops helpers from the image's or system config) followed by `!f() { test "$1" = get || exit 0; echo "username=…"; echo "password=$EXRADIUS_GIT_CREDENTIAL_N"; }; f`.
+  - The secret is only in the environment; neither the state mount nor the clone's `.git/config` contains it.
+  - SSH remotes get no helper. Without `push_allowed` there is no helper, and a push fails for lack of credentials. Mirror fetches still use `http.extraHeader` in the worker.
+  - `tests/test_git_identity.py` commits in a prepared run directory with real git, and pushes to a `git http-backend` behind Basic auth: the push succeeds with `push_allowed` and fails without it.

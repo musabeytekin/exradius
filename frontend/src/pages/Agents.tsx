@@ -13,6 +13,7 @@ import { useConfirm } from "@/lib/confirm";
 import { relativeTime } from "@/lib/format";
 import { qk, useAgents, useConnections, useProjects, useProviders, useRuntimes } from "@/lib/queries";
 import { SLUG_RE, slugify } from "@/lib/slug";
+import { emailError, needsEmail } from "@/lib/identity";
 import { runtimeAccepts } from "@/lib/providers";
 import { BUILTIN_TOOLS, TASK_LAYOUT, TEMPLATES } from "@/lib/templates";
 import { toast } from "@/lib/toast";
@@ -86,7 +87,7 @@ function AgentList() {
                 return (
                   <Table.Row key={a.id} onClick={() => navigate({ to: "/agents", search: { edit: a.id } })}>
                     <Table.Td>
-                      <div className="font-medium">{a.name}</div>
+                      <div className="flex items-center gap-2 font-medium">{a.name}{needsEmail(a) && <Chip tone="warn" dot>set an email</Chip>}</div>
                       <Mono className="text-xs text-muted">{a.slug}</Mono>
                     </Table.Td>
                     <Table.Td>
@@ -135,12 +136,28 @@ function AgentEditor({ agent }: { agent: Agent | null }) {
   const runtimeSpec = runtimes.data?.find((r) => r.name === runtime);
   const usableProviders = providerList.filter((p) => runtimeAccepts(runtimeSpec, p));
   const [promptTouched, setPromptTouched] = useState(!!agent);
+  const [idName, setIdName] = useState(agent?.identity_name ?? agent?.name ?? "");
+  // It follows the name only while creating; the API does not rename identities later.
+  const [idNameTouched, setIdNameTouched] = useState(!!agent);
+  const [idEmail, setIdEmail] = useState(agent?.identity_email ?? "");
+  // Required on create; an agent from an API without identities has nothing to require.
+  const hasIdentity = !agent || typeof agent.identity_email === "string";
+  const effectiveIdName = idNameTouched ? idName : name;
+  // The backfilled placeholder is flagged, but other edits can still be saved while it stays.
+  const keepsPlaceholder = !!agent && needsEmail(agent) && idEmail.trim() === (agent.identity_email ?? "").trim();
+  const idEmailError = keepsPlaceholder ? null : emailError(idEmail);
+  const identityOk = !hasIdentity || (!!idEmail.trim() && !idEmailError);
 
   const effectiveSlug = slugTouched ? slug : slugify(name);
   const taken = agents.data?.some((a) => a.slug === effectiveSlug && a.id !== agent?.id);
   const slugError = !effectiveSlug ? null : !SLUG_RE.test(effectiveSlug) ? "Lowercase letters, digits, dot, dash and underscore." : taken ? "Another agent uses this slug." : null;
-  const body = { name: name.trim(), slug: effectiveSlug, prompt, runtime, connection_ids: connIds, ...(hasProviders ? { provider_id: providerId } : {}) };
-  const dirty = !agent || (hasProviders && providerId !== (agent.provider_id ?? null)) || name !== agent.name || effectiveSlug !== agent.slug || prompt !== agent.prompt || runtime !== agent.runtime || JSON.stringify([...connIds].sort()) !== JSON.stringify([...agent.connection_ids].sort());
+  const body = {
+    name: name.trim(), slug: effectiveSlug, prompt, runtime, connection_ids: connIds,
+    ...(hasProviders ? { provider_id: providerId } : {}),
+    ...(hasIdentity ? { identity_name: effectiveIdName.trim() || name.trim(), identity_email: idEmail.trim() } : {}),
+  };
+  const identityDirty = !!agent && hasIdentity && ((effectiveIdName.trim() || name.trim()) !== (agent.identity_name ?? agent.name) || idEmail.trim() !== (agent.identity_email ?? ""));
+  const dirty = !agent || identityDirty || (hasProviders && providerId !== (agent.provider_id ?? null)) || name !== agent.name || effectiveSlug !== agent.slug || prompt !== agent.prompt || runtime !== agent.runtime || JSON.stringify([...connIds].sort()) !== JSON.stringify([...agent.connection_ids].sort());
   const chosen = (connections.data ?? []).filter((c) => connIds.includes(c.id));
 
   const applyTemplate = async (key: string) => {
@@ -177,12 +194,12 @@ function AgentEditor({ agent }: { agent: Agent | null }) {
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        if (body.name && effectiveSlug && !slugError) save.mutate();
+        if (body.name && effectiveSlug && !slugError && identityOk) save.mutate();
       }}
       onKeyDown={(e) => {
         if ((e.metaKey || e.ctrlKey) && e.key === "s") {
           e.preventDefault();
-          if (body.name && effectiveSlug && !slugError && dirty) save.mutate();
+          if (body.name && effectiveSlug && !slugError && identityOk && dirty) save.mutate();
         }
       }}
     >
@@ -208,7 +225,7 @@ function AgentEditor({ agent }: { agent: Agent | null }) {
                 Delete
               </Button>
             )}
-            <Button type="submit" variant="primary" loading={save.isPending} disabled={!dirty || !body.name || !effectiveSlug || !!slugError}>
+            <Button type="submit" variant="primary" loading={save.isPending} disabled={!dirty || !body.name || !effectiveSlug || !!slugError || !identityOk}>
               {agent ? "Save" : "Create agent"}
             </Button>
           </>
@@ -255,6 +272,22 @@ function AgentEditor({ agent }: { agent: Agent | null }) {
                 />
               </Field>
             )}
+          </Card>
+
+          <Card>
+            <CardHeader
+              title="Identity"
+              description="Who the agent is when it commits. Commits also carry Exradius-Task and Exradius-Agent trailers."
+              actions={agent && needsEmail(agent) && idEmail.trim() === (agent.identity_email ?? "") ? <Chip tone="warn" dot>set an email</Chip> : undefined}
+            />
+            <div className="grid grid-cols-2 gap-3 p-4">
+              <Field label="Name" htmlFor="identity-name" hint={!idNameTouched ? "Follows the agent name." : undefined}>
+                <Input id="identity-name" value={effectiveIdName} onChange={(e) => { setIdNameTouched(true); setIdName(e.target.value); }} placeholder={name || "Bug fixer"} />
+              </Field>
+              <Field label="Email" htmlFor="identity-email" error={idEmailError} warning={keepsPlaceholder ? "A placeholder from the migration. Set the address commits should carry." : undefined}>
+                <Input id="identity-email" type="email" value={idEmail} invalid={!!idEmailError} onChange={(e) => setIdEmail(e.target.value)} spellCheck={false} />
+              </Field>
+            </div>
           </Card>
 
           <Card>

@@ -12,6 +12,9 @@ from exradius.schemas.messages import AttachmentIn
 
 Slug = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]*$", max_length=100)]
 EnvKey = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$", max_length=255)]
+IdentityName = Annotated[str, StringConstraints(pattern=r"^[^<>\x00-\x1f]+$", min_length=1, max_length=255, strip_whitespace=True)]
+"""A git author name: no angle brackets or control characters (git rejects them)."""
+IdentityEmail = Annotated[str, StringConstraints(pattern=r"^[^@<>\s]+@[^@<>\s]+$", max_length=255, strip_whitespace=True)]
 FolderName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$", max_length=255)]
 
 
@@ -65,6 +68,8 @@ class RepositoryIn(BaseModel):
     url: str
     branch: str = "main"
     auth_secret_id: uuid.UUID | None = None
+    push_allowed: bool = False
+    """Runs may push with the auth secret; needs ``auth_secret_id``."""
 
 
 class RepositoryUpdate(BaseModel):
@@ -72,6 +77,7 @@ class RepositoryUpdate(BaseModel):
     url: str | None = None
     branch: str | None = None
     auth_secret_id: uuid.UUID | None = None
+    push_allowed: bool | None = None
 
 
 class RepositoryCheckOut(BaseModel):
@@ -89,6 +95,7 @@ class RepositoryOut(_Out):
     url: str
     branch: str
     auth_secret_id: uuid.UUID | None
+    push_allowed: bool
     last_check: RepositoryCheckOut | None = None
 
 
@@ -257,6 +264,9 @@ class AgentIn(BaseModel):
     connection_ids: list[uuid.UUID] = Field(default_factory=list)
     provider_id: uuid.UUID | None = None
     """``None`` uses the default provider."""
+    identity_name: IdentityName | None = None
+    """Git author/committer name in runs; defaults to ``name``."""
+    identity_email: IdentityEmail
 
 
 class AgentUpdate(BaseModel):
@@ -266,6 +276,8 @@ class AgentUpdate(BaseModel):
     runtime: Literal["claude_code"] | None = None
     connection_ids: list[uuid.UUID] | None = None
     provider_id: uuid.UUID | None = None
+    identity_name: IdentityName | None = None
+    identity_email: IdentityEmail | None = None
 
 
 class AgentOut(_Out):
@@ -277,6 +289,8 @@ class AgentOut(_Out):
     created_at: datetime
     connection_ids: list[uuid.UUID]
     provider_id: uuid.UUID | None
+    identity_name: str
+    identity_email: str
 
 
 # Providers (docs/providers.md) -----------------------------------------------------------

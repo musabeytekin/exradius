@@ -87,6 +87,8 @@ class Repository(Base):
     )
     last_check: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
     """Result of the last ``git ls-remote`` check: ok, checked_at, branches, default_branch, error."""
+    push_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
+    """Runs may push to this remote with the auth secret (docs/agent-identity.md §4)."""
 
     project: Mapped[Project] = relationship(back_populates="repositories")
 
@@ -200,6 +202,9 @@ class Agent(Base):
         ForeignKey("providers.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     """``None`` uses the default provider."""
+    identity_name: Mapped[str] = mapped_column(String(255))
+    """Git author and committer name in runs (docs/agent-identity.md)."""
+    identity_email: Mapped[str] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
 
     connections: Mapped[list[Connection]] = relationship(

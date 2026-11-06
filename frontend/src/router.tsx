@@ -23,7 +23,9 @@ interface Ctx {
 
 export interface TasksSearch { state?: string; project?: string; agent?: string; send?: string; page?: number }
 
-const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+// Hand-written links like `?create=1` arrive parsed as numbers or booleans.
+const str = (v: unknown) =>
+  typeof v === "string" ? v || undefined : typeof v === "number" || typeof v === "boolean" ? String(v) : undefined;
 
 const rootRoute = createRootRouteWithContext<Ctx>()({
   component: () => <Outlet />,

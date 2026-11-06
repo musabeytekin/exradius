@@ -63,8 +63,9 @@ async def configured(sessions, box):
         session.add(provider)
         connection = Connection(slug="docs", name="Docs", transport="http", url="https://mcp.example/mcp")
         project = Project(slug="billing-platform", name="Billing", setup_commands=[])
-        agent = Agent(slug="bug-fixer", name="Bug fixer", prompt="You fix bugs.", connections=[connection])
-        loner = Agent(slug="loner", name="Not attached", prompt="")
+        agent = Agent(slug="bug-fixer", name="Bug fixer", prompt="You fix bugs.", connections=[connection],
+                      identity_name="Bug Fixer Bot", identity_email="bug-fixer@agents.example")
+        loner = Agent(slug="loner", name="Not attached", prompt="", identity_name="Loner", identity_email="loner@agents.example")
         session.add_all([connection, project, agent, loner])
         await session.flush()
         session.add(ProjectAgent(project_id=project.id, agent_id=agent.id))

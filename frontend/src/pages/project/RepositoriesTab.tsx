@@ -1,11 +1,12 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { SecretPicker } from "@/components/secrets";
-import { PickList, Table } from "@/components/ui/controls";
+import { Checkbox, PickList, Table } from "@/components/ui/controls";
 import { Icon } from "@/components/ui/icons";
 import { Dialog, Tooltip } from "@/components/ui/overlays";
 import { Banner, Button, Card, CardHeader, Chip, EmptyState, Field, Input, Mono, SkeletonRows, Spinner } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { useConfirm } from "@/lib/confirm";
 import { relativeTime } from "@/lib/format";
 import { qk, useGlobalSecrets, useProjectSecrets, useRepositories } from "@/lib/queries";
@@ -90,7 +91,10 @@ export function RepositoriesTab({ project }: { project: Project }) {
                 </Table.Td>
                 <Table.Td>
                   {r.auth_secret_id ? (
-                    <span className="inline-flex items-center gap-1 font-mono text-xs text-muted"><Icon name="lock" size={12} />{secretName(r.auth_secret_id)}</span>
+                    <span className="inline-flex items-center gap-1.5 font-mono text-xs text-muted">
+                      <Icon name="lock" size={12} />{secretName(r.auth_secret_id)}
+                      {r.push_allowed && <Chip tone="accent">push</Chip>}
+                    </span>
                   ) : (
                     <span className="text-xs text-subtle">public</span>
                   )}
@@ -147,6 +151,9 @@ function RepositoryDialog({ project, repo, existing, onClose }: { project: Proje
   const [nameTouched, setNameTouched] = useState(!!repo);
   const [secretId, setSecretId] = useState<string | null>(repo?.auth_secret_id ?? null);
   const [branch, setBranch] = useState(repo?.branch ?? "main");
+  const [push, setPush] = useState(repo?.push_allowed ?? false);
+  // Push needs a credential; without one the toggle is off and disabled.
+  const pushAllowed = !!secretId && push;
   const [check, setCheck] = useState<RepositoryCheck | null>(repo?.last_check ?? null);
   const [busy, setBusy] = useState<null | "save" | "check">(null);
 
@@ -155,14 +162,14 @@ function RepositoryDialog({ project, repo, existing, onClose }: { project: Proje
   const folderError = !folder ? null : !FOLDER_RE.test(folder) ? "Letters, digits, dot, dash and underscore." : taken ? "Another repository uses this folder." : null;
   const branches = check?.branches ?? [];
   const sourceChanged = !!saved && (url !== saved.url || secretId !== saved.auth_secret_id);
-  const dirty = !saved || url !== saved.url || folder !== saved.name || secretId !== saved.auth_secret_id || branch !== saved.branch;
+  const dirty = !saved || url !== saved.url || folder !== saved.name || secretId !== saved.auth_secret_id || branch !== saved.branch || pushAllowed !== (saved.push_allowed ?? false);
   // A check made against another URL or credential does not describe this form.
   const visibleCheck = sourceChanged ? null : check;
 
   const saveAndCheck = async () => {
     setBusy("save");
     try {
-      const body = { name: folder, url: url.trim(), branch: branch.trim() || "main", auth_secret_id: secretId };
+      const body = { name: folder, url: url.trim(), branch: branch.trim() || "main", auth_secret_id: secretId, push_allowed: pushAllowed };
       const r = saved ? await api.repositories.update(project.id, saved.id, body) : await api.repositories.create(project.id, body);
       setSaved(r);
       qc.invalidateQueries({ queryKey: qk.repositories(project.id) });
@@ -243,7 +250,7 @@ function RepositoryDialog({ project, repo, existing, onClose }: { project: Proje
             )}
           </Field>
         </div>
-        <Field label="Credential" hint="A token with read access. Used only to fetch the mirror; never written into the clone.">
+        <Field label="Credential" hint={pushAllowed ? "A token with write access to this repository. Never written into the clone." : "A token with read access. Used to fetch the mirror; never written into the clone."}>
           <SecretPicker
             projectId={project.id}
             projectSlug={project.slug}
@@ -252,6 +259,19 @@ function RepositoryDialog({ project, repo, existing, onClose }: { project: Proje
             defaultCreateKey={/github\.com/.test(url) ? "GITHUB_TOKEN" : /gitlab/.test(url) ? "GITLAB_TOKEN" : "GIT_TOKEN"}
           />
         </Field>
+        <label className={cn("flex items-start gap-3 rounded-lg border border-border px-3 py-2.5", secretId ? "cursor-pointer hover:bg-surface-2/50" : "opacity-60")}>
+          <Checkbox checked={pushAllowed} disabled={!secretId} onChange={setPush} aria-label="Allow push" />
+          <span className="-mt-0.5 min-w-0">
+            <span className="block text-sm font-medium">Allow push</span>
+            <span className="block text-xs text-muted">
+              {secretId
+                ? "The agent can push to this remote with the selected credential."
+                : push
+                  ? "Off without a credential. Choose one to allow push again."
+                  : "Choose a credential first. The agent can then push to this remote with it."}
+            </span>
+          </span>
+        </label>
         {visibleCheck && !busy && (
           visibleCheck.ok ? (
             <Banner tone="ok" icon="check" title="Reachable">

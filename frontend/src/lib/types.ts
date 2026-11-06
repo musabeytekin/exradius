@@ -17,8 +17,10 @@ export interface RepositoryCheck {
 export interface Repository {
   id: Uuid; project_id: Uuid; name: string; url: string; branch: string;
   auth_secret_id: Uuid | null; last_check: RepositoryCheck | null;
+  /** Absent on older APIs. */
+  push_allowed?: boolean;
 }
-export interface RepositoryIn { name: string; url: string; branch: string; auth_secret_id: Uuid | null }
+export interface RepositoryIn { name: string; url: string; branch: string; auth_secret_id: Uuid | null; push_allowed?: boolean }
 
 export interface EnvVar { id: Uuid; project_id: Uuid; key: string; value: string }
 
@@ -45,8 +47,13 @@ export interface Agent {
   created_at: string; connection_ids: Uuid[];
   /** null = the default provider. Absent on backends without providers. */
   provider_id?: Uuid | null;
+  /** Git identity (docs/agent-identity.md). Absent on older APIs. */
+  identity_name?: string | null; identity_email?: string | null;
 }
-export interface AgentIn { slug: string; name: string; prompt: string; runtime: string; connection_ids: Uuid[]; provider_id?: Uuid | null }
+export interface AgentIn {
+  slug: string; name: string; prompt: string; runtime: string; connection_ids: Uuid[]; provider_id?: Uuid | null;
+  identity_name?: string | null; identity_email?: string;
+}
 
 // --- Providers (docs/providers.md) ---
 

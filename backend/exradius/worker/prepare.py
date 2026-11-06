@@ -45,6 +45,8 @@ class RepoSpec:
     branch: str
     auth: str | None = None
     """Secret value for HTTPS auth: ``user:password`` or a bare token."""
+    push_allowed: bool = False
+    """Runs get a credential helper for this remote (docs/agent-identity.md §4)."""
 
 
 def run_paths(data_dir: Path, run_id: str) -> RunPaths:

@@ -37,7 +37,7 @@ from exradius.resolve import load_secrets, project_environment
 from exradius.schemas.messages import ArtifactRef, InfoRequestPayload, ResultPayload
 from exradius.states import ACTIVE, TERMINAL, State, can_transition, is_terminal
 from exradius.storage import ObjectStore
-from exradius.worker import prepare
+from exradius.worker import git_identity, prepare
 from exradius.worker.containers import ContainerExit, ContainerManager
 from exradius.worker.lifecycle import PendingEvent, run_event, transition
 
@@ -161,7 +161,7 @@ class RunManager:
             if repo.auth_secret_id:
                 secret = await session.get(Secret, repo.auth_secret_id)
                 auth = self.box.decrypt(secret.value_encrypted) if secret else None
-            specs.append(prepare.RepoSpec(repo.name, repo.url, repo.branch, auth))
+            specs.append(prepare.RepoSpec(repo.name, repo.url, repo.branch, auth, repo.push_allowed))
         return specs
 
     async def _hand_over(self, paths: prepare.RunPaths) -> None:
@@ -199,10 +199,28 @@ class RunManager:
             # Only this provider's variables reach the container, decrypted now.
             env = strip_credentials(runtime, await self._project_env(session, task.project_id))
             env.update(runtime_environment(runtime, self.box, provider))
+            identity = git_identity.Identity(
+                name=task.agent.identity_name or task.agent.name,
+                email=task.agent.identity_email,
+                agent=task.agent.slug,
+                task_id=task.id,
+            )
+            repos = await self.repo_specs(session, task.project_id)
             run.token_hash = hash_token(token)
             image = task.project.image or self.settings.project_default_image
             await session.commit()
 
+        # Identity, commit trailers and push credentials; rewritten at every start (resume too).
+        env.update(
+            await asyncio.to_thread(
+                git_identity.prepare_git,
+                self.paths(run_id).state,
+                identity,
+                repos,
+                state_mount=self.settings.run_state_mount,
+                owner=self.settings.run_uid_gid,
+            )
+        )
         env.update(
             EXRADIUS_RUN_ID=str(run_id),
             EXRADIUS_RUN_TOKEN=token,
