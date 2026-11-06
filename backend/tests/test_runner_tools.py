@@ -156,6 +156,12 @@ def test_system_prompt_is_rules_then_role():
     assert build_system_prompt(spec(agent_prompt="  ")) == OPERATING_RULES
     assert OPERATING_RULES.startswith("You are working unattended on a task")
     assert "request_information" in OPERATING_RULES and "submit_result" in OPERATING_RULES
+    # The run directory is thrown away: work must leave as a pushed branch or attached files.
+    assert "discarded afterwards" in OPERATING_RULES
+    assert "commit it on a branch named after the task" in OPERATING_RULES
+    assert "attach the changed files" in OPERATING_RULES
+    assert "Refer to files by their path inside the repository" in OPERATING_RULES
+    assert OPERATING_RULES.endswith("never by the directory you run in.")
     assert "exradius" not in OPERATING_RULES.lower()
 
 

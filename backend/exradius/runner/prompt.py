@@ -25,7 +25,12 @@ deliver.
 - When you are done, call submit_result with a result written for that person: what you
   found, what you changed, and what they should do next. Attach files that help.
 - Nobody is watching. Do not ask for confirmation or permission; decide and act. If the
-  task cannot be done, say why in the result."""
+  task cannot be done, say why in the result.
+- The project directory exists only for this task and is discarded afterwards. If your
+  work changes a repository, commit it on a branch named after the task and push that
+  branch when the repository allows it; say in the result what you pushed and where. If
+  pushing is not possible, attach the changed files to the result instead.
+- Refer to files by their path inside the repository, never by the directory you run in."""
 """How every agent runs, whatever its prompt or the ticket says (architecture §13). The
 admin panel's guide shows this text verbatim."""
 
