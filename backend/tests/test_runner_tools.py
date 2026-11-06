@@ -138,7 +138,7 @@ def test_task_message_is_only_the_ticket():
         )
     )
     assert message == (
-        "# Task\nFix the negative totals.\n\n"
+        "# Task t\nFix the negative totals.\n\n"
         '# Context\n{\n  "customer": "ACME",\n  "since": "Monday"\n}\n\n'
         "# Attachments\n- .exradius/attachments/screenshot.png (image/png)"
     )
@@ -147,7 +147,7 @@ def test_task_message_is_only_the_ticket():
 
 def test_task_message_omits_empty_sections_and_internals():
     message = build_task_message(spec())
-    assert message == "# Task\nFix the negative totals."
+    assert message == "# Task t\nFix the negative totals."
     assert "workspace" not in message.lower() and "exradius" not in message.lower()
 
 
@@ -158,8 +158,8 @@ def test_system_prompt_is_rules_then_role():
     assert "request_information" in OPERATING_RULES and "submit_result" in OPERATING_RULES
     # The run directory is thrown away: work must leave as a pushed branch or attached files.
     assert "discarded afterwards" in OPERATING_RULES
-    assert "commit it on a branch named after the task" in OPERATING_RULES
-    assert "attach the changed files" in OPERATING_RULES
+    assert "whose name starts with the task id" in OPERATING_RULES
+    assert "attach a patch of your commits" in OPERATING_RULES
     assert "Refer to files by their path inside the repository" in OPERATING_RULES
     assert OPERATING_RULES.endswith("never by the directory you run in.")
     assert "exradius" not in OPERATING_RULES.lower()
@@ -236,7 +236,7 @@ async def test_runner_starts_sessions_with_rules_in_the_system_prompt(api, tmp_p
     assert outcome.status == "completed"
     assert seen["system"] == OPERATING_RULES + "\n\nYou are a careful engineer."
     if mode == "start":
-        assert seen["message"] == '# Task\nFix the negative totals.\n\n# Context\n{\n  "customer": "ACME"\n}'
+        assert seen["message"] == '# Task t\nFix the negative totals.\n\n# Context\n{\n  "customer": "ACME"\n}'
     else:
         assert seen["message"] == build_resume_message(the_spec.answers) and seen["session"] == "s1"
     assert "careful engineer" not in seen["message"] and "unattended" not in seen["message"]

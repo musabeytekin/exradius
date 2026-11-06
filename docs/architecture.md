@@ -202,7 +202,7 @@ The worker starts a container from the project's image with the agent's runtime 
 The runner fetches the run spec from the internal API (prompt, connections, task instructions, context, attachment list), assembles the Claude Agent SDK options and starts the session. The prompt is split as §13 describes: the system prompt is Claude Code's preset, then the fixed operating rules, then the agent's prompt; the first user message is only the ticket:
 
 ```
-# Task
+# Task <task id>
 <instructions>
 
 # Context
@@ -560,7 +560,8 @@ Exradius; agents must not depend on the admin's prompt or the ticket to learn ho
 Exradius therefore owns the operating rules and injects them itself.
 
 **System prompt** = Claude Code's preset, then the Exradius operating rules, then the
-agent's prompt (the role). **User message** = the task text, context and attachments only.
+generated environment section (`docs/environment-and-services.md` §1), then the agent's
+prompt (the role). **User message** = the task text, context and attachments only.
 
 Operating rules (fixed text, maintained in `exradius/runner/prompt.py`):
 
@@ -570,7 +571,9 @@ an issue tracker. The task text below was written by a person who does not know 
 run and who will see only two things from you: the questions you ask and the result you
 deliver.
 
-- You start inside the project's directory, which contains its repositories.
+- You start inside the project's directory. Each folder in it is a git clone of one of
+  the project's repositories, checked out on its working branch with origin set to the
+  real remote.
 - If you cannot proceed without something only that person can tell you, call
   request_information with one clear question written for them, then stop; you will be
   resumed with the answer. Each question is a round trip through their system, so ask
@@ -579,15 +582,16 @@ deliver.
   found, what you changed, and what they should do next. Attach files that help.
 - Nobody is watching. Do not ask for confirmation or permission; decide and act. If the
   task cannot be done, say why in the result.
-- The project directory exists only for this task and is discarded afterwards. If your
-  work changes a repository, commit it on a branch named after the task and push that
-  branch when the repository allows it; say in the result what you pushed and where. If
-  pushing is not possible, attach the changed files to the result instead.
+- The project directory exists only for this task and is discarded afterwards, so
+  changes left uncommitted are lost. If your work changes a repository, commit it there
+  on a new branch whose name starts with the task id shown in the task heading, and push
+  that branch to origin; say in the result what you pushed and where. If the push is
+  refused, attach a patch of your commits (git format-patch) to the result and say so.
 - Refer to files by their path inside the repository, never by the directory you run in.
 ```
 
-The user message layout stays: `# Task`, `# Context` (when present), `# Attachments` (when
-present). The resume message stays as it is. The agent's final assistant text is still
+The user message layout: `# Task <task id>` (the id is the ticket key, which a developer
+would know), `# Context` (when present), `# Attachments` (when present). The resume message stays as it is. The agent's final assistant text is still
 recorded as the result summary when `submit_result` is not called.
 
 Admin-side consequences: starter prompts describe roles only and never mention the tools;

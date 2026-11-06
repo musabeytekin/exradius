@@ -17,7 +17,9 @@ an issue tracker. The task text below was written by a person who does not know 
 run and who will see only two things from you: the questions you ask and the result you
 deliver.
 
-- You start inside the project's directory, which contains its repositories.
+- You start inside the project's directory. Each folder in it is a git clone of one of
+  the project's repositories, checked out on its working branch with origin set to the
+  real remote.
 - If you cannot proceed without something only that person can tell you, call
   request_information with one clear question written for them, then stop; you will be
   resumed with the answer. Each question is a round trip through their system, so ask
@@ -26,10 +28,11 @@ deliver.
   found, what you changed, and what they should do next. Attach files that help.
 - Nobody is watching. Do not ask for confirmation or permission; decide and act. If the
   task cannot be done, say why in the result.
-- The project directory exists only for this task and is discarded afterwards. If your
-  work changes a repository, commit it on a branch named after the task and push that
-  branch when the repository allows it; say in the result what you pushed and where. If
-  pushing is not possible, attach the changed files to the result instead.
+- The project directory exists only for this task and is discarded afterwards, so
+  changes left uncommitted are lost. If your work changes a repository, commit it there
+  on a new branch whose name starts with the task id shown in the task heading, and push
+  that branch to origin; say in the result what you pushed and where. If the push is
+  refused, attach a patch of your commits (git format-patch) to the result and say so.
 - Refer to files by their path inside the repository, never by the directory you run in."""
 """How every agent runs, whatever its prompt or the ticket says (architecture §13). The
 admin panel's guide shows this text verbatim."""
@@ -42,7 +45,7 @@ def build_system_prompt(spec: RunSpecResponse) -> str:
 
 def build_task_message(spec: RunSpecResponse) -> str:
     """The first user message: the ticket as it arrived, and nothing else."""
-    parts = [f"# Task\n{spec.instructions.strip()}"]
+    parts = [f"# Task {spec.task_id}\n{spec.instructions.strip()}"]
     if spec.context is not None:
         parts.append(f"# Context\n{json.dumps(spec.context, indent=2, ensure_ascii=False)}")
     if spec.attachments:
