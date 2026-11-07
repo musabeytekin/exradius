@@ -50,7 +50,15 @@ DB_PASSWORD=
 - Setup: <one line per command and what it prepares>.
 - Agents: `developer` (<what it does, whether it pushes and opens pull requests>), `scout`
   (investigates and reports, never changes code).
-- Resources: a run needs about <N> GB of memory and <N> GB of disk (<the biggest install>).
+- Resources: `resources.memory` is `<N>g`: Exradius reserves that much per run (a run
+  waits until it fits next to the others) and kills the workstation if it goes over it
+  (<the heaviest step>)<; services: <name> `<N>m`, ...>. Disk: about <N> GB per run
+  (<the biggest install>).
+- Caches: <the package managers' stores, e.g. the pnpm store and uv's cache> are kept
+  between runs in `<data dir>/caches/<slug>/` on the Exradius server (about <N> GB after
+  the first run), shared by the project's runs, never cleaned by Exradius. The project
+  page shows their size; delete that directory to clear them (the next run downloads
+  everything again, nothing else is lost).
 
 ## Maintaining it
 

@@ -26,6 +26,9 @@ project:                          # required
 
 secret_store: bank-platform       # [a-z][a-z0-9-]*; required as soon as the file has a ${secret:...}
 
+resources:                        # default: none
+  memory: 6g                      # the workstation's memory; default: unreserved and unlimited
+
 repositories:                     # default: none. Each is cloned into /work/<name>
   - name: bank-of-anthos          # required; folder name, [A-Za-z0-9][A-Za-z0-9._-]*
     url: https://github.com/acme/bank-of-anthos.git   # required
@@ -38,7 +41,10 @@ workstation:                      # the agents' container image; default: Exradi
   # image: maven:3.9-eclipse-temurin-21       # ... or image, not both
   # context: docker                           # build context; default: the Dockerfile's directory
   setup:                          # default: none; each runs in the workstation, cwd /work, after cloning
-    - cp -r /opt/m2 ~/.m2
+    - cd bank-of-anthos && mvn -B -q dependency:go-offline
+  cache:                          # default: none; folders kept per project across runs
+    - ~/.m2/repository
+    - ~/.cache/uv
 
 services:                         # default: none; containers next to the agent, reachable by name
   postgres:                       # the host name; [a-z][a-z0-9-]*
@@ -49,6 +55,10 @@ services:                         # default: none; containers next to the agent,
     ports: [5432]                 # documentation for the agent; nothing is published
     ready:                        # default: the image's HEALTHCHECK, else "the container is running"
       command: [pg_isready, -h, 127.0.0.1, -U, app]   # or: tcp: 5432
+    memory: 512m                  # default: unreserved and unlimited
+  minio:
+    image: minio/minio
+    command: [server, /data]      # default: the image's CMD; its ENTRYPOINT is always kept
 
 env:                              # environment of the setup commands and the agent
   DATABASE_URL: "postgres://app:${secret:DB_PASSWORD}@postgres:5432/app"
@@ -112,11 +122,52 @@ tree hash, and rebuilds only when the context changes. It builds with the Docker
 classic builder: BuildKit-only syntax (`RUN --mount=...`, heredocs, `# syntax=`) fails.
 Images named with `image:` are pulled by the server, so they must be reachable from it.
 
+**Memory.** `resources.memory` (the workstation: the setup commands, the agent's session
+and a resumed session) and a service's `memory` are Docker size strings: a number and one
+of `b`, `k`, `m`, `g` (`512m`, `6g`, `1.5g`; upper case works too), at least `6m`, always
+with a unit (`memory: 512` is refused: there is no unit-less form). A declared memory does
+two things:
+
+- **Reservation.** The Exradius worker admits a run only when its reservation (the
+  workstation's `memory` plus every service's `memory`) fits the server's memory budget
+  next to the runs and verifications in progress; until then the task waits, shown as
+  `waiting for memory` in the panel.
+- **Limit.** It is the container's cgroup limit, swap included (`--memory` and
+  `--memory-swap` equal). A container that exceeds it is killed by its own limit, not by
+  the host killing a neighbour; the run fails with "exceeded its declared memory (6g)".
+
+Undeclared means nothing reserved and no limit: the run competes for the server's memory
+with every other run. Verify reserves and limits the same way, so a limit that is too low
+shows up in Verify, not in the first task. Declare the peak of the heaviest step (the
+dependency install or a type check, usually) with some headroom.
+
+**Caches.** `workstation.cache` lists folders inside the container that survive from run
+to run of the project: `~/...` (in the run's home, `/home/runner`) or absolute paths,
+never inside `/work`, `/exradius`, `/opt/exradius`, `/proc`, `/sys` or `/dev`, never `~`,
+`/`, `/home`, `/tmp`, `/etc`, `/usr`, `/bin`, `/lib`, `/var` or `/opt` themselves, no
+`..`, each listed once. Exradius bind-mounts each from `<data
+dir>/caches/<slug>/<n>-<path>/` (created on first use, owned by uid 1000) into the setup,
+agent and resumed containers and into Verify. The same folders are shared by every run of
+the project, concurrent ones included, so list only caches whose tool is safe with
+concurrent writers (the package managers' download stores are: pnpm, npm, Yarn, uv, pip,
+Maven, Gradle, Go, Cargo). Nothing cleans them; the project page shows their size, and the
+admin deletes the folder to reset. Hard links do not cross bind mounts, so tools that link
+from their store (pnpm, uv) copy instead: still no download. A cache is per project, so a
+run can only affect later runs of the same project. The paths per package manager are in
+pitfalls.md.
+
 **Services.** `ready` gives exactly one of `command` (a list, run inside the service
 container with `exec`; exit 0 means ready) or `tcp` (a port that must be listening inside
 the container). Without `ready`: the image's HEALTHCHECK when it has one (must report
 healthy), else ready once the container has been running for a second. Each service has
 120 seconds to become ready; one that exits or times out fails the run with its log tail.
+`command` (a list of strings, at least one; numbers become strings as in `env`, an empty
+argument is `""`) is the container's command, as compose's `command:` and `docker run
+<image> <args>`: it replaces the image's `CMD` and keeps its `ENTRYPOINT`. There is no
+`entrypoint` key; an image whose entrypoint must change needs a service Dockerfile.
+Secrets are not allowed in `command`; put them in the service's `env` and refer to them as
+`$NAME` inside a `sh -c` command.
+
 Services run with all capabilities dropped except CHOWN, SETUID, SETGID, FOWNER,
 DAC_OVERRIDE and NET_BIND_SERVICE, `no-new-privileges`, no mounts and no published ports.
 Service images may be Alpine; only the workstation must be glibc-based.
@@ -174,7 +225,8 @@ the task.
 3. Per store: create the secret store the file names and fill every required key. The
    panel accepts a pasted `.env` block for several keys at once.
 
-Then Verify runs: "Read config" (commit, errors, warnings, missing keys), "Build
+Then Verify runs (after waiting for memory when the file declares some): "Read config"
+(commit, errors, warnings, missing keys), "Build
 workstation" and "Build service <name>", clone each repository, "Start service <name>",
 "Setup: <command>" for each setup command, then stop the services and remove the
 directory.

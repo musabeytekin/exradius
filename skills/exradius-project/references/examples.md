@@ -1,8 +1,10 @@
 # Worked examples
 
-Three real projects, as their config repositories hold them (the agents' identity email is
-replaced by `dev-bot@example.com`). Each one failed Verify once before it passed; the
-choices below are why the files look the way they do. Each config passes
+Four real projects, as their config repositories hold them (the agents' identity email is
+replaced by `dev-bot@example.com`), updated for skill 0.2.0: each now declares
+`resources.memory` and a `workstation.cache`, and Plane's MinIO is a stock image with a
+`command`. The first three failed Verify once before they passed; Plane passed first
+time. The choices below are why the files look the way they do. Each config passes
 `scripts/check.sh` with its code checked out.
 
 ## Bank of Anthos
@@ -21,6 +23,9 @@ project:
 
 secret_store: bank-platform
 
+resources:
+  memory: 4g
+
 repositories:
   - name: bank-of-anthos
     url: https://github.com/musabeytekin/bank-of-anthos.git
@@ -31,7 +36,10 @@ repositories:
 workstation:
   dockerfile: docker/workstation.Dockerfile
   setup:
-    - cp -r /opt/m2 ~/.m2
+    - test -e ~/.m2/repository/.seeded || (cp -r /opt/m2/. ~/.m2/repository/ && touch ~/.m2/repository/.seeded)
+  cache:
+    - ~/.m2/repository
+    - ~/.cache/uv
 
 services:
   postgres:
@@ -46,10 +54,12 @@ services:
 
 env:
   DATABASE_URL: "postgres://app:${secret:DB_PASSWORD}@postgres:5432/app"
+  UV_LINK_MODE: copy
 
 notes: |
   Java services live under src/ledger and src/ledgermonolith; run their tests with
-  `mvn test` inside the service directory (dependencies are pre-fetched in ~/.m2).
+  `mvn test` inside the service directory (dependencies are in ~/.m2/repository, kept
+  between runs).
   Python services live under src/accounts and src/frontend; run their tests with
   `uv run pytest tests` inside the service directory.
   The postgres service is empty; the schemas are in src/accounts/accounts-db/initdb
@@ -100,7 +110,7 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
 RUN uv python install 3.14 && chmod -R a+rX /opt/uv
 
 # Pre-fetch the Maven dependencies of every module so a run does not download them.
-# Runs copy /opt/m2 into their own home (read-only root filesystem).
+# The first run copies /opt/m2 into its ~/.m2/repository cache (read-only root filesystem).
 RUN git clone -q --depth 1 https://github.com/musabeytekin/bank-of-anthos.git /tmp/boa \
  && cd /tmp/boa && mvn -B -q -Dmaven.repo.local=/opt/m2 dependency:go-offline \
  && mvn -B -q -Dmaven.repo.local=/opt/m2 -DskipTests package -pl src/ledger/ledgerwriter >/dev/null 2>&1 || true \
@@ -120,7 +130,10 @@ Choices:
 - `UV_PYTHON_INSTALL_DIR=/opt/uv/python` + `uv python install 3.14` + `chmod -R a+rX`: the Python the services pin in `.python-version`, installed once in the image, readable by uid 1000, never downloaded by a run.
 - Maven `dependency:go-offline` into `/opt/m2`: dependencies pre-fetched at build time so runs do not download them; `|| true` because the pre-fetch is a speed-up, not a requirement.
 - `ln -s .../python3.14 /usr/local/bin/python3`: the first Verify failed with `python3: not found`; uv's interpreter is not on PATH by itself.
-- `setup: cp -r /opt/m2 ~/.m2`: Maven writes into its local repository, `/opt` is read-only at run time, so the cache is copied into the run's home. This works because the run's passwd entry makes Java's `user.home` `/home/runner`; with the image's own `ubuntu` user it would look in `/home/ubuntu`.
+- `cache: [~/.m2/repository, ~/.cache/uv]`: Maven's local repository and uv's cache are kept between runs, so only the first run downloads. Java finds `~/.m2` because the run's passwd entry makes its `user.home` `/home/runner`; with the image's own `ubuntu` user it would look in `/home/ubuntu`.
+- The setup command seeds the Maven cache once from the image's pre-fetch: `/opt/m2` holds the artifacts at its top level (it was the `maven.repo.local`), so its contents go into `~/.m2/repository`; the marker file skips the copy in later runs. (The earlier `cp -r /opt/m2 ~/.m2` put them in `~/.m2` itself, where Maven does not look.)
+- `resources.memory: 4g`: a Maven build of one service plus the Python tests stay well under it; Exradius reserves it and enforces it as the limit.
+- `UV_LINK_MODE: copy`: uv cannot hard-link from the cache folder into a `.venv` in `/work` (separate mounts) and copies anyway; this only silences its warning.
 - `services.postgres` with `pg_isready -h 127.0.0.1`: a TCP check, so readiness is not reported during the image's init-time socket-only server.
 - `env.DATABASE_URL` uses the same `${secret:DB_PASSWORD}` as the service: one store key, consistent on both sides.
 - `credential` + `push: true` on the repository and the `github` catalog connection share `GITHUB_TOKEN`: one token to clone, push and open pull requests.
@@ -143,6 +156,9 @@ project:
 
 secret_store: outline-platform
 
+resources:
+  memory: 6g
+
 repositories:
   - name: outline
     url: https://github.com/musabeytekin/outline.git
@@ -155,6 +171,8 @@ workstation:
   setup:
     - cd outline && yarn install --immutable
     - cd outline && NODE_ENV=test yarn sequelize db:create && NODE_ENV=test yarn sequelize db:migrate
+  cache:
+    - ~/.yarn/berry/cache
 
 services:
   postgres:
@@ -235,7 +253,9 @@ Choices:
 - `FROM node:26-bookworm`: the Node major from the repository's `.nvmrc`, Debian variant (glibc).
 - corepack installed with npm, `corepack enable`, `corepack install -g yarn@4.18.0`: the first Verify failed because `node:26` ships no corepack, so the `packageManager: yarn@4.18.0` in `package.json` was never honoured.
 - `COREPACK_HOME=/opt/corepack` + `chmod -R a+rX`: the exact Yarn release prepared read-only in the image, so runs never download it and nothing writes to `/opt` at run time.
-- No pre-fetched `node_modules`: `yarn install --immutable` in setup takes about 50 s on the run's disk and always matches the checked-out lockfile.
+- No pre-fetched `node_modules`: `yarn install --immutable` in setup always matches the checked-out lockfile.
+- `cache: [~/.yarn/berry/cache]`: Yarn 4's global cache (`enableGlobalCache` is the default and the repository's `.yarnrc.yml` does not turn it off), kept between runs so only the first run downloads the archives.
+- `resources.memory: 6g`: `yarn install` peaks around 2.3 GB (a run was killed with exit 137 when the home was still in RAM), and the server tests run Jest workers on top.
 - `setup` step 2 runs `sequelize db:create` and `db:migrate` with `NODE_ENV=test`: the server tests need a migrated test database on the postgres service.
 - `DATABASE_URL` points at `outline-test` on host `postgres`: the repository's `.env.test` points at 127.0.0.1; the project `env` wins and points at the service.
 - `SECRET_KEY` and `UTILS_SECRET` are not in `env` or the store: `.env.test` supplies them for test runs; only `DB_PASSWORD` and `GITHUB_TOKEN` are real store keys.
@@ -258,6 +278,9 @@ project:
 
 secret_store: saleor-platform
 
+resources:
+  memory: 4g
+
 repositories:
   - name: saleor
     url: https://github.com/musabeytekin/saleor.git
@@ -275,6 +298,9 @@ workstation:
   setup:
     - cd saleor && uv sync --locked
     - cd saleor-dashboard && pnpm install --frozen-lockfile
+  cache:
+    - ~/.cache/uv
+    - ~/.local/share/pnpm/store
 
 services:
   postgres:
@@ -286,6 +312,7 @@ services:
     ports: [5432]
     ready:
       command: [pg_isready, -h, 127.0.0.1, -U, saleor, -d, saleor]
+    memory: 512m
   cache:
     image: valkey/valkey:8.1-alpine
     ports: [6379]
@@ -297,6 +324,8 @@ env:
   CELERY_BROKER_URL: redis://cache:6379/1
   SECRET_KEY: local-test-key
   DEFAULT_FROM_EMAIL: noreply@example.com
+  pnpm_config_store_dir: /home/runner/.local/share/pnpm/store
+  UV_LINK_MODE: copy
 
 notes: |
   API (saleor/): run tests with `uv run pytest saleor/<app> -n 0` inside the saleor folder
@@ -367,11 +396,226 @@ Choices:
 - Service named `cache`, not `redis`: the name is the host name in `CACHE_URL` and `CELERY_BROKER_URL`, as in that compose file.
 - `SECRET_KEY: local-test-key` as plain text: a test-only value, not a secret, so it stays out of the store.
 - `notes`: `-n 0` for pytest because the suite defaults to pytest-xdist workers, which multiply memory use in a run.
+- `cache` for both package managers, uv's and pnpm's stores; `pnpm_config_store_dir` pins the pnpm store to the cache folder (otherwise pnpm may put it in `/work/.pnpm-store`, deleted with the run).
+- `resources.memory: 4g` and `memory: 512m` on postgres: one pytest worker and the dashboard's install fit with headroom; the check applies both as the containers' limits.
 
-## Patterns the three share
+## Plane
+
+Config repository: https://github.com/musabeytekin/exradius-plane (private). Project: one repository, a pnpm + Turbo monorepo of TypeScript/React apps and a Django API with uv; Postgres, Valkey, RabbitMQ and S3-compatible storage.
+
+`exradius.yaml`:
+
+```yaml
+version: 1
+
+project:
+  slug: plane
+  name: Plane
+  description: Open-source project management. TypeScript/React web apps (pnpm + Turbo monorepo) and a Python Django API; Postgres, Valkey, RabbitMQ and S3-compatible storage.
+
+secret_store: plane
+
+resources:
+  memory: 6g
+
+repositories:
+  - name: plane
+    url: https://github.com/musabeytekin/plane.git
+    branch: preview
+    credential: "${secret:GITHUB_TOKEN}"
+    push: true
+
+workstation:
+  dockerfile: docker/workstation.Dockerfile
+  setup:
+    - cd plane && pnpm install --frozen-lockfile
+    - cd plane/apps/api && uv sync --locked
+    - mkdir -p plane/apps/api/plane/static-assets/collected-static
+  cache:
+    - ~/.local/share/pnpm/store
+    - ~/.cache/uv
+
+services:
+  postgres:
+    image: postgres:15.7-alpine
+    env:
+      POSTGRES_USER: plane
+      POSTGRES_PASSWORD: plane
+      POSTGRES_DB: plane
+    ports: [5432]
+    ready:
+      command: [pg_isready, -h, 127.0.0.1, -U, plane, -d, plane]
+  redis:
+    image: valkey/valkey:7.2.11-alpine
+    ports: [6379]
+    ready: {tcp: 6379}
+  rabbitmq:
+    image: rabbitmq:3.13.6-management-alpine
+    env:
+      RABBITMQ_DEFAULT_USER: plane
+      RABBITMQ_DEFAULT_PASS: plane
+      RABBITMQ_DEFAULT_VHOST: plane
+    ports: [5672]
+    ready: {tcp: 5672}
+  minio:
+    image: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        mkdir -p /export/uploads
+        && (silo server /export --console-address ':9090' &)
+        && sleep 3
+        && mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+        && (mc mb local/uploads -p || true)
+        && tail -f /dev/null
+    env:
+      MINIO_ROOT_USER: access-key
+      MINIO_ROOT_PASSWORD: secret-key
+    ports: [9000]
+    ready:
+      command: [mc, ls, local/uploads]
+
+env:
+  DJANGO_SETTINGS_MODULE: plane.settings.test
+  DEBUG: 0
+  SECRET_KEY: exradius-local-test-key
+  DATABASE_URL: postgresql://plane:plane@postgres:5432/plane
+  POSTGRES_USER: plane
+  POSTGRES_PASSWORD: plane
+  POSTGRES_HOST: postgres
+  POSTGRES_DB: plane
+  POSTGRES_PORT: 5432
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  REDIS_URL: redis://redis:6379/
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: 5672
+  RABBITMQ_USER: plane
+  RABBITMQ_PASSWORD: plane
+  RABBITMQ_VHOST: plane
+  AWS_REGION: ""
+  AWS_ACCESS_KEY_ID: access-key
+  AWS_SECRET_ACCESS_KEY: secret-key
+  AWS_S3_ENDPOINT_URL: http://minio:9000
+  AWS_S3_BUCKET_NAME: uploads
+  USE_MINIO: 0
+  EMAIL_HOST: test-smtp.invalid
+  CORS_ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001,http://localhost:3002,http://localhost:3100"
+  WEB_URL: http://localhost:8000
+  APP_BASE_URL: http://localhost:3000
+  ADMIN_BASE_URL: http://localhost:3001
+  ADMIN_BASE_PATH: /god-mode
+  SPACE_BASE_URL: http://localhost:3002
+  SPACE_BASE_PATH: /spaces
+  LIVE_BASE_URL: http://localhost:3100
+  LIVE_BASE_PATH: /live
+  LIVE_SERVER_SECRET_KEY: secret-key
+  NODE_OPTIONS: --max-old-space-size=4096
+  pnpm_config_store_dir: /home/runner/.local/share/pnpm/store
+  UV_LINK_MODE: copy
+
+notes: |
+  One repository, /work/plane, default branch `preview` (pull requests target preview,
+  not main). AGENTS.md at the root is the team's own guide; follow it.
+
+  Web (pnpm + Turbo monorepo: apps/web, apps/admin, apps/space, apps/live, packages/*):
+  dependencies are installed by setup. Checks, from /work/plane:
+  `pnpm check:format`, `pnpm check:lint`, `pnpm check:types` (types need built packages:
+  `pnpm turbo run build --filter=<package>...` first), or one package with
+  `pnpm turbo run <task> --filter=<package>`. Unit tests are vitest: `pnpm turbo run test
+  --filter=<package>`. Fix formatting with `pnpm fix:format`. Translations live in
+  packages/i18n/src/locales.
+
+  API (Django, apps/api, uv; the venv is apps/api/.venv, made by setup): run tests from
+  apps/api with `uv run pytest plane/tests/unit` (or `-m unit`, `-m contract`, a path,
+  `-k ...`); add `-n 0` if you pass -n. pytest uses plane.settings.test, --nomigrations and
+  --reuse-db and creates test_plane on the postgres service itself. Lint with
+  `uv run ruff check .`; check migrations with
+  `uv run python manage.py makemigrations --check --dry-run`. Never edit a migration that
+  is already on preview; add a new one. The repo's docker-compose-test.yml is not usable
+  here (no Docker daemon); the services below replace it with the same images and values.
+
+  Services: postgres (plane/plane), redis (Valkey), rabbitmq (vhost plane) for Celery,
+  minio (S3 with bucket `uploads`). All credentials are throwaway test values.
+
+connections:
+  github:
+    catalog: github
+    config:
+      token: "${secret:GITHUB_TOKEN}"
+
+agents:
+  developer:
+    name: Developer
+    connections: [github]
+    role: |
+      You are a software developer on the Plane team. You implement the changes a ticket
+      asks for, following AGENTS.md and the conventions you find in the code, and keep
+      changes small and focused. Before you finish, run the checks for what you touched:
+      for apps/api the relevant pytest tests and `uv run ruff check .` (plus
+      `makemigrations --check` when models changed); for the web apps and packages
+      `check:format`, `check:lint`, `check:types` and the vitest tests of the affected
+      packages. Explain what you changed and what a reviewer should look at. Push a new
+      branch, then open a pull request against `preview` with the GitHub tool and link it in
+      your result. Do not leave this to the reviewer.
+  scout:
+    name: Scout
+    role: |
+      You investigate questions about this codebase and report findings with file paths
+      and evidence. You never change code.
+```
+
+`docker/workstation.Dockerfile`:
+
+```dockerfile
+# Developer image for Plane: what an engineer on the project has installed.
+# Node 22.22.0 (.node-version / .mise.toml) with pnpm 11.10.0 (packageManager) for the web
+# monorepo; uv 0.12.21 (apps/api required-version) and Python 3.12.12 (CI's patch release)
+# for the Django API. Tools are prepared read-only under /opt so runs never download them.
+FROM node:22.22.0-bookworm
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git bash ca-certificates curl postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
+
+# pnpm, the exact release from package.json's packageManager, via corepack.
+ENV COREPACK_HOME=/opt/corepack
+RUN npm install -g corepack@latest \
+ && corepack enable \
+ && corepack install -g pnpm@11.10.0 \
+ && chmod -R a+rX /opt/corepack
+
+# uv pinned to [tool.uv] required-version, and the managed Python the API needs.
+COPY --from=ghcr.io/astral-sh/uv:0.12.21 /uv /uvx /usr/local/bin/
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+RUN uv python install 3.12.12 && chmod -R a+rX /opt/uv
+
+# python3 on PATH is the API's 3.12, not the image's Debian 3.11.
+RUN ln -s "$(ls -d /opt/uv/python/cpython-3.12.12*/bin)/python3.12" /usr/local/bin/python3 \
+ && ln -s /usr/local/bin/python3 /usr/local/bin/python && python3 --version
+```
+
+Choices:
+
+- `FROM node:22.22.0-bookworm`: the exact Node of `.node-version` and `.mise.toml`; the web monorepo is the bigger half of the project, so Node is the base and Python is added.
+- pnpm 11.10.0 via corepack into `COREPACK_HOME=/opt/corepack`: the root `packageManager`, prepared read-only as for Outline.
+- uv 0.12.21 (the API's `[tool.uv] required-version`) and Python 3.12.12 (CI's patch release) installed by uv under `/opt/uv/python`, linked as `python3` so it wins over Debian's 3.11.
+- `postgresql-client`: the API's test settings and management commands call `psql`.
+- `branch: preview`: Plane's default branch; pull requests target it, and the role says so.
+- `cache: [~/.local/share/pnpm/store, ~/.cache/uv]`, `pnpm_config_store_dir` and `UV_LINK_MODE: copy`: the two package managers' stores are kept between runs. Measured with the local check on an Apple Silicon Mac: the first `pnpm install` downloaded 1175 packages in 72 s and filled the store (about 0.9 GB); the second reused all 1175 and downloaded none, in 54 to 56 s, the rest being the copy into `/work` (no hard links across bind mounts) and pnpm's lockfile policy check; `uv sync` went from 22 s to 10 s. `pnpm_config_store_dir` pins the store, because pnpm otherwise may choose `/work/.pnpm-store`, which is deleted with the run.
+- `resources.memory: 6g`: the pnpm install and the TypeScript type checks are the peak (`NODE_OPTIONS=--max-old-space-size=4096` caps Node's heap at 4 GB, plus the agent); before this key existed, Plane was run one task at a time by hand for this reason.
+- `minio` from the stock `pgsty/silo` image with a `command`: the code repository's `docker-compose-test.yml` overrides the entrypoint with a shell script that starts the server and creates the `uploads` bucket. The image's entrypoint passes a first argument of `/bin/sh` through unchanged, so the same script works as the container command, and the image's entrypoint is kept (until skill 0.2.0 this needed a `docker/minio.Dockerfile`). `ready: mc ls local/uploads` waits for the bucket, not only the port.
+- `postgres:15.7-alpine`, `valkey/valkey:7.2.11-alpine`, `rabbitmq:3.13.6-management-alpine`: the images and versions of `docker-compose-test.yml`, credentials as in that file; all are throwaway test values, so the only store key is `GITHUB_TOKEN`.
+- The many `env` entries: the API's settings read each service's host, port and credentials separately, and the values in the repository's env examples point at `localhost`.
+- `mkdir -p .../collected-static` in setup: the API's `STATIC_ROOT` (`settings/common.py`); the directory is not in the repository, so setup creates it for the tests.
+- `notes`: AGENTS.md is the team's guide; which checks exist for the web packages and the API, that type checks need built packages first, and that `docker-compose-test.yml` cannot be used inside a run (no Docker daemon) while the services replace it.
+
+## Patterns the four share
 
 - A Dockerfile per workstation, `FROM` the official image of the main language at the version the repository pins, Debian/Ubuntu variant.
 - Tool versions taken from the repository (`.nvmrc`, `packageManager`, `.python-version`, `requires-python`, the developer's uv), prepared in the image under `/opt` with `chmod -R a+rX` and an `ENV` that points at them.
 - Setup commands that install dependencies with the lockfile frozen (`--immutable`, `--locked`, `--frozen-lockfile`) and prepare databases; nothing that needs root.
-- Services from stock images with a TCP-based `ready` check; secrets only for values that are really secret, referenced the same way in the service and in `env`.
+- A `workstation.cache` entry for every package manager in setup, and `resources.memory` from the heaviest step.
+- Services from stock images (with a `command` where compose has one) and a TCP-based `ready` check; secrets only for values that are really secret, referenced the same way in the service and in `env`.
 - `developer` (push, pull request, `github` connection) and `scout` (read-only) agents.

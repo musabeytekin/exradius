@@ -7,8 +7,9 @@ Docker CLI alone and no Exradius installed.
 Steps, in Verify's order: read and validate exradius.yaml; build the workstation and the
 service images; check the workstation image (glibc, sh, bash, git); put the code
 repositories under /work; start the services on a temporary network and wait until they
-are ready; run every setup command in the workstation under the run's conditions; stop
-and remove everything. The first failing step is printed with its output.
+are ready; run every setup command in the workstation under the run's conditions (with
+``resources.memory`` as its memory limit and ``workstation.cache`` mounted from a local cache
+directory that persists between checks); stop and remove everything but the cache. The first failing step is printed with its output.
 
 Standard library only, Python 3.8 or later. The YAML reader below covers the YAML an
 exradius.yaml uses (block and flow collections, quoted, plain and block scalars,
@@ -582,6 +583,16 @@ IDENTITY_NAME = re.compile(r"^[^<>\x00-\x1f]+$")
 IDENTITY_EMAIL = re.compile(r"^[^@<>\s]+@[^@<>\s]+$")
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]*$")
 RESERVED_SERVICES = ("api", "workstation")
+MEMORY = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([bkmgBKMG])$")
+"""A Docker size string: ``512m``, ``6g`` (docs/run-environment.md §4)."""
+MEMORY_UNITS = {"b": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
+MEMORY_MIN = 6 * 1024 ** 2
+"""Docker refuses a memory limit below 6 MiB."""
+CACHE_FORBIDDEN = ("/", "/home", "/home/runner", "/tmp", "/etc", "/usr", "/bin", "/lib", "/var", "/opt")
+CACHE_FORBIDDEN_UNDER = ("/work", "/exradius", "/opt/exradius", "/proc", "/sys", "/dev", "/etc/passwd", "/etc/group")
+"""``workstation.cache`` entries may not be the first set of paths, nor be or lie under the
+second: the project directory, Exradius's own mounts, the kernel's file systems and the
+generated identity files (docs/run-environment.md §5; ``cache_problem`` in Exradius)."""
 CATALOG = {
     # key: (required config keys, optional config keys, launcher it needs)
     "github": (("token",), (), None),
@@ -604,6 +615,46 @@ SECRET_PLACES = (
     ("connections", str, "env", str),
     ("connections", str, "headers", str),
 )
+
+
+def memory_bytes(text):
+    """Bytes of a Docker size string, or None."""
+    match = MEMORY.match(text.strip())
+    if not match:
+        return None
+    return int(float(match.group(1)) * MEMORY_UNITS[match.group(2).lower()])
+
+
+def cache_target(text):
+    """The container path of a ``workstation.cache`` entry, or ``(None, reason)``."""
+    if "\x00" in text or "\\" in text or "\n" in text:
+        return None, "must be a plain path"
+    if text.startswith("~/"):
+        path = "/home/runner/" + text[2:]
+    elif text == "~":
+        return None, "the home itself cannot be a cache; name a folder in it (~/.cache/...)"
+    elif text.startswith("/"):
+        path = text
+    else:
+        return None, "must start with ~/ or /"
+    if ".." in path.split("/"):
+        return None, "must not contain '..'"
+    path = posixpath.normpath(path)
+    if path.startswith("//"):
+        path = "/" + path.lstrip("/")
+    for base in CACHE_FORBIDDEN_UNDER:
+        if path == base or path.startswith(base + "/"):
+            return None, ("%s is inside /work, which is the project directory; caches live outside it"
+                          % path) if base == "/work" else "%s is reserved (%s)" % (path, base)
+    if path in CACHE_FORBIDDEN:
+        return None, "must name a directory below %s, not %s itself" % (path, path)
+    return path, None
+
+
+def cache_folder(index, target):
+    """The host folder name of cache entry ``index``: ``<n>-<sanitised path>``."""
+    rel = target[len("/home/runner/"):] if target.startswith("/home/runner/") else target
+    return "%d-%s" % (index, re.sub(r"[^A-Za-z0-9._]+", "-", rel).strip("-") or "root")
 
 
 def fmt_path(path):
@@ -770,8 +821,9 @@ class Config(object):
         self.name = None
         self.store = None
         self.repositories = []  # dicts: name, url, branch, push, credential
-        self.workstation = {}  # image, dockerfile, context (repository paths), setup
-        self.services = {}  # name -> dict: image, dockerfile, context, env, ports, ready
+        self.memory = None  # resources.memory, a Docker size string
+        self.workstation = {}  # image, dockerfile, context (repository paths), setup, cache
+        self.services = {}  # name -> dict: image, dockerfile, context, env, ports, ready, memory, command
         self.env = {}
         self.required_keys = []
         self.agents = []
@@ -788,8 +840,8 @@ def validate(raw, config_dir="", lookup=None):
         return None, ["(file): must be a mapping with version, project and agents"], [], []
     secret_errors = []
     required = scan_secrets(raw, secret_errors)
-    top = ("version", "project", "secret_store", "repositories", "workstation", "services", "env",
-           "notes", "connections", "agents")
+    top = ("version", "project", "secret_store", "resources", "repositories", "workstation", "services",
+           "env", "notes", "connections", "agents")
     v.mapping((), raw, top, required=("version", "project", "agents"))
     cfg = Config()
     cfg.required_keys = required
@@ -810,6 +862,26 @@ def validate(raw, config_dir="", lookup=None):
 
     if raw.get("secret_store") is not None:
         cfg.store = v.text(("secret_store",), raw["secret_store"], NAME, max_len=63)
+
+    def memory(path, value):
+        # Numbers are read as text first, so ``512`` is refused for its missing unit.
+        text = v.text(path, value, numbers=True)
+        if text is None:
+            return None
+        text = text.strip()
+        size = memory_bytes(text)
+        if size is None:
+            v.err(path, "must be a Docker size such as 512m or 6g (a number and one of b, k, m, g)")
+            return None
+        if size < MEMORY_MIN:
+            v.err(path, "at least 6m (Docker's smallest memory limit)")
+            return None
+        return text
+
+    resources = raw.get("resources")
+    if "resources" in raw and v.mapping(("resources",), resources, ("memory",)) is not None:
+        if resources.get("memory") is not None:
+            cfg.memory = memory(("resources", "memory"), resources["memory"])
 
     folders = set()
     if "repositories" in raw:
@@ -881,13 +953,32 @@ def validate(raw, config_dir="", lookup=None):
         return item
 
     station = raw.get("workstation")
-    cfg.workstation = {"image": None, "dockerfile": None, "context": None, "setup": []}
+    cfg.workstation = {"image": None, "dockerfile": None, "context": None, "setup": [], "cache": []}
     if "workstation" in raw:
-        item = image(("workstation",), station, ("image", "dockerfile", "context", "setup"))
+        item = image(("workstation",), station, ("image", "dockerfile", "context", "setup", "cache"))
         if item is not None:
             cfg.workstation.update(item)
-            if station.get("setup") is not None:
+            if "setup" in station:
                 cfg.workstation["setup"] = v.str_list(("workstation", "setup"), station["setup"], non_empty=True)
+            if "cache" in station:
+                seen = {}
+                entries = station["cache"]
+                if not isinstance(entries, list):
+                    v.err(("workstation", "cache"), "must be a list")
+                    entries = []
+                for index, entry in enumerate(entries):
+                    p = ("workstation", "cache", index)
+                    text = v.text(p, entry, non_empty=True)
+                    if text is None:
+                        continue
+                    target, reason = cache_target(text)
+                    if target is None:
+                        v.err(p, reason)
+                    elif target in seen:
+                        v.err(p, "%s is already listed (as %r)" % (target, seen[target]))
+                    else:
+                        seen[target] = text
+                        cfg.workstation["cache"].append({"path": text, "target": target})
     default_station = not (cfg.workstation["image"] or cfg.workstation["dockerfile"])
 
     if "services" in raw:
@@ -903,7 +994,7 @@ def validate(raw, config_dir="", lookup=None):
                 v.err(p, "the name %r is reserved" % name)
             elif name in folders:
                 v.err(p, "the name %r is also a repository folder" % name)
-            item = image(p, service, ("image", "dockerfile", "context", "env", "ports", "ready"))
+            item = image(p, service, ("image", "dockerfile", "context", "env", "ports", "ready", "memory", "command"))
             if item is None:
                 continue
             if not (item["image"] or item["dockerfile"]) and not (service.get("image") or service.get("dockerfile")):
@@ -918,6 +1009,12 @@ def validate(raw, config_dir="", lookup=None):
                     if len(set(ports)) != len(ports):
                         v.err(p + ("ports",), "ports must be unique")
             item["ports"] = ports
+            item["memory"] = memory(p + ("memory",), service["memory"]) if service.get("memory") is not None else None
+            item["command"] = None
+            if service.get("command") is not None:
+                # list[str] (docs/run-environment.md §6): numbers become strings as in env;
+                # empty arguments are real ones (--save "").
+                item["command"] = v.str_list(p + ("command",), service["command"], numbers=True, min_len=1)
             item["ready"] = None
             ready = service.get("ready")
             if ready is not None:
@@ -1227,6 +1324,7 @@ class Check(object):
         self.log_path = None
         self.verbose = args.verbose
         self.cleanup_image = None
+        self.cache_dir = None
 
     # -- reporting ----------------------------------------------------------------------
 
@@ -1354,10 +1452,12 @@ class Check(object):
                 code_i, ignored = git(["ls-files", "--others", "--ignored", "--exclude-standard", "--"] + contexts,
                                       self.repo_root)
                 if code_i == 0 and ignored:
-                    shown = ignored.splitlines()
-                    warnings.append("ignored files in a build context: a local build sees them, Exradius builds "
-                                    "from the repository and does not:\n  " + "\n  ".join(shown[:10])
-                                    + ("\n  ..." if len(shown) > 10 else ""))
+                    shown = [l for l in ignored.splitlines() if not l.startswith(CACHE_DIR_NAME + "/")
+                             and ("/" + CACHE_DIR_NAME + "/") not in l]
+                    if shown:
+                        warnings.append("ignored files in a build context: a local build sees them, Exradius "
+                                        "builds from the repository and does not:\n  " + "\n  ".join(shown[:10])
+                                        + ("\n  ..." if len(shown) > 10 else ""))
             if code == 0 and status:
                 warnings.append("not committed yet (Exradius reads the pushed branch head):\n  "
                                 + status.replace("\n", "\n  "))
@@ -1375,6 +1475,22 @@ class Check(object):
                              "\n".join(lines + ["error: %s" % e for e in errors]))
         self.config = config
         self.secrets = {name: "chk" + _random.token_hex(10) for name in required}
+        if config.workstation["cache"]:
+            self.cache_dir = os.path.realpath(self.args.cache_dir or os.path.join(os.path.dirname(self.config_path),
+                                                                                  CACHE_DIR_NAME))
+            lines.append("cache: %s: %s" % (self.cache_dir, cache_summary(self.cache_dir, config.workstation["cache"])))
+            for item in [config.workstation] + list(config.services.values()):
+                context = item.get("context")
+                if item.get("dockerfile") and context is not None:
+                    root = os.path.realpath(os.path.join(self.repo_root, context))
+                    if self.cache_dir == root or self.cache_dir.startswith(root + os.sep):
+                        lines.append("warning: the cache directory is inside the build context %s; docker build "
+                                     "would send it to the daemon: add %s to a .dockerignore there, or pass "
+                                     "--cache-dir" % (context or ".", os.path.relpath(self.cache_dir, root)))
+        if config.memory or any(s["memory"] for s in config.services.values()):
+            parts = ["workstation %s" % (config.memory or "unlimited")]
+            parts += ["%s %s" % (n, s["memory"]) for n, s in config.services.items() if s["memory"]]
+            lines.append("memory: %s" % ", ".join(parts))
         if self.args.validate:
             lines.append("agents: %s" % ", ".join(config.agents))
         return "\n".join(lines)
@@ -1455,10 +1571,23 @@ class Check(object):
             (self.tmp, "/tmp", False),
             (self.passwd, "/etc/passwd", True),
             (self.group, "/etc/group", True),
-        ] + list(extra_mounts)
+        ] + self.cache_mounts() + list(extra_mounts)
         for source, target, read_only in mounts:
             flags += ["--mount", "type=bind,source=%s,target=%s%s" % (source, target, ",readonly" if read_only else "")]
+        flags += memory_flags(self.config.memory)
         return flags
+
+    def cache_mounts(self):
+        """``workstation.cache``: one folder per entry under the local cache directory,
+        shared by every check of this config (on the server: <data_dir>/caches/<slug>/)."""
+        mounts = []
+        for index, entry in enumerate(self.config.workstation["cache"]):
+            source = os.path.join(self.cache_dir, cache_folder(index, entry["target"]))
+            if not os.path.isdir(source):
+                os.makedirs(source)
+                os.chmod(source, 0o777)
+            mounts.append((source, entry["target"], False))
+        return mounts
 
     def check_image(self):
         self.make_root()
@@ -1620,7 +1749,10 @@ class Check(object):
         cmd += ["--security-opt", "no-new-privileges", "--label", self.label] + self.platform_args()
         for key, value in env.items():
             cmd += ["-e", "%s=%s" % (key, value)]
+        cmd += memory_flags(service["memory"])
+        # ``command`` replaces the image's CMD; its ENTRYPOINT is kept.
         cmd.append(image)
+        cmd += list(service["command"] or [])
         code, out = run(cmd)
         if code != 0:
             raise StepFailed("service %s (%s) could not start" % (name, image), out)
@@ -1647,6 +1779,9 @@ class Check(object):
             except ValueError:
                 state = {}
             if state.get("Status") in ("exited", "dead") or (state and not state.get("Running", True)):
+                if state.get("OOMKilled") and service["memory"]:
+                    raise StepFailed("service %s exceeded its declared memory (%s)" % (name, service["memory"]),
+                                     self.service_logs(container))
                 raise StepFailed("service %s (%s) exited with code %s before it was ready"
                                  % (name, image, state.get("ExitCode")), self.service_logs(container))
             if "tcp" in ready:
@@ -1670,7 +1805,9 @@ class Check(object):
                 raise StepFailed("service %s (%s) did not become ready within %ds waiting for %s%s"
                                  % (name, image, timeout, check, last), self.service_logs(container))
             time.sleep(SERVICE_POLL_INTERVAL)
-        return "%s ready in %.1fs (%s), reachable as %s" % (image, time.time() - started, check, name)
+        extra = "".join([", memory %s" % service["memory"] if service["memory"] else "",
+                         ", command %s" % " ".join(service["command"])[:80] if service["command"] else ""])
+        return "%s ready in %.1fs (%s), reachable as %s%s" % (image, time.time() - started, check, name, extra)
 
     def service_logs(self, container):
         code, out = run(["docker", "logs", "--tail", "40", container])
@@ -1693,10 +1830,13 @@ class Check(object):
         started = time.time()
         code, out = stream(cmd, self.log, self.verbose)
         seconds = time.time() - started
+        _, oom = run(["docker", "inspect", "--format", "{{.State.OOMKilled}}", container])
         run(["docker", "rm", "-f", container])
         if code != 0:
             hint = ""
-            if code == 137:
+            if oom.strip() == "true" and self.config.memory:
+                hint = " (exceeded its declared memory (%s): raise resources.memory)" % self.config.memory
+            elif code == 137:
                 hint = " (killed: usually out of memory; Docker has %s)" % docker_memory()
             elif code == 127:
                 hint = " (command not found: the workstation image lacks a tool this command runs)"
@@ -1737,6 +1877,29 @@ class Check(object):
             removed.append("the temporary folder")
         if removed:
             self.say("DONE  Clean up: removed %s" % ", ".join(removed))
+
+
+CACHE_DIR_NAME = ".exradius-cache"
+"""The local stand-in for <data_dir>/caches/<slug>/, next to exradius.yaml (git-ignored)."""
+
+
+def memory_flags(memory):
+    """A declared memory is the container's cgroup limit, swap included (run-environment §4)."""
+    return ["--memory", memory, "--memory-swap", memory] if memory else []
+
+
+def cache_summary(cache_dir, entries):
+    """The size of each ``workstation.cache`` folder: ``~/.cache/uv 236 MB, ...``."""
+    parts = []
+    for index, entry in enumerate(entries):
+        folder = os.path.join(cache_dir, cache_folder(index, entry["target"]))
+        size = 0
+        if os.path.isdir(folder):
+            code, out = run(["du", "-sk", folder])
+            first = out.split("\t")[0].strip()
+            size = int(first) * 1024 if code == 0 and first.isdigit() else 0
+        parts.append("%s %s" % (entry["path"], "%.0f MB" % (size / 1e6) if size > 1e6 else "empty"))
+    return ", ".join(parts)
 
 
 def failed_instruction(output):
@@ -1792,6 +1955,9 @@ def parse_args(argv):
     parser.add_argument("--buildkit", action="store_true",
                         help="build with BuildKit (Exradius builds without it; use only to compare)")
     parser.add_argument("--keep", action="store_true", help="keep the temporary work, home and tmp folders")
+    parser.add_argument("--cache-dir", metavar="DIR",
+                        help="where workstation.cache folders live between checks (default: .exradius-cache "
+                             "next to exradius.yaml; delete it to start cold)")
     parser.add_argument("-v", "--verbose", action="store_true", help="stream build and setup output")
     parser.add_argument("--tail", type=int, default=60, help="lines of output shown for the failing step")
     args = parser.parse_args(argv)
@@ -1805,6 +1971,8 @@ def parse_args(argv):
             parser.error("--repo %s: %s is not a folder" % (name, path))
         args.repo_map[name] = path
     args.repos_dir = [os.path.expanduser(d) for d in args.repos_dir]
+    if args.cache_dir:
+        args.cache_dir = os.path.abspath(os.path.expanduser(args.cache_dir))
     return args
 
 

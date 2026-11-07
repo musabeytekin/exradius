@@ -2,7 +2,9 @@
 # Local check of an Exradius project config, the way the admin panel's Verify runs it:
 # validate exradius.yaml, build the images, start the services, run the setup commands in
 # the workstation under the run's conditions (uid 1000 named runner with home /home/runner,
-# read-only root filesystem, no capabilities, no-new-privileges), then clean up.
+# read-only root filesystem, no capabilities, no-new-privileges, resources.memory as the
+# memory limit, workstation.cache mounted from .exradius-cache/ next to exradius.yaml),
+# then clean up everything but the cache.
 # The container flags mirror backend/exradius/worker/containers.py in the Exradius
 # repository; exradius_check.py holds them.
 #

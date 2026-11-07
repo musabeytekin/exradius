@@ -1,6 +1,6 @@
 {
   "name": "exradius",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Set up a project for Exradius: write exradius.yaml, the workstation Dockerfile and the admin README, and check them locally with Docker the way Exradius's Verify does.",
   "author": { "name": "musabeytekin" },
   "homepage": "https://github.com/musabeytekin/exradius-skill",

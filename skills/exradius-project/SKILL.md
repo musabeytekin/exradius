@@ -22,11 +22,14 @@ Bundled with this skill (read them; do not guess):
 
 - `${CLAUDE_SKILL_DIR}/references/schema.md`: every key, its default and the rules.
 - `${CLAUDE_SKILL_DIR}/references/run-conditions.md`: what a workstation must survive
-  (uid 1000 named `runner`, read-only root, no capabilities, glibc, bash, git).
+  (uid 1000 named `runner`, read-only root, no capabilities, glibc, bash, git), starting
+  with the two limits every project must fit: **no Docker daemon inside a run** and **a
+  read-only root filesystem**.
 - `${CLAUDE_SKILL_DIR}/references/pitfalls.md`: the failures seen so far and their fixes.
   Read it before writing a Dockerfile.
-- `${CLAUDE_SKILL_DIR}/references/examples.md`: three real projects (Java/Python, Node with
-  Yarn 4, Python with uv plus a pnpm dashboard), their files and why each line is there.
+- `${CLAUDE_SKILL_DIR}/references/examples.md`: four real projects (Java/Python, Node with
+  Yarn 4, Python with uv plus a pnpm dashboard, a pnpm monorepo plus a Django API with four
+  services), their files and why each line is there.
 - `${CLAUDE_SKILL_DIR}/references/admin-readme.md`: the README template and how to
   describe each kind of key.
 - `${CLAUDE_SKILL_DIR}/scripts/check.sh`: the local check (Docker CLI, git, Python 3.8+).
@@ -70,6 +73,9 @@ For each code repository (the current checkout, plus any the developer named):
 - **Services**: `docker-compose*.yml`, `compose*.yaml`, `.devcontainer/`, CI service
   containers (`.github/workflows/*`, `.gitlab-ci.yml`, `.circleci/`): image, version, env,
   ports, the host names the app expects.
+- **Tests that start containers** (Testcontainers, `docker compose` in test scripts, kind):
+  they cannot run inside a run (no Docker daemon). Model what they start as `services`
+  and say in `notes` which tests stay for CI.
 - **Commands**: how dependencies are installed, how the database is created or migrated,
   how tests and linters run (README, CONTRIBUTING, AGENTS.md / CLAUDE.md, Makefile,
   `package.json` scripts, CI steps).
@@ -79,6 +85,11 @@ For each code repository (the current checkout, plus any the developer named):
   and is not a throwaway test value.
 - **Git remotes**: each repository's URL, default branch, host (GitHub, GitLab, ...),
   whether it is private (`gh repo view --json visibility` when `gh` is available).
+
+- **Package managers and memory**: every package manager the setup commands will run
+  (for its `workstation.cache` entry), and the heaviest step's memory (a large
+  JavaScript install or type check, a Java build, pytest-xdist workers): the README
+  needs it and so does `resources.memory`.
 
 Then decide the workstation: the stock image of the main language is enough only when it
 has every tool the setup commands, tests and linters call at the right version, plus bash
@@ -122,10 +133,28 @@ code repository when chosen):
     `setup` with the frozen-lockfile install per repository (`cd <repo> && yarn install
     --immutable`, `uv sync --locked`, `pnpm install --frozen-lockfile`, `npm ci`,
     `bundle install`, `go mod download`), database creation and migrations for tests,
-    `cp -r /opt/m2 ~/.m2`-style cache copies. Each command runs with cwd `/work`, as uid
-    1000, without root.
+    and a one-time seed of a cache from a pre-fetch in the image only when even the
+    first run must not download (pitfalls.md). Each command runs with cwd `/work`, as
+    uid 1000, without root.
+  - `workstation.cache` with one entry for every package manager the setup commands run,
+    at the path in pitfalls.md's table (`~/.local/share/pnpm/store`, `~/.yarn/berry/cache`,
+    `~/.npm`, `~/.cache/uv`, `~/.cache/pip`, `~/.m2/repository`, `~/.gradle/caches`,
+    `~/.cache/go-build` and the Go module cache, `~/.cargo/registry`), plus the `env`
+    entries that table names (`pnpm_config_store_dir`, `UV_LINK_MODE: copy`,
+    `CARGO_HOME`). Download stores only, never `node_modules`, `.venv` or build output.
+  - `resources.memory`: your estimate of the workstation's peak (the heaviest of the
+    setup commands, the test suite and the type checks, plus the agent itself, about
+    1 GB), rounded up with headroom: `4g` for a small service, `6g` to `8g` for a large
+    JavaScript monorepo or a Java build. It is both a reservation and a hard limit
+    (schema.md), so do not cut it close; the same figure goes into the README. A service
+    gets a `memory` only when the compose file or its documentation states one or it is
+    known to be heavy (Elasticsearch, a JVM service): `512m` for Postgres or Redis is
+    typical when given.
   - `services` from the compose/CI files, named as the app expects the host name, each
-    with a TCP-based `ready` (`pg_isready -h 127.0.0.1 ...`, `tcp: 6379`).
+    with a TCP-based `ready` (`pg_isready -h 127.0.0.1 ...`, `tcp: 6379`). A compose
+    `command:` becomes the service's `command`; a compose `entrypoint:` that runs a
+    bootstrap script becomes `command: [/bin/sh, -c, "..."]` when the image's entrypoint
+    passes a shell through (pitfalls.md, Plane's MinIO).
   - `env` pointing the app at the services by name, test-only values in plain text,
     `${secret:NAME}` only for real secrets, the same reference wherever a value repeats.
   - `notes`: what you would tell a new engineer on day one: where things are, how to run
@@ -146,12 +175,17 @@ code repository when chosen):
   `/opt/uv/python` and linked as `python3`, ...); `chmod -R a+rX` everything prepared under
   `/opt`; no `RUN --mount`, no heredocs; a comment on top saying what the image is for.
   Read pitfalls.md first.
-- **Service Dockerfiles** only when no stock image can do (an extension, seed data).
+- **Service Dockerfiles** only when no stock image with a `command` can do: the
+  entrypoint itself must change, or the image needs files (an extension, seed data).
 - **`README.md`** for the admin, from admin-readme.md: the config repository URL and
   branch, whether it is private (so a host credential is needed), the store name, every
   required key with its format, where to obtain it and what it is used for, a `.env`
-  block of the key names with empty values, and the memory and disk a run needs.
-- A `.gitignore` is not needed; do not add files the config does not use.
+  block of the key names with empty values, the memory (the `resources.memory` figure)
+  and disk a run needs, and where the caches live and how to clear them.
+- **`.gitignore`** with the line `.exradius-cache/` when the file has a `workstation.cache`:
+  the local check keeps the cache folders there. Nothing else; do not add files the
+  config does not use. When a build `context` is the repository root, add
+  `.exradius-cache/` to a `.dockerignore` there too.
 
 Validate as you go: `bash ${CLAUDE_SKILL_DIR}/scripts/check.sh --validate <config folder>`
 reads the file like Exradius does and lists the required keys (use that list for the
@@ -170,14 +204,22 @@ checkout to a fresh clone under `/work/<name>` (repositories without `--repo` or
 the services on a temporary network and waits for `ready` with the server's 120-second
 timeout, runs every setup command as uid 1000 with a read-only root filesystem, no
 capabilities, `no-new-privileges`, the generated `runner` passwd entry, `HOME=/home/runner`
-and the project `env` with a throwaway value for each secret, then removes everything.
+and the project `env` with a throwaway value for each secret, applies `resources.memory`
+and each service's `memory` as the containers' limits (`--memory` and `--memory-swap`) and
+each service's `command`, mounts the `workstation.cache` folders from
+`.exradius-cache/` next to `exradius.yaml` (kept between checks, `--cache-dir` elsewhere),
+then removes everything else.
 Exit 0 means every step passed; on a failure it prints the failing step and its output's
 tail, and the full log path.
 
 - Builds and installs can take many minutes: run it in the background and wait for it,
   rather than under a short timeout.
 - Fix the cause (the Dockerfile, a setup command, a `ready` check, an `env` value), not the
-  symptom, and rerun until it passes. Every failure is a lesson for pitfalls.md's list;
+  symptom, and rerun until it passes. A step that "exceeded its declared memory" needs a
+  larger `resources.memory` (or a service's `memory`), or less parallelism.
+- With a `cache`, run the check twice: after the first run every cache folder listed in
+  "Read config" must have grown, and the second run's installs must report no downloads
+  (pnpm: `downloaded 0`). An entry that stayed empty is at the wrong path. Every failure is a lesson for pitfalls.md's list;
   mention new ones to the developer.
 - Flags: `--live` mounts the checkouts as they are (uncommitted changes included);
   `--platform linux/amd64` builds and runs the server's architecture on an Apple Silicon
@@ -220,6 +262,9 @@ With an `exradius.yaml` already present (in the folder or in `.exradius/`):
 2. Diff the code against it: new services in compose or CI, tool versions the lockfiles
    now need (a new `packageManager`, a newer uv or Node), new repositories, new secret
    names in the env examples, setup commands that no longer match the README or CI.
+   Files written before skill 0.2.0 have no `resources.memory` and no `workstation.cache`:
+   propose both (from the README's memory figure and the package managers in setup), and
+   a service `command` in place of a service Dockerfile that only changes the command.
    When the developer brings a failed Verify's step and log, start from that.
 3. Propose the edits with a reason each, keeping everything else as it is (comments,
    order, wording of roles and notes).

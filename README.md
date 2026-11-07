@@ -17,6 +17,17 @@ agents on a team's repositories. On the developer's machine it:
 
 It never asks for or reads a secret value and never calls the Exradius API.
 
+## Two limits to know first
+
+Every Exradius run, and so every project, lives with two limits:
+
+1. **No Docker daemon inside a run.** Tests that start containers themselves
+   (Testcontainers, `docker compose` in a test script) cannot run there. The skill models
+   what they start as `services` next to the agent and says which tests stay for CI.
+2. **A read-only root filesystem.** Nothing can be installed at run time outside the
+   home, `/work` and `/tmp`: whatever a run needs besides the project's own dependencies
+   goes into the workstation Dockerfile.
+
 ## Install
 
 In Claude Code:
@@ -72,14 +83,16 @@ Steps, in Verify's order:
 | Build workstation / Build service *name* | `docker build` of each Dockerfile from its declared context, with the classic builder like the server (`--buildkit` to compare); `image:` entries are pulled when missing |
 | Check workstation image | glibc (no Alpine/musl), `bash`, `git`, and the tools found on PATH, as uid 1000 on a read-only root |
 | Prepare /work | a fresh clone of each local checkout (`--repo NAME=PATH`, `--repos-dir DIR`, or the config's own repository for `.exradius/`), else a clone from the URL; `--live` mounts the checkouts as they are |
-| Start service *name* | on a temporary network under its name, with the server's capabilities and `ready` check (`command`, `tcp`, image HEALTHCHECK, or running), 120 s timeout |
-| Setup: *command* | `/bin/sh -c` in the workstation with `--user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges`, generated `/etc/passwd`/`/etc/group` (`runner`, home `/home/runner`), `/work`, home and `/tmp` as writable bind mounts, `HOME=/home/runner`, the project `env` with one throwaway value per `${secret:NAME}`, joined to the services' network |
-| Clean up | removes the containers, the network and the temporary folders (`--keep` keeps the folders); built images stay as a cache |
+| Start service *name* | on a temporary network under its name, with the server's capabilities, its `command` and `memory`, and its `ready` check (`command`, `tcp`, image HEALTHCHECK, or running), 120 s timeout |
+| Setup: *command* | `/bin/sh -c` in the workstation with `--user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges`, generated `/etc/passwd`/`/etc/group` (`runner`, home `/home/runner`), `/work`, home and `/tmp` as writable bind mounts, `HOME=/home/runner`, the project `env` with one throwaway value per `${secret:NAME}`, joined to the services' network; `resources.memory` as `--memory` and `--memory-swap`; each `workstation.cache` folder mounted from `.exradius-cache/` next to `exradius.yaml` |
+| Clean up | removes the containers, the network and the temporary folders (`--keep` keeps the folders); built images and `.exradius-cache/` stay |
 
 Exit status 0 when every step passed, 1 with the first failing step and its output
 otherwise, 2 for usage errors. `--validate` only reads the file (no Docker),
-`--platform linux/amd64` checks the server's architecture from an Apple Silicon Mac, `-v`
-streams output, `--help` lists the rest.
+`--platform linux/amd64` checks the server's architecture from an Apple Silicon Mac,
+`--cache-dir DIR` keeps the cache folders elsewhere (delete the folder to start cold), `-v`
+streams output, `--help` lists the rest. The skill adds `.exradius-cache/` to the config
+repository's `.gitignore`.
 
 Not covered locally: the agent runtime, providers and models, pushes with the repository
 credential, MCP connections and the server's network. A Verify on the server covers those.
@@ -94,8 +107,8 @@ The skill's references are the developer documentation for Exradius projects:
   what a workstation image must survive;
 - [`references/pitfalls.md`](skills/exradius-project/references/pitfalls.md): failures
   seen on real projects and their fixes;
-- [`references/examples.md`](skills/exradius-project/references/examples.md): three worked
-  examples (Bank of Anthos, Outline, Saleor);
+- [`references/examples.md`](skills/exradius-project/references/examples.md): four worked
+  examples (Bank of Anthos, Outline, Saleor, Plane);
 - [`references/admin-readme.md`](skills/exradius-project/references/admin-readme.md): the
   README the admin receives.
 
@@ -103,9 +116,30 @@ The skill's references are the developer documentation for Exradius projects:
 
 | skill (plugin) | writes `exradius.yaml` |
 |---|---|
+| 0.2.0 | version 1, with `resources`, service `memory` and `command`, `workstation.cache` |
 | 0.1.0 | version 1 |
 
 A change of the file's schema in Exradius is followed by a release of this plugin.
+
+### 0.2.0
+
+For the run environment keys Exradius added to version 1 (all optional; a file without
+them means what it meant before):
+
+- `resources.memory` and a service's `memory`: a Docker size (`6g`, `512m`) that Exradius
+  reserves before starting a run and enforces as the container's limit. The skill
+  estimates the workstation's peak and writes it; the check applies it as `--memory` and
+  `--memory-swap` and reports a step that went over it.
+- `workstation.cache`: download stores kept per project across runs (pnpm, Yarn, npm, uv,
+  pip, Maven, Gradle, Go, Cargo; the paths are in `references/pitfalls.md`). The skill adds
+  one per package manager it finds; the check mounts them from `.exradius-cache/`.
+- A service's `command`: the container command, the image's entrypoint kept. The skill
+  prefers it to a service Dockerfile; Plane's MinIO bucket bootstrap is now a stock image
+  with a `command`.
+- The run conditions now open with the two limits above, and note that hard links do not
+  cross bind mounts (pnpm and uv copy from their caches).
+- The examples gain Plane and the new keys. The Bank of Anthos example's Maven pre-fetch
+  now lands in `~/.m2/repository`, where Maven looks (it used to be copied to `~/.m2`).
 
 ## Layout
 

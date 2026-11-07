@@ -4,6 +4,25 @@ Every setup command and every agent session runs in a container started from the
 workstation image with these conditions. A workstation that works on a laptop as root can
 still fail here; `scripts/check.sh` reproduces all of them locally.
 
+From the inside, a run looks like a developer's own workstation: a normal user with a
+home, the project's tools, its services by host name, outbound network. Exradius deviates
+only where security requires it, and enforces each deviation at the level of the kernel,
+Docker or the command line, where no project setting, tool or agent can change it.
+
+## Two limits to know before anything else
+
+1. **No Docker daemon inside a run.** Nothing in the workstation can start containers:
+   no `docker`, no `docker compose`, no Testcontainers, no kind or minikube. Tests that
+   start their own containers cannot run there. Model each dependency they start as a
+   `services` entry (same image, same env) and point the tests at it by host name;
+   tests that only work by starting containers themselves stay for CI, and the notes
+   should say so.
+2. **A read-only root filesystem.** At run time nothing can be installed outside the
+   home, `/work` and `/tmp`: no `apt-get`, no `npm install -g`, no `pip install` into the
+   system, no `corepack enable`, no `sudo`. Everything a run needs that is not a project
+   dependency goes into the workstation Dockerfile; project dependencies are installed by
+   the setup commands into `/work` and the home.
+
 ## The image
 
 - **Any glibc-based Linux image**: Debian, Ubuntu, the official `node`, `python`, `maven`,
@@ -47,12 +66,22 @@ still fail here; `scripts/check.sh` reproduces all of them locally.
   - `/work`: the project directory, one folder per repository (`/work/<name>`), the
     working directory of setup commands and of the agent;
   - `/home/runner`: the run's home, empty at the start of a run;
-  - `/tmp`: the run's temporary directory (mode 1777), empty at the start.
-- All three are directories **on the server's disk, not in memory**: package manager
-  caches (`~/.cache/yarn`, `~/.npm`, `~/.cache/uv`, `~/.m2`, `~/go/pkg/mod`), Yarn Berry's
-  staging in `/tmp` and build output take disk space. They persist from the setup
-  commands to the agent session and across a resumed session of the same task, and are
-  removed when the task ends.
+  - `/tmp`: the run's temporary directory (mode 1777), empty at the start;
+  - each `workstation.cache` folder (schema.md), mounted at its path from a per-project
+    directory on the server's disk that outlives the run: the same folders in every run of
+    the project, concurrent ones included.
+- `/work`, the home and `/tmp` are directories **on the server's disk, not in memory**:
+  package manager caches (`~/.cache/yarn`, `~/.npm`, `~/.cache/uv`, `~/.m2`,
+  `~/go/pkg/mod`), Yarn Berry's staging in `/tmp` and build output take disk space. They
+  persist from the setup commands to the agent session and across a resumed session of
+  the same task, and are removed when the task ends; a download cache listed in
+  `workstation.cache` is kept instead, so the next run does not download it again.
+- **Hard links do not cross bind mounts.** `/work`, the home, `/tmp` and each cache folder
+  are separate mounts, so a tool that hard-links files from its store into the project
+  (pnpm into `node_modules`, uv into `.venv`) copies them instead. pnpm and uv fall back to
+  copying by themselves (uv prints a warning; `UV_LINK_MODE=copy` in `env` silences it).
+  The copy still saves the download; it costs disk in `/work` as on a machine without
+  hard links.
 - `/work/.exradius/attachments` is a read-only folder with the task's attachments.
 - Anything the image puts elsewhere (`/opt`, `/usr/local`) is readable but not writable at
   run time. Prepare shared tool state (corepack's cache, uv's Python installs, a Maven
@@ -71,24 +100,35 @@ still fail here; `scripts/check.sh` reproduces all of them locally.
   runtime's state).
 - The image's own `ENV` lines (`PATH`, `JAVA_HOME`, `COREPACK_HOME`, ...).
 
+## Memory
+
+- `resources.memory` is the workstation's cgroup limit, swap included, and a service's
+  `memory` the service's. A process that goes over it is killed (exit 137) and the run
+  fails with "exceeded its declared memory". Without a declaration there is no limit and
+  nothing reserved: the run competes for the server's memory with every other run.
+- A declared memory is also reserved: the run waits (`waiting for memory`) until it fits
+  next to the runs in progress.
+- Memory is used by processes only: the home, `/tmp` and the caches are on disk.
+
 ## The network
 
 - Outbound network access is available (package registries, git hosts).
 - Services run on a network of their own per run; the workstation joins it and reaches
   each service by its name (`postgres:5432`). No ports are published, no Docker daemon is
-  available inside the workstation, and there is no Kubernetes.
+  available inside the workstation (the first limit above), and there is no Kubernetes.
 - Services start before the setup commands and stay up for the whole task.
 
 ## The order of a run (and of Verify)
 
 1. Read `exradius.yaml` at the branch head; refuse the task if it has errors or the store
-   lacks a key.
+   lacks a key. Wait until the declared memory fits the server's budget.
 2. Build the workstation and service images that come from Dockerfiles (cached by
    content), pull the others.
 3. Clone each repository into `/work/<name>` at its branch.
-4. Start the services; wait for each to be ready (120 seconds each).
+4. Start the services (with their `command` and `memory`); wait for each to be ready
+   (120 seconds each).
 5. Run each setup command in its own container from the workstation image, under the
-   conditions above, cwd `/work`. A non-zero exit fails the run with the output's tail.
+   conditions above (cache folders mounted, memory limit applied), cwd `/work`. A non-zero exit fails the run with the output's tail.
    There is no time limit per command, but every run pays for them, so keep them to
    what the agent needs (dependency installs, database creation, cache copies).
 6. Start the agent in the same conditions; the runtime is mounted read-only at
