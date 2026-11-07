@@ -13,6 +13,7 @@ from exradius import messaging
 from exradius.api.deps import DB, Admin, State
 from exradius.models import Worker, utcnow
 from exradius.providers import default_provider, provider_count
+from exradius.providers import provider_models
 from exradius.runtimes import all_runtimes
 from exradius.schemas import api as s
 from exradius.schemas.messages import ROUTING_KEYS
@@ -80,6 +81,7 @@ def runtime_out(runtime) -> s.RuntimeOut:
                     )
                     for m in kind.auth_methods
                 ],
+                models=provider_models(kind.kind),
             )
             for kind in runtime.capabilities.providers
         ],

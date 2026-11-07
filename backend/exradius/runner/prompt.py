@@ -1,7 +1,7 @@
 """Prompt assembly (architecture §13).
 
-System prompt: the runtime's preset, then ``OPERATING_RULES``, then the agent's prompt (its
-role). First user message: the ticket only (task, context, attachments). Neither mentions
+System prompt: the runtime's preset, then ``OPERATING_RULES``, then the generated environment
+section (docs/environment-and-services.md §1), then the agent's prompt (its role). First user message: the ticket only (task, context, attachments). Neither mentions
 workspaces or Exradius internals.
 """
 
@@ -39,8 +39,10 @@ admin panel's guide shows this text verbatim."""
 
 
 def build_system_prompt(spec: RunSpecResponse) -> str:
-    """Appended to the runtime's own system prompt: the operating rules, then the role."""
-    return "\n\n".join(part for part in (OPERATING_RULES, spec.agent_prompt.strip()) if part)
+    """Appended to the runtime's own system prompt: the operating rules, the environment,
+    then the role."""
+    parts = (OPERATING_RULES, spec.environment_text.strip(), spec.agent_prompt.strip())
+    return "\n\n".join(part for part in parts if part)
 
 
 def build_task_message(spec: RunSpecResponse) -> str:

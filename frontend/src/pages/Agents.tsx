@@ -5,7 +5,7 @@ import { Checkbox, PickList, Table } from "@/components/ui/controls";
 import { CodeBlock } from "@/components/ui/data";
 import { Icon } from "@/components/ui/icons";
 import { Tooltip } from "@/components/ui/overlays";
-import { Button, Card, CardHeader, Chip, EmptyState, Field, Input, Mono, PageHeader, SkeletonRows, Textarea } from "@/components/ui/primitives";
+import { Button, Card, CardHeader, Chip, EmptyState, Field, Input, Mono, PageHeader, SkeletonRows, Spinner, Textarea } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { buttonClass } from "@/lib/buttonStyles";
 import { cn } from "@/lib/cn";
@@ -14,10 +14,12 @@ import { relativeTime } from "@/lib/format";
 import { qk, useAgents, useConnections, useProjects, useProviders, useRuntimes } from "@/lib/queries";
 import { SLUG_RE, slugify } from "@/lib/slug";
 import { emailError, needsEmail } from "@/lib/identity";
-import { runtimeAccepts } from "@/lib/providers";
+import { modelLabel, modelSelection, modelsFor, OTHER, RUNTIME_DEFAULT } from "@/lib/models";
+import { providerKinds, runtimeAccepts, testDetail } from "@/lib/providers";
+import { runProviderTest, testOk } from "@/lib/providerTest";
 import { TASK_LAYOUT, TEMPLATES } from "@/lib/templates";
 import { toast } from "@/lib/toast";
-import type { Agent, Connection } from "@/lib/types";
+import type { Agent, Connection, ProviderModel } from "@/lib/types";
 
 export function AgentsPage() {
   const { edit, create } = useSearch({ from: "/app/agents" });
@@ -48,6 +50,7 @@ function AgentList() {
     const p = providers.data?.find((x) => (a.provider_id ? x.id === a.provider_id : x.is_default));
     return p ? (a.provider_id ? p.name : `Default (${p.name})`) : "—";
   };
+  const showModel = (agents.data ?? []).some((a) => "model" in a);
   const attachments = useQueries({ queries: (projects.data ?? []).map((p) => ({ queryKey: qk.projectAgents(p.id), queryFn: () => api.projectAgents.list(p.id) })) });
   const projectsOf = (a: Agent) => (projects.data ?? []).filter((_, i) => attachments[i]?.data?.some((x) => x.agent_id === a.id));
 
@@ -76,6 +79,7 @@ function AgentList() {
                 <Table.Th>Agent</Table.Th>
                 <Table.Th>Connections</Table.Th>
                 {showProvider && <Table.Th>Provider</Table.Th>}
+                {showModel && <Table.Th>Model</Table.Th>}
                 <Table.Th>Projects</Table.Th>
                 <Table.Th className="text-right">Created</Table.Th>
               </tr>
@@ -97,6 +101,11 @@ function AgentList() {
                       </div>
                     </Table.Td>
                     {showProvider && <Table.Td><span className="text-xs text-muted">{providerName(a)}</span></Table.Td>}
+                    {showModel && (
+                      <Table.Td>
+                        {a.model ? <Mono className="text-xs text-muted">{a.model}</Mono> : <span className="text-xs text-subtle">runtime default</span>}
+                      </Table.Td>
+                    )}
                     <Table.Td>
                       {ps.length ? <span className="text-xs text-muted">{ps.map((p) => p.slug).join(", ")}</span> : <Chip tone="warn">not attached</Chip>}
                     </Table.Td>
@@ -135,6 +144,18 @@ function AgentEditor({ agent }: { agent: Agent | null }) {
   const defaultProvider = providerList.find((p) => p.is_default);
   const runtimeSpec = runtimes.data?.find((r) => r.name === runtime);
   const usableProviders = providerList.filter((p) => runtimeAccepts(runtimeSpec, p));
+  // The model list follows the provider the agent will use: its own, or the default.
+  const effectiveProvider = providerList.find((p) => p.id === providerId) ?? defaultProvider;
+  const providerKind = effectiveProvider?.kind ?? (providers.isSuccess ? null : "anthropic");
+  const kindSpec = runtimeSpec?.providers?.find((k) => k.kind === providerKind) ?? providerKinds(runtimes.data).find((k) => k.kind === providerKind);
+  // The provider's own list first, then its kind's catalog entry, then the static fallback.
+  const models = modelsFor(effectiveProvider?.models?.length ? { kind: effectiveProvider.kind, models: effectiveProvider.models } : kindSpec, providerKind);
+  const apiListsModels = !!(effectiveProvider?.models?.length || kindSpec?.models?.length);
+  const modelSupported = agent ? "model" in agent : agents.data?.length ? agents.data.some((a) => "model" in a) : true;
+  const [model, setModel] = useState<string | null>(agent?.model ?? null);
+  const [otherMode, setOtherMode] = useState(false);
+  const modelSel = otherMode ? OTHER : modelSelection(model, models);
+  const modelOut = model?.trim() || null;
   const [promptTouched, setPromptTouched] = useState(!!agent);
   const [idName, setIdName] = useState(agent?.identity_name ?? agent?.name ?? "");
   // It follows the name only while creating; the API does not rename identities later.
@@ -154,10 +175,11 @@ function AgentEditor({ agent }: { agent: Agent | null }) {
   const body = {
     name: name.trim(), slug: effectiveSlug, prompt, runtime, connection_ids: connIds,
     ...(hasProviders ? { provider_id: providerId } : {}),
+    ...(modelSupported ? { model: modelOut } : {}),
     ...(hasIdentity ? { identity_name: effectiveIdName.trim() || name.trim(), identity_email: idEmail.trim() } : {}),
   };
   const identityDirty = !!agent && hasIdentity && ((effectiveIdName.trim() || name.trim()) !== (agent.identity_name ?? agent.name) || idEmail.trim() !== (agent.identity_email ?? ""));
-  const dirty = !agent || identityDirty || (hasProviders && providerId !== (agent.provider_id ?? null)) || name !== agent.name || effectiveSlug !== agent.slug || prompt !== agent.prompt || runtime !== agent.runtime || JSON.stringify([...connIds].sort()) !== JSON.stringify([...agent.connection_ids].sort());
+  const dirty = !agent || identityDirty || (modelSupported && modelOut !== (agent.model ?? null)) || (hasProviders && providerId !== (agent.provider_id ?? null)) || name !== agent.name || effectiveSlug !== agent.slug || prompt !== agent.prompt || runtime !== agent.runtime || JSON.stringify([...connIds].sort()) !== JSON.stringify([...agent.connection_ids].sort());
   const chosen = (connections.data ?? []).filter((c) => connIds.includes(c.id));
 
   const applyTemplate = async (key: string) => {
@@ -272,6 +294,23 @@ function AgentEditor({ agent }: { agent: Agent | null }) {
                 />
               </Field>
             )}
+            {modelSupported && (
+              <ModelField
+                models={models}
+                selection={modelSel}
+                model={model}
+                onSelect={(v) => {
+                  if (v === OTHER) {
+                    setOtherMode(true);
+                    return;
+                  }
+                  setOtherMode(false);
+                  setModel(v === RUNTIME_DEFAULT ? null : v);
+                }}
+                onOther={setModel}
+                testProvider={apiListsModels && effectiveProvider ? { id: effectiveProvider.id, name: effectiveProvider.name } : null}
+              />
+            )}
           </Card>
 
           <Card>
@@ -328,6 +367,66 @@ function AgentEditor({ agent }: { agent: Agent | null }) {
         <GuidePanel connections={chosen} />
       </div>
     </form>
+  );
+}
+
+function ModelField({ models, selection, model, onSelect, onOther, testProvider }: {
+  models: ProviderModel[]; selection: string; model: string | null;
+  onSelect: (v: string) => void; onOther: (v: string | null) => void;
+  /** Set when the API takes a model on the provider test. */
+  testProvider: { id: string; name: string } | null;
+}) {
+  const [testing, setTesting] = useState(false);
+  const test = async () => {
+    if (!testProvider || !model) return;
+    setTesting(true);
+    try {
+      const t = await runProviderTest(testProvider.id, { model });
+      if (!t) toast.err(`${model}: the test is still running`, "Its result is stored on the provider when it ends.");
+      else if (testOk(t)) toast.ok(`${model} works with ${testProvider.name}`, testDetail(t.detail) ?? undefined);
+      else toast.err(`${model} failed with ${testProvider.name}`, t.error ?? testDetail(t.detail) ?? undefined);
+    } catch (e) {
+      toast.err("The test did not run", e);
+    } finally {
+      setTesting(false);
+    }
+  };
+  return (
+    <Field label="Model" className="mt-3" hint={selection === RUNTIME_DEFAULT ? "The runtime picks; it follows the runtime's default when that changes." : undefined}>
+      <div className="flex flex-col gap-2">
+        <PickList
+          aria-label="Model"
+          value={selection}
+          onChange={(v) => v && onSelect(v)}
+          options={[
+            { value: RUNTIME_DEFAULT, label: "Runtime default" },
+            ...models.map((m) => ({ value: m.id, label: m.label || m.id, text: m.label || m.id, description: m.description ?? undefined, meta: m.label ? <Mono className="text-2xs text-subtle">{m.id}</Mono> : undefined })),
+            { value: OTHER, label: "Other…", description: "A model id this list does not know" },
+          ]}
+        />
+        {selection === OTHER && (
+          <div className="flex gap-1.5">
+            <Input
+              mono
+              autoFocus
+              aria-label="Model id"
+              value={model ?? ""}
+              onChange={(e) => onOther(e.target.value || null)}
+              placeholder={models[0]?.id ?? "model-id"}
+              spellCheck={false}
+              className="min-w-0 flex-1"
+            />
+          </div>
+        )}
+        {testProvider && model && (
+          <div>
+            <Button size="xs" variant="ghost" icon={testing ? undefined : "play"} disabled={testing} onClick={test}>
+              {testing && <Spinner size={11} />}Test {modelLabel(model, models)} with {testProvider.name}
+            </Button>
+          </div>
+        )}
+      </div>
+    </Field>
   );
 }
 

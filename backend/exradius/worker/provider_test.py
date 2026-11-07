@@ -73,6 +73,7 @@ class ProviderTester:
                 return
             test.state, test.started_at = "running", utcnow()
             await session.commit()
+            model = test.model
             if provider is None:
                 ok, detail, error = False, None, "the provider was deleted"
                 env = None
@@ -89,6 +90,7 @@ class ProviderTester:
                     env=env,
                     timeout=PROBE_TIMEOUT,
                     runtime=await self.containers.ensure_runtime(runtime),
+                    model=model,
                 )
                 ok, detail, error = parse_probe(result.exit_code, result.logs)
             except Exception as exc:  # recorded on the test
@@ -106,7 +108,8 @@ class ProviderTester:
             test.ended_at = utcnow()
             test.detail, test.error = detail, error
             provider = await session.get(Provider, test.provider_id)
-            if provider is not None and fingerprint(provider) == test.fingerprint:
+            # A failed test of a chosen model says nothing against the credential.
+            if provider is not None and fingerprint(provider) == test.fingerprint and (ok or test.model is None):
                 provider.last_test = last_test(ok, detail, error, at=test.ended_at)
             await session.commit()
 

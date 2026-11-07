@@ -70,6 +70,27 @@ The bundle is world-readable and executable, so the unprivileged run user can ex
 regardless of the project image's own users. Home, `/tmp` and the state mount stay as
 they are. `CLAUDE_CONFIG_DIR` still points into the state mount.
 
+Project images often have their own passwd entry for uid 1000 with another home (Ubuntu's
+`ubuntu:x:1000:1000::/home/ubuntu`), and tools that read the home from passwd rather than
+`$HOME` (Java's `user.home`, and so Maven's `~/.m2`) then look in the wrong place. The worker
+therefore writes `runs/<run_id>/etc/passwd` and `etc/group` and bind-mounts them read-only
+over `/etc/passwd` and `/etc/group` in setup and run containers:
+
+```
+root:x:0:0:root:/root:/bin/sh
+runner:x:<uid>:<gid>::/home/runner:/bin/bash
+```
+
+and `root:x:0:` and `runner:x:<gid>:` in the group file. The run still uses the configured uid
+and gid (`EXRADIUS_RUN_USER`, default `1000:1000`); only the names and the home change, and
+other users of the image disappear for the run. With the stock `maven:3-eclipse-temurin-21`
+image, `user.home` is `/home/ubuntu` without the mount and `/home/runner` with it.
+
+Before each session the Claude Code runtime writes `{"includeCoAuthoredBy": false}` to
+`settings.json` in `CLAUDE_CONFIG_DIR` (in the state mount) unless the file already exists,
+so changes the agent makes to it survive resume. The CLI loads user settings from there
+(the SDK's default `setting_sources` load all sources).
+
 ### 2.5 The api and worker services
 
 Unchanged: they keep their own image (`exradius-backend`), which no longer needs Node or

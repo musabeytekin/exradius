@@ -37,6 +37,11 @@ class RunPaths:
     state: Path
     attachments: Path
 
+    @property
+    def etc(self) -> Path:
+        """Generated ``passwd`` and ``group`` for the run's containers (not mounted as a whole)."""
+        return self.root / "etc"
+
 
 @dataclass(frozen=True)
 class RepoSpec:
@@ -60,6 +65,34 @@ def create_run_directory(data_dir: Path, run_id: str) -> RunPaths:
     paths.attachments.mkdir(parents=True, exist_ok=True)
     paths.state.mkdir(parents=True, exist_ok=True)
     return paths
+
+
+def identity_files(uid: int, gid: int, home: str) -> tuple[str, str]:
+    """``/etc/passwd`` and ``/etc/group`` for run containers: ``root`` and ``runner`` with
+    the run uid/gid and ``home``, whatever users the project image defines."""
+    passwd = ["root:x:0:0:root:/root:/bin/sh"]
+    group = ["root:x:0:"]
+    if uid != 0:
+        passwd.append(f"runner:x:{uid}:{gid}::{home}:/bin/bash")
+    else:
+        passwd[0] = f"root:x:0:{gid}:root:{home}:/bin/bash"
+    if gid != 0:
+        group.append(f"runner:x:{gid}:")
+    return "\n".join(passwd) + "\n", "\n".join(group) + "\n"
+
+
+def write_identity_files(paths: RunPaths, uid: int, gid: int, home: str) -> tuple[Path, Path]:
+    """Write them under ``<run>/etc`` (world-readable, owned by the worker); idempotent."""
+    passwd_text, group_text = identity_files(uid, gid, home)
+    paths.etc.mkdir(parents=True, exist_ok=True)
+    written = []
+    for name, text in (("passwd", passwd_text), ("group", group_text)):
+        target = paths.etc / name
+        if not target.exists() or target.read_text() != text:
+            target.write_text(text)
+            target.chmod(0o644)
+        written.append(target)
+    return written[0], written[1]
 
 
 def mirror_path(data_dir: Path, project_slug: str, repo_name: str) -> Path:

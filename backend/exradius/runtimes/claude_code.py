@@ -8,6 +8,7 @@ provider mapping.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import sys
 import tempfile
@@ -73,6 +74,22 @@ def bundled_cli(runtime_dir: Path | None) -> str | None:
     return str(cli)
 
 
+SETTINGS = {"includeCoAuthoredBy": False}
+"""Written to ``settings.json`` under ``CLAUDE_CONFIG_DIR`` unless one exists: commits carry
+the agent's identity and the Exradius trailers, not Claude Code's co-author line."""
+
+
+def write_default_settings(config_dir: Path) -> bool:
+    """Create ``config_dir/settings.json`` with ``SETTINGS`` unless the file exists (the
+    agent's own changes survive resume). True when it was written."""
+    target = config_dir / "settings.json"
+    if target.exists():
+        return False
+    config_dir.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(SETTINGS, indent=2) + "\n")
+    return True
+
+
 OAUTH_NOTICE = (
     "Anthropic restricts subscription tokens to personal use of Claude Code; products built "
     "on the Agent SDK should use an API key."
@@ -125,9 +142,9 @@ class ClaudeCodeRuntime:
         process environment: the container's environment plus ``CLAUDE_CONFIG_DIR``."""
         return {**env, "CLAUDE_CONFIG_DIR": str(config_dir)}
 
-    async def probe(self, env: dict[str, str]) -> ProbeResult:
+    async def probe(self, env: dict[str, str], model: str | None = None) -> ProbeResult:
         """"Reply with OK" in a session without tools, with ``env`` (the container's
-        environment, which carries the provider credential)."""
+        environment, which carries the provider credential), on ``model`` when given."""
         from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
 
         with tempfile.TemporaryDirectory() as cwd:
@@ -137,6 +154,7 @@ class ClaudeCodeRuntime:
                 strict_mcp_config=True,
                 setting_sources=[],
                 max_turns=1,
+                model=model,
                 cli_path=self.cli_path,
                 env=self.session_environment(env, f"{cwd}/.claude"),
                 stderr=lambda line: print(line, file=sys.stderr, flush=True),
@@ -165,6 +183,7 @@ class ClaudeCodeRuntime:
 
         return ClaudeAgentOptions(
             cli_path=self.cli_path,
+            model=spec.model or None,
             cwd=spec.working_dir,
             # Claude Code's own system prompt, then the operating rules and the role (§13).
             system_prompt={"type": "preset", "preset": "claude_code", **({"append": spec.system_prompt} if spec.system_prompt else {})},
@@ -174,9 +193,13 @@ class ClaudeCodeRuntime:
             permission_mode="bypassPermissions",
             resume=resume,
             # Session files live under the state mount so they survive suspend/resume.
-            env=self.session_environment(spec.env, spec.state_dir / "claude"),
+            env=self.session_environment(spec.env, self.config_dir(spec)),
             stderr=lambda line: print(line, file=sys.stderr, flush=True),
         )
+
+    @staticmethod
+    def config_dir(spec: RunSpec) -> Path:
+        return spec.state_dir / "claude"
 
     async def start(self, spec: RunSpec, events: EventSink) -> RunOutcome:
         return await self._session(spec, spec.prompt, events, resume=None)
@@ -191,6 +214,7 @@ class ClaudeCodeRuntime:
     ) -> RunOutcome:
         from claude_agent_sdk import ClaudeSDKClient, ResultMessage, SystemMessage
 
+        write_default_settings(self.config_dir(spec))
         session_id = resume
         result: ResultMessage | None = None
         interrupted = False

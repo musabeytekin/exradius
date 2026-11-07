@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
+import { EnvironmentPreview } from "@/components/EnvironmentPreview";
+import { environmentTextOf } from "@/lib/environment";
 import { KeyValueEditor } from "@/components/KeyValueEditor";
 import { newRow, rowsFrom, rowsTo, type Row } from "@/lib/rows";
 import { useSecretIndex } from "@/lib/useSecretIndex";
@@ -16,7 +18,8 @@ import { pretty } from "@/lib/format";
 import { qk, useAgents, useConnections, useProjectAgents, useProjectSecrets } from "@/lib/queries";
 import { buildSecretIndex, findRefs } from "@/lib/secretRefs";
 import { toast } from "@/lib/toast";
-import type { Agent, Connection, ConnectionOverride, Project, ProjectAgent, ResolvedConnection } from "@/lib/types";
+import { modelLabel } from "@/lib/models";
+import type { Agent, Connection, ConnectionOverride, Project, ProjectAgent, ResolvedAgent } from "@/lib/types";
 
 export function AgentsTab({ project }: { project: Project }) {
   const attached = useProjectAgents(project.id);
@@ -108,6 +111,7 @@ function AttachedRow({ project, link, agent, onEdit }: { project: Project; link:
             <div className="mt-0.5 flex items-center gap-2 text-xs text-subtle">
               <span>{agent.connection_ids.length} connection{agent.connection_ids.length === 1 ? "" : "s"}</span>
               {overrides > 0 && <span>· {overrides} override{overrides === 1 ? "" : "s"}</span>}
+              {"model" in agent && <span>· {modelLabel(agent.model)}</span>}
             </div>
           </div>
         </button>
@@ -137,7 +141,7 @@ function AttachedRow({ project, link, agent, onEdit }: { project: Project; link:
       </div>
       {open && (
         <div className="border-t border-border bg-surface-2/40 px-4 py-4">
-          {resolved.isLoading ? <Skeleton className="h-24" /> : <ResolvedView connections={resolved.data?.connections ?? []} />}
+          {resolved.isLoading ? <Skeleton className="h-24" /> : <ResolvedView resolved={resolved.data} />}
         </div>
       )}
     </li>
@@ -145,11 +149,23 @@ function AttachedRow({ project, link, agent, onEdit }: { project: Project; link:
 }
 
 /** The resolved configuration of an attachment: secret names only, never values. */
-export function ResolvedView({ connections }: { connections: ResolvedConnection[] }) {
-  if (!connections.length) return <p className="text-sm text-muted">This agent has no connections beyond the built-in exradius tools.</p>;
+export function ResolvedView({ resolved }: { resolved: ResolvedAgent | undefined }) {
+  const connections = resolved?.connections ?? [];
+  const env = environmentTextOf(resolved);
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-xs text-muted">What a run of this agent in this project gets. References are shown as written; values are never read.</p>
+      {resolved && "model" in resolved && (
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-subtle">Model</span>
+          {resolved.model ? <Mono className="text-xs">{resolved.model}</Mono> : <span className="text-muted">runtime default</span>}
+        </div>
+      )}
+      {env && <EnvironmentPreview text={env} />}
+      {!connections.length ? (
+        <p className="text-sm text-muted">This agent has no connections beyond the built-in exradius tools.</p>
+      ) : (
+        <p className="text-xs text-muted">What a run of this agent in this project gets. References are shown as written; values are never read.</p>
+      )}
       {connections.map((c) => (
         <div key={c.slug} className="rounded-lg border border-border bg-surface">
           <div className="flex items-center gap-2 border-b border-border px-3 py-2">

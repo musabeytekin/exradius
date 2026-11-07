@@ -25,20 +25,24 @@ from exradius.db import SessionFactory
 from exradius.models import (
     Artifact,
     InfoRequest,
+    Project,
+    ProjectService,
     ProjectVerification,
     Repository,
     Run,
     Secret,
+    Task,
     TranscriptChunk,
     utcnow,
 )
 from exradius.providers import NO_PROVIDER, resolve_provider, runtime_environment, strip_credentials
-from exradius.resolve import load_secrets, project_environment
+from exradius.resolve import SecretValues, load_secrets, project_environment, substitute
 from exradius.schemas.messages import ArtifactRef, InfoRequestPayload, ResultPayload
 from exradius.states import ACTIVE, TERMINAL, State, can_transition, is_terminal
 from exradius.storage import ObjectStore
 from exradius.worker import git_identity, prepare
-from exradius.worker.containers import ContainerExit, ContainerManager
+from exradius.worker.containers import ContainerExit, ContainerManager, ServiceFailed, ServiceSpec
+from exradius.worker.delivery import delivery_warnings
 from exradius.worker.lifecycle import PendingEvent, run_event, transition
 
 log = logging.getLogger(__name__)
@@ -127,6 +131,7 @@ class RunManager:
         async with self.sessions() as session:
             repo_specs = await self.repo_specs(session, task.project_id)
             env = await self._project_env(session, task.project_id)
+            services = await self.service_specs(session, task.project_id)
 
         paths = await asyncio.to_thread(prepare.create_run_directory, self.settings.data_dir, str(run.id))
         await asyncio.to_thread(
@@ -136,18 +141,55 @@ class RunManager:
         await asyncio.to_thread(prepare.write_attachments, paths.attachments, files)
         await self._hand_over(paths)
 
+        network = await self.start_services(str(run.id), services) if services else None
+
         image = task.project.image or self.settings.project_default_image
         for command in task.project.setup_commands or []:
             if await self._state(run.id) != State.PREPARING:
                 raise RunCancelled("cancelled during setup")
             result = await self.containers.run_setup_command(
-                image=image, run_id=str(run.id), paths=paths, env=env, command=command
+                image=image, run_id=str(run.id), paths=paths, env=env, command=command, service_network=network
             )
             if result.exit_code != 0:
                 tail = result.logs[-2000:].strip()
                 raise prepare.PreparationError(
                     f"setup command {command!r} exited with {result.exit_code}:\n{tail}"
                 )
+
+    async def service_specs(
+        self, session, project_id: uuid.UUID, secrets: SecretValues | None = None
+    ) -> list[ServiceSpec]:
+        """The project's services with secret references in their env resolved now."""
+        rows = (
+            await session.scalars(
+                select(ProjectService)
+                .where(ProjectService.project_id == project_id)
+                .order_by(ProjectService.position, ProjectService.name)
+            )
+        ).all()
+        if not rows:
+            return []
+        secrets = secrets or await load_secrets(session, self.box, project_id)
+        return [
+            ServiceSpec(
+                name=row.name,
+                image=row.image,
+                env={k: str(substitute(str(v), secrets)) for k, v in (row.env or {}).items()},
+                ready=row.ready,
+            )
+            for row in rows
+        ]
+
+    async def start_services(self, label: str, services: list[ServiceSpec]) -> str:
+        """Create the run's network and start each service on it, waiting for readiness.
+        A service that does not come up raises ``PreparationError`` with its log tail."""
+        network = await self.containers.create_run_network(label)
+        for service in services:
+            try:
+                await self.containers.start_service(run_id=label, network=network, service=service)
+            except ServiceFailed as exc:
+                raise prepare.PreparationError(str(exc)) from exc
+        return network
 
     async def repo_specs(self, session, project_id: uuid.UUID) -> list[prepare.RepoSpec]:
         repos = (
@@ -206,9 +248,16 @@ class RunManager:
                 task_id=task.id,
             )
             repos = await self.repo_specs(session, task.project_id)
+            services = await self.service_specs(session, task.project_id) if from_state == State.RESUMING else []
             run.token_hash = hash_token(token)
             image = task.project.image or self.settings.project_default_image
             await session.commit()
+
+        # Services stay up while a run waits; a resume restarts any that are gone.
+        if services:
+            service_network = await self.start_services(str(run_id), services)
+        else:
+            service_network = await self.containers.run_network(str(run_id))
 
         # Identity, commit trailers and push credentials; rewritten at every start (resume too).
         env.update(
@@ -228,7 +277,12 @@ class RunManager:
         )
         runtime_mount = await self.containers.ensure_runtime(runtime)
         container_id = await self.containers.start_runner(
-            image=image, run_id=str(run_id), paths=self.paths(run_id), env=env, runtime=runtime_mount
+            image=image,
+            run_id=str(run_id),
+            paths=self.paths(run_id),
+            env=env,
+            runtime=runtime_mount,
+            service_network=service_network,
         )
         try:
             await self._move(
@@ -394,6 +448,8 @@ class RunManager:
         await self.finalize(run_id)
 
     async def finalize(self, run_id: uuid.UUID) -> None:
+        # Before the claim (which commits with the result): the check starts a container.
+        warnings = await self._delivery_warnings(run_id)
         async with self.sessions() as session:
             claimed = await session.execute(
                 update(Run)
@@ -433,12 +489,49 @@ class RunManager:
                 ],
                 transcript_url=downloads.transcript_url(self.settings, run_id),
                 error=run.error if run.state != State.COMPLETED else None,
+                warnings=warnings,
             )
             events.append(run_event(session, run, "result", payload.model_dump(mode="json")))
             await session.commit()
         await self.emit(events)
+        try:
+            await self.containers.remove_run_services(str(run_id))
+        except Exception:  # noqa: BLE001 - the sweep retries at the next start
+            log.exception("could not remove the services of run %s", run_id)
         await asyncio.to_thread(prepare.remove_run_directory, self.paths(run_id))
         log.info("run %s finished: %s", run_id, payload.state)
+
+    async def _delivery_warnings(self, run_id: uuid.UUID) -> list[str]:
+        """Uncommitted changes and unpushed commits in the clones, which the directory
+        removal discards. Report only; failures of the check give no warnings."""
+        paths = self.paths(run_id)
+        try:
+            async with self.sessions() as session:
+                row = (
+                    await session.execute(
+                        select(Run.ended_at, Project.image)
+                        .join(Task, Task.id == Run.task_id)
+                        .join(Project, Project.id == Task.project_id)
+                        .where(Run.id == run_id)
+                    )
+                ).first()
+            if row is None or row.ended_at is not None:
+                return []
+            has_clones = await asyncio.to_thread(
+                lambda: paths.project.is_dir() and any((p / ".git").exists() for p in paths.project.iterdir())
+            )
+            if not has_clones:
+                return []
+            result = await self.containers.inspect_clones(
+                image=row.image or self.settings.project_default_image, run_id=str(run_id), paths=paths
+            )
+            warnings = delivery_warnings(result.logs)
+            if result.exit_code != 0 and not warnings:
+                log.warning("delivery check of run %s exited with %s: %s", run_id, result.exit_code, result.logs[-500:])
+            return warnings
+        except Exception:  # noqa: BLE001 - never block the result
+            log.exception("delivery check of run %s failed", run_id)
+            return []
 
     # -- recovery -----------------------------------------------------------------------
 
@@ -469,14 +562,15 @@ class RunManager:
             runners = [c for c in containers if c.kind == "run"]
             if runners:
                 live = next((c for c in runners if c.running), runners[0])
-                stale = [c.id for c in containers if c.id != live.id]
+                stale = [c.id for c in containers if c.id != live.id and c.kind != "service"]
                 if stale:
                     await self.containers.remove_containers(stale)
                 log.info("run %s: re-attaching to container %s", run_id, live.id[:12])
                 to_attach.append((run_id, live.id))
                 continue
-            if containers:  # setup containers of a dead preparation
-                await self.containers.remove_containers([c.id for c in containers])
+            leftovers = [c.id for c in containers if c.kind != "service"]
+            if leftovers:  # setup containers of a dead preparation; services go at finalize
+                await self.containers.remove_containers(leftovers)
             if state == State.RUNNING and reported is not None:
                 log.info("run %s: container gone, settling reported outcome %s", run_id, reported)
                 try:
@@ -531,7 +625,9 @@ class RunManager:
             await self.end(run_id, State.FAILED, error=f"{type(exc).__name__}: {exc}")
 
     async def sweep_orphans(self) -> list[str]:
-        """Remove run directories that no unfinished run owns (e.g. left by a crash)."""
+        """Remove run directories, services and run networks that no unfinished run or open
+        verification owns (e.g. left by a crash)."""
+        await self._sweep_services()
         runs_dir = self.settings.data_dir / "runs"
         if not runs_dir.is_dir():
             return []
@@ -573,6 +669,49 @@ class RunManager:
             except OSError:
                 log.exception("could not remove %s", entry)
         return removed
+
+    async def _owned_labels(self, labels: list[str]) -> set[str]:
+        """The run and verification labels in ``labels`` whose owner is still open."""
+        ids, verification_ids = [], []
+        for name in labels:
+            target = ids
+            if name.startswith(VERIFY_PREFIX):
+                name, target = name.removeprefix(VERIFY_PREFIX), verification_ids
+            try:
+                target.append(uuid.UUID(name))
+            except ValueError:
+                pass
+        keep: set[str] = set()
+        async with self.sessions() as session:
+            if ids:
+                rows = await session.scalars(select(Run.id).where(Run.id.in_(ids), Run.state.not_in(list(TERMINAL))))
+                keep |= {str(run_id) for run_id in rows.all()}
+            if verification_ids:
+                rows = await session.scalars(
+                    select(ProjectVerification.id).where(
+                        ProjectVerification.id.in_(verification_ids),
+                        ProjectVerification.state.in_(["pending", "running"]),
+                    )
+                )
+                keep |= {f"{VERIFY_PREFIX}{vid}" for vid in rows.all()}
+        return keep
+
+    async def _sweep_services(self) -> list[str]:
+        try:
+            labels = sorted(await self.containers.service_run_ids())
+            if not labels:
+                return []
+            keep = await self._owned_labels(labels)
+            removed = []
+            for label in labels:
+                if label not in keep:
+                    log.warning("removing orphaned services and network of %s", label)
+                    await self.containers.remove_run_services(label)
+                    removed.append(label)
+            return removed
+        except Exception:  # noqa: BLE001 - retried at the next start
+            log.exception("could not sweep orphaned services")
+            return []
 
     async def resumable_runs(self) -> list[uuid.UUID]:
         """Waiting runs whose answer arrived while no worker could resume them."""

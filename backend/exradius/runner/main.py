@@ -78,6 +78,7 @@ async def execute(
         system_prompt=build_system_prompt(spec),
         connections=connections,
         env=environment.container,  # the agent gets the project's environment, not the runner's
+        model=spec.model,
     )
     runtime = get_runtime(spec.runtime, environment.runtime_dir)
     sink = ApiEventSink(api, tools)
@@ -141,10 +142,10 @@ async def amain(run_id: str, environment: RunnerEnvironment) -> int:
         await api.aclose()
 
 
-async def probe(runtime_name: str, environment: RunnerEnvironment) -> int:
+async def probe(runtime_name: str, environment: RunnerEnvironment, model: str | None = None) -> int:
     """Provider test (providers.md §2.3): a one-line session with the provider injected."""
     try:
-        result = await get_runtime(runtime_name, environment.runtime_dir).probe(environment.container)
+        result = await get_runtime(runtime_name, environment.runtime_dir).probe(environment.container, model)
         report = {"ok": result.ok, "detail": result.detail, "error": result.error}
     except Exception as exc:
         traceback.print_exc()
@@ -158,7 +159,11 @@ def run() -> None:
     environment = isolate()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if len(sys.argv) > 1 and sys.argv[1] == "--probe":
-        raise SystemExit(asyncio.run(probe(sys.argv[2] if len(sys.argv) > 2 else "claude_code", environment)))
+        # exradius-runner --probe <runtime> [--model <id>]
+        args = sys.argv[2:]
+        runtime_name = args[0] if args and not args[0].startswith("--") else "claude_code"
+        model = args[args.index("--model") + 1] if "--model" in args[:-1] else None
+        raise SystemExit(asyncio.run(probe(runtime_name, environment, model)))
     run_id = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("EXRADIUS_RUN_ID", "")
     if not run_id:
         print("usage: exradius-runner <run_id>", file=sys.stderr)

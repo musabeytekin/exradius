@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, HTTPException, Response, status
@@ -12,7 +13,14 @@ from sqlalchemy import func, select, update
 
 from exradius.api.deps import DB, Admin, State, get_or_404
 from exradius.models import Agent, Provider, ProviderTest, utcnow
-from exradius.providers import fingerprint, find_auth_method, last_test, provider_count, settings_errors
+from exradius.providers import (
+    fingerprint,
+    find_auth_method,
+    last_test,
+    provider_count,
+    provider_models,
+    settings_errors,
+)
 from exradius.schemas import api as s
 
 log = logging.getLogger(__name__)
@@ -44,7 +52,11 @@ async def _out(session, provider: Provider, counts: dict[uuid.UUID, int] | None 
         # Agents without a provider of their own use the default.
         count += await session.scalar(select(func.count()).select_from(Agent).where(Agent.provider_id.is_(None))) or 0
     return s.ProviderOut.model_validate(
-        {**{c: getattr(provider, c) for c in s.ProviderOut.model_fields if c != "agent_count"}, "agent_count": count}
+        {
+            **{c: getattr(provider, c) for c in s.ProviderOut.model_fields if c not in ("agent_count", "models")},
+            "agent_count": count,
+            "models": provider_models(provider.kind),
+        }
     )
 
 
@@ -148,6 +160,33 @@ async def make_default(provider_id: uuid.UUID, session: DB, _: Admin):
     return Response(status_code=NO_CONTENT)
 
 
+async def check_model(key: str, model: str) -> s.ProviderTestResult:
+    """``GET /v1/models/{model}`` with the key: the id (or alias) exists and the key may use it."""
+    try:
+        async with httpx.AsyncClient(base_url=ANTHROPIC_API_URL, timeout=TEST_TIMEOUT, transport=TRANSPORT) as client:
+            response = await client.get(
+                f"/v1/models/{quote(model, safe='')}",
+                headers={"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION},
+            )
+    except httpx.HTTPError as exc:
+        return s.ProviderTestResult(ok=False, error=f"could not reach {ANTHROPIC_API_URL}: {type(exc).__name__}: {exc}")
+    if response.status_code != 200:
+        return s.ProviderTestResult(ok=False, error=f"model {model!r}: {_error_text(response)}")
+    data = response.json() if response.content else {}
+    resolved = data.get("id") if isinstance(data, dict) else None
+    name = data.get("display_name") if isinstance(data, dict) else None
+    detail = f"model {model} is available" + (f" ({resolved})" if resolved and resolved != model else "")
+    return s.ProviderTestResult(ok=True, detail=detail + (f": {name}" if name else ""))
+
+
+def _error_text(response: httpx.Response) -> str:
+    try:
+        message = response.json()["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        message = response.text[:300]
+    return f"HTTP {response.status_code}: {message}"
+
+
 async def check_api_key(key: str) -> s.ProviderTestResult:
     """``GET /v1/models`` with the key; success lists the first few model ids."""
     try:
@@ -160,11 +199,7 @@ async def check_api_key(key: str) -> s.ProviderTestResult:
     except httpx.HTTPError as exc:
         return s.ProviderTestResult(ok=False, error=f"could not reach {ANTHROPIC_API_URL}: {type(exc).__name__}: {exc}")
     if response.status_code != 200:
-        try:
-            message = response.json()["error"]["message"]
-        except (ValueError, KeyError, TypeError):
-            message = response.text[:300]
-        return s.ProviderTestResult(ok=False, error=f"HTTP {response.status_code}: {message}")
+        return s.ProviderTestResult(ok=False, error=_error_text(response))
     ids = [m.get("id") for m in response.json().get("data", []) if isinstance(m, dict)]
     shown = ", ".join(i for i in ids[:MODELS_SHOWN] if i)
     more = f" and {len(ids) - MODELS_SHOWN} more" if len(ids) > MODELS_SHOWN else ""
@@ -176,10 +211,16 @@ async def check_api_key(key: str) -> s.ProviderTestResult:
     response_model=s.ProviderTestResult,
     responses={202: {"model": s.ProviderTestCreated}},
 )
-async def test_provider(provider_id: uuid.UUID, session: DB, state: State, _: Admin):
+async def test_provider(
+    provider_id: uuid.UUID, session: DB, state: State, _: Admin, body: s.ProviderTestIn | None = None
+):
+    """Test the credential, and with ``model`` that model id too. A test with a model is
+    stored as ``last_test`` only when it passes: a wrong model id says nothing against
+    the credential."""
     provider = await get_or_404(session, Provider, provider_id)
+    model = body.model if body else None
     if (provider.kind, provider.auth_method) in WORKER_TESTED:
-        test = ProviderTest(provider_id=provider.id, state="pending", fingerprint=fingerprint(provider))
+        test = ProviderTest(provider_id=provider.id, state="pending", fingerprint=fingerprint(provider), model=model)
         session.add(test)
         await session.commit()
         try:
@@ -194,9 +235,10 @@ async def test_provider(provider_id: uuid.UUID, session: DB, state: State, _: Ad
     if (provider.kind, provider.auth_method) != ("anthropic", "api_key"):
         raise HTTPException(422, f"no test for {provider.kind}/{provider.auth_method}")
     tested = fingerprint(provider)
-    result = await check_api_key(state.box.decrypt(provider.credential_encrypted))
+    key = state.box.decrypt(provider.credential_encrypted)
+    result = await (check_model(key, model) if model else check_api_key(key))
     await session.refresh(provider)
-    if fingerprint(provider) == tested:
+    if fingerprint(provider) == tested and (model is None or result.ok):
         provider.last_test = last_test(result.ok, result.detail, result.error)
         await session.commit()
     return result

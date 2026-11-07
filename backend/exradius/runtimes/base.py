@@ -36,8 +36,10 @@ class RunSpec:
     connections: list[ConnectionSpec]  # includes the built-in exradius server
     env: dict[str, str]
     system_prompt: str = ""
-    """Appended to the runtime's own system prompt: the operating rules and the agent's
-    role (architecture §13). Applies to resumed sessions too."""
+    """Appended to the runtime's own system prompt: the operating rules, the environment
+    section and the agent's role (architecture §13). Applies to resumed sessions too."""
+    model: str | None = None
+    """The agent's model; ``None`` leaves the runtime's default."""
 
 
 @dataclass
@@ -145,8 +147,9 @@ class Runtime(Protocol):
     def __init__(self, runtime_dir: Path | None = None) -> None:
         """``runtime_dir``: the runtime bundle the runner runs from (``None`` outside one)."""
 
-    async def probe(self, env: dict[str, str]) -> ProbeResult:
-        """A minimal session ("Reply with OK") with ``env``, which carries the provider."""
+    async def probe(self, env: dict[str, str], model: str | None = None) -> ProbeResult:
+        """A minimal session ("Reply with OK") with ``env``, which carries the provider,
+        on ``model`` when given."""
         ...
 
     async def start(self, spec: RunSpec, events: EventSink) -> RunOutcome: ...

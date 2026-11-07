@@ -5,7 +5,8 @@ import { Table } from "@/components/ui/controls";
 import { Button, Card, CardHeader, EmptyState, Field, Input, Mono, SkeletonRows } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { useConfirm } from "@/lib/confirm";
-import { qk, useEnvVars, useProjectSecrets, useRepositories } from "@/lib/queries";
+import { qk, useEnvVars, useProjectSecrets, useRepositories, useServices } from "@/lib/queries";
+import { serviceExample } from "@/lib/services";
 import { ENV_KEY_RE } from "@/lib/slug";
 import { toast } from "@/lib/toast";
 import type { EnvVar, Project } from "@/lib/types";
@@ -63,6 +64,7 @@ function RuntimeCard({ project }: { project: Project }) {
 function EnvVarsCard({ project }: { project: Project }) {
   const vars = useEnvVars(project.id);
   const secrets = useProjectSecrets(project.id);
+  const services = useServices(project.id);
   const qc = useQueryClient();
   const confirm = useConfirm();
   const [key, setKey] = useState("");
@@ -72,6 +74,10 @@ function EnvVarsCard({ project }: { project: Project }) {
   const invalidate = () => qc.invalidateQueries({ queryKey: qk.envVars(project.id) });
 
   const keyTaken = vars.data?.some((v) => v.key === key);
+  // One variable per service pointing at it, offered until a variable of that name exists.
+  const snippets = (services.data ?? [])
+    .map((sv) => ({ service: sv.name, ex: serviceExample(sv) }))
+    .filter((x): x is { service: string; ex: { key: string; value: string } } => !!x.ex && !vars.data?.some((v) => v.key === x.ex!.key));
   const shadow = secrets.data?.some((s) => s.key === key);
   const keyError = !key ? null : !ENV_KEY_RE.test(key) ? "Letters, digits and underscores; not starting with a digit." : keyTaken ? `${key} is already set.` : null;
 
@@ -176,6 +182,27 @@ function EnvVarsCard({ project }: { project: Project }) {
             )}
           </tbody>
         </Table.Root>
+      )}
+      {snippets.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-border px-4 py-2.5">
+          <span className="mr-1 text-xs text-subtle">From services</span>
+          {snippets.map(({ service, ex }) => (
+            <button
+              key={`${service}:${ex.key}`}
+              type="button"
+              onClick={() => {
+                setKey(ex.key);
+                setValue(ex.value);
+                document.getElementById("env-key")?.focus();
+              }}
+              title={`Fill in ${ex.key}=${ex.value}`}
+              className="inline-flex h-6 max-w-full items-center gap-1 truncate rounded-full border border-border bg-surface px-2 font-mono text-[11px] text-muted transition-colors hover:border-border-strong hover:text-fg"
+            >
+              <span className="text-subtle">+</span>
+              <span className="text-fg">{ex.key}</span>=<span className="truncate">{ex.value}</span>
+            </button>
+          ))}
+        </div>
       )}
       <form
         className="flex items-start gap-2 border-t border-border bg-surface-2/40 px-4 py-3"

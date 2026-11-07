@@ -25,8 +25,7 @@ Each folder in the working directory is a git clone of one repository:
 - bank-of-anthos: branch main, origin https://github.com/musabeytekin/bank-of-anthos.git, pushing allowed
 - platform-config: branch main, origin https://github.com/acme/platform-config.git, pushing NOT allowed
 
-Installed: git 2.43.0, bash 5.2, java 21.0.12, mvn 3.9.16, python3 3.14.0, uv 0.9.7
-Not available: Docker, Kubernetes, sudo, installing packages. Outbound network access is available.
+Not available: a Docker daemon, Kubernetes, sudo, installing packages. Outbound network access is available.
 
 Services running for this task, reachable by host name from this container:
 - postgres (postgres:16) on port 5432
@@ -43,16 +42,9 @@ Sources:
 
 - **Repositories**: `repositories` rows of the project (`name`, `branch`, `url` with any
   credentials stripped, `push_allowed`).
-- **Installed tools**: a probe the worker runs once per image digest and caches in
-  `image_probes` (`image_digest`, `tools` JSON, `probed_at`): a short shell script in the
-  project image that prints the version of each tool it finds from a fixed list
-  (git, bash, java, mvn, gradle, python3, uv, pip, node, npm, pnpm, yarn, bun, go, cargo,
-  dotnet, ruby, php, composer, make, gcc, psql, mysql, redis-cli, kubectl, docker). Verify
-  runs the same probe as the step "Inspect image" and shows the result. A run whose image
-  has no cached probe runs it in `preparing` (one container, a second or two).
-- **Not available**: fixed text. "Docker" and "Kubernetes" are listed unless the probe
-  found them (an image may carry a client, which is still useless without a daemon, so
-  the line then says "docker client present, no daemon").
+- **Not available**: fixed text. The agent discovers installed tools itself (`which`,
+  `--version`); Exradius lists only what it cannot discover: there is no Docker daemon even
+  if a client is present, no Kubernetes, no sudo, no package installation.
 - **Services**: the project's services (§2) with name, image and ports.
 - **The last paragraph** is fixed text.
 - **Notes**: `projects.notes`, a text field; omitted when empty.
@@ -96,7 +88,8 @@ Runs of projects without services keep today's shared `run_network` setting. Wit
 services, each run has its own network so parallel runs never share a database.
 
 Verify: steps "Start service <name>" (with readiness) for each service, before the setup
-commands, and "Stop services" at the end.
+commands, and "Stop services" at the end. There is no image probe or "Inspect image" step:
+agents discover tools themselves.
 
 API: `GET/POST /api/projects/{id}/services`, `PATCH/DELETE /api/projects/{id}/services/{sid}`,
 `PUT /api/projects/{id}/services/order`. `ProjectServiceIn/Out` carry the columns above.

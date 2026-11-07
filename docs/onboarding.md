@@ -67,7 +67,7 @@ is done and can be reopened from the overview.
 
 ### 3.2 Projects: check and verify
 
-The project page has tabs: Repositories, Environment, Secrets, Agents, Verify.
+The project page has tabs: Repositories, Environment, Services, Secrets, Agents, Notes, Verify.
 
 - **Repository check** on save and on demand: the API runs `git ls-remote` with the chosen
   secret and reports the branches it saw. A wrong URL, branch or credential is caught
@@ -78,6 +78,19 @@ The project page has tabs: Repositories, Environment, Secrets, Agents, Verify.
   This is the dry run.
 - **Secrets first**: the repository form offers "create a secret" inline, so order never
   bites.
+- **Services** (docs/environment-and-services.md §2): "Dependencies started next to the
+  agent for each task, reachable by name." Add service opens a catalog (Postgres, MySQL,
+  Redis, RabbitMQ, MongoDB, Elasticsearch, Mailpit, MinIO, Custom image) that prefills the
+  image, env, ports and readiness check. A password is asked for by label ("Database
+  password"), prefilled with a generated value since the service starts empty for every task,
+  and stored as a project secret that the env references as `${secret:NAME}`. Rows show
+  name, image, ports, readiness and the outcome of the last verify's "Start service <name>"
+  step; drag or the arrow buttons (Alt+↑/↓) reorder them. When a service exists, the
+  Environment tab offers a ready variable pointing at it, such as
+  `DATABASE_URL=postgres://app:${secret:DB_PASSWORD}@postgres:5432/app`, to insert.
+- **Notes**: one text area, "Write what you would tell a new engineer on their first day.",
+  quoted at the end of the environment section every run is given. On an API without the
+  field the tab explains that and stays read-only.
 
 ### 3.3 Connections: catalog, import, test
 
@@ -103,7 +116,13 @@ The project page has tabs: Repositories, Environment, Secrets, Agents, Verify.
   exact layout of the task text the agent receives (`# Task`, `# Context`,
   `# Attachments`), and the connections attached with their tool names from the last test.
 - **Attach** shows the resolved configuration for this project (secret names, never
-  values) and any unresolved references.
+  values) and any unresolved references, plus the model and a collapsed, read-only
+  "What the agent is told about this project": the generated environment section exactly as
+  the worker builds it. The task page shows the same text when the run exposes it.
+- **Model**: a select with "Runtime default" first, then the models the provider's catalog
+  entry lists (a built-in list for Anthropic when the API sends none), then "Other…" with a
+  field for any id. When the API lists models, a test button checks the chosen id against the
+  provider before saving. The agents list shows each agent's model.
 
 ### 3.5 Tasks: send, follow, answer
 

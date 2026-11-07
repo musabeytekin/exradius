@@ -11,6 +11,7 @@ export const qk = {
   project: (id: string) => ["projects", id] as const,
   repositories: (pid: string) => ["projects", pid, "repositories"] as const,
   envVars: (pid: string) => ["projects", pid, "env-vars"] as const,
+  services: (pid: string) => ["projects", pid, "services"] as const,
   projectSecrets: (pid: string) => ["projects", pid, "secrets"] as const,
   globalSecrets: ["secrets"] as const,
   projectAgents: (pid: string) => ["projects", pid, "agents"] as const,
@@ -50,6 +51,7 @@ export const useProjects = () => useQuery({ queryKey: qk.projects, queryFn: api.
 export const useProject = (id: string) => useQuery({ queryKey: qk.project(id), queryFn: () => api.projects.get(id) });
 export const useRepositories = (pid: string) =>
   useQuery({ queryKey: qk.repositories(pid), queryFn: () => api.repositories.list(pid) });
+export const useServices = (pid: string) => useQuery({ queryKey: qk.services(pid), queryFn: () => api.services.list(pid) });
 export const useEnvVars = (pid: string) => useQuery({ queryKey: qk.envVars(pid), queryFn: () => api.envVars.list(pid) });
 export const useProjectSecrets = (pid: string | null | undefined) =>
   useQuery({

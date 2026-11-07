@@ -149,6 +149,14 @@ export const api = {
     remove: (pid: string, id: string) => del(`/projects/${pid}/repositories/${id}`),
     check: (pid: string, id: string) => post<T.RepositoryCheck>(`/projects/${pid}/repositories/${id}/check`),
   },
+  services: {
+    list: (pid: string) => get<T.ProjectService[]>(`/projects/${pid}/services`),
+    create: (pid: string, b: T.ProjectServiceIn) => post<T.ProjectService>(`/projects/${pid}/services`, b),
+    update: (pid: string, id: string, b: Partial<T.ProjectServiceIn>) => patch<T.ProjectService>(`/projects/${pid}/services/${id}`, b),
+    remove: (pid: string, id: string) => del(`/projects/${pid}/services/${id}`),
+    /** The full list of service ids in their new order. */
+    reorder: (pid: string, ids: string[]) => put<T.ProjectService[] | void>(`/projects/${pid}/services/order`, { ids }),
+  },
   envVars: {
     list: (pid: string) => get<T.EnvVar[]>(`/projects/${pid}/env-vars`),
     create: (pid: string, b: { key: string; value: string }) => post<T.EnvVar>(`/projects/${pid}/env-vars`, b),
@@ -178,7 +186,8 @@ export const api = {
     update: (id: string, b: Partial<T.ProviderIn>) => patch<T.Provider>(`/providers/${id}`, b),
     remove: (id: string) => del(`/providers/${id}`),
     makeDefault: (id: string) => post<void>(`/providers/${id}/default`),
-    test: (id: string) => post<T.ProviderTestStart>(`/providers/${id}/test`),
+    /** `model` checks that id with the credential; older APIs ignore it. */
+    test: (id: string, model?: string | null) => post<T.ProviderTestStart>(`/providers/${id}/test`, model ? { model } : {}),
     testResult: (id: string, tid: string) => get<T.ProviderTest>(`/providers/${id}/tests/${tid}`),
   },
   agents: {

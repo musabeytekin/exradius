@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from exradius.schemas.messages import AttachmentIn
 
@@ -16,6 +16,10 @@ IdentityName = Annotated[str, StringConstraints(pattern=r"^[^<>\x00-\x1f]+$", mi
 """A git author name: no angle brackets or control characters (git rejects them)."""
 IdentityEmail = Annotated[str, StringConstraints(pattern=r"^[^@<>\s]+@[^@<>\s]+$", max_length=255, strip_whitespace=True)]
 FolderName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$", max_length=255)]
+ServiceName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]*$", max_length=63)]
+"""Host name of a service on the run network."""
+ModelId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]*$", max_length=255, strip_whitespace=True)]
+Port = Annotated[int, Field(ge=1, le=65535)]
 
 
 class _Out(BaseModel):
@@ -45,6 +49,8 @@ class ProjectIn(BaseModel):
     name: str
     image: str | None = None
     setup_commands: list[str] = Field(default_factory=list)
+    notes: str = ""
+    """What a new engineer would be told on the first day; shown to agents verbatim."""
 
 
 class ProjectUpdate(BaseModel):
@@ -52,6 +58,8 @@ class ProjectUpdate(BaseModel):
     name: str | None = None
     image: str | None = None
     setup_commands: list[str] | None = None
+    notes: str | None = None
+    """``null`` clears the notes."""
 
 
 class ProjectOut(_Out):
@@ -60,7 +68,79 @@ class ProjectOut(_Out):
     name: str
     image: str | None
     setup_commands: list[str]
+    notes: str
     created_at: datetime
+
+
+class TcpReady(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tcp: Port
+    """Ready once something listens on this port inside the service container."""
+
+
+class CommandReady(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    command: list[Annotated[str, StringConstraints(min_length=1)]] = Field(min_length=1)
+    """Ready once this command, run in the service container, exits with 0."""
+
+
+ServiceReady = TcpReady | CommandReady
+"""``null`` waits for the image's HEALTHCHECK when it has one, else for "running"."""
+
+
+def _unique_ports(ports: list[int] | None) -> list[int] | None:
+    if ports is not None and len(set(ports)) != len(ports):
+        raise ValueError("ports must be unique")
+    return ports
+
+
+class ProjectServiceIn(BaseModel):
+    name: ServiceName
+    image: str = Field(min_length=1, max_length=255)
+    env: dict[EnvKey, str] = Field(default_factory=dict)
+    """Values may reference secrets with ``${secret:NAME}``."""
+    ports: list[Port] = Field(default_factory=list)
+    ready: ServiceReady | None = None
+    position: int | None = None
+    """Defaults to after the last service."""
+
+    @model_validator(mode="after")
+    def _check(self) -> ProjectServiceIn:
+        _unique_ports(self.ports)
+        return self
+
+
+class ProjectServiceUpdate(BaseModel):
+    name: ServiceName | None = None
+    image: str | None = Field(default=None, min_length=1, max_length=255)
+    env: dict[EnvKey, str] | None = None
+    ports: list[Port] | None = None
+    ready: ServiceReady | None = None
+    """Sending ``null`` resets to the image's HEALTHCHECK / running."""
+    position: int | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> ProjectServiceUpdate:
+        _unique_ports(self.ports)
+        return self
+
+
+class ProjectServiceOut(_Out):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    name: str
+    image: str
+    env: dict[str, str]
+    ports: list[int]
+    ready: dict[str, Any] | None
+    position: int
+
+
+class ServiceOrder(BaseModel):
+    ids: list[uuid.UUID]
+    """Every service id of the project, in the new order."""
 
 
 class RepositoryIn(BaseModel):
@@ -231,6 +311,12 @@ class ResolvedAgentOut(BaseModel):
     agent_id: uuid.UUID
     secret_overrides: dict[str, Any]
     connections: list[ResolvedConnection]
+    model: str | None = None
+    """The agent's model; ``null`` is the runtime's default."""
+    environment_text: str = ""
+    """The "# Your environment" section as the worker would build it now."""
+    image: str = ""
+    """The image runs start from (the project's, or the default)."""
 
 
 class VerificationStep(BaseModel):
@@ -267,6 +353,13 @@ class AgentIn(BaseModel):
     identity_name: IdentityName | None = None
     """Git author/committer name in runs; defaults to ``name``."""
     identity_email: IdentityEmail
+    model: ModelId | None = None
+    """``None`` uses the runtime's default model."""
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _blank_model(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
 
 
 class AgentUpdate(BaseModel):
@@ -278,6 +371,10 @@ class AgentUpdate(BaseModel):
     provider_id: uuid.UUID | None = None
     identity_name: IdentityName | None = None
     identity_email: IdentityEmail | None = None
+    model: ModelId | None = None
+    """``null`` returns to the runtime's default model."""
+
+    _blank_model = field_validator("model", mode="before")(AgentIn._blank_model.__func__)
 
 
 class AgentOut(_Out):
@@ -291,9 +388,15 @@ class AgentOut(_Out):
     provider_id: uuid.UUID | None
     identity_name: str
     identity_email: str
+    model: str | None = None
 
 
 # Providers (docs/providers.md) -----------------------------------------------------------
+
+
+class ModelOut(BaseModel):
+    id: str
+    description: str
 
 
 class ProviderIn(BaseModel):
@@ -333,8 +436,15 @@ class ProviderOut(_Out):
     is_default: bool
     last_test: ProviderLastTest | None
     agent_count: int
+    models: list[ModelOut] = Field(default_factory=list)
+    """The catalog's models for this provider's kind."""
     created_at: datetime
     updated_at: datetime
+
+
+class ProviderTestIn(BaseModel):
+    model: ModelId | None = None
+    """Check this model id too (before saving it on an agent)."""
 
 
 class ProviderTestResult(BaseModel):
@@ -360,6 +470,7 @@ class ProviderTestOut(_Out):
     ended_at: datetime | None
     detail: str | None
     error: str | None
+    model: str | None = None
 
 
 class ProjectAgentIn(BaseModel):
@@ -544,6 +655,8 @@ class ProviderKindOut(BaseModel):
     kind: str
     label: str
     auth_methods: list[AuthMethodOut]
+    models: list[ModelOut] = Field(default_factory=list)
+    """Models the provider offers, for the agent form (any other id may be typed)."""
 
 
 class RuntimeOut(BaseModel):

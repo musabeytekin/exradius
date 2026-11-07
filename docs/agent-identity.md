@@ -38,6 +38,12 @@ separate identity entity.
    `Exradius-Task: <task id>` and `Exradius-Agent: <slug>` to every commit message unless
    already present. Hooks the repository itself defines are not run (hooksPath replaces
    them); that is acceptable in v1 and documented.
+4. **No co-author line:** the Claude Code runtime writes `{"includeCoAuthoredBy": false}`
+   into `settings.json` under `CLAUDE_CONFIG_DIR` before the session starts, unless that
+   file exists. Commits then carry only the agent's identity and the two trailers above.
+5. **The run user is `runner`:** setup and run containers get a generated `/etc/passwd` and
+   `/etc/group` (read-only) mapping the run uid/gid to `runner` with home `/home/runner`,
+   so tools that read the home from passwd agree with `$HOME` (runtime-bundles.md §2.4).
 
 ## 4. Push
 

@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from exradius.api.deps import DB, State
 from exradius.crypto import hash_token
+from exradius.environment import project_environment_text
 from exradius.models import Artifact, InfoRequest, ProjectAgent, Run, TranscriptChunk
 from exradius.resolve import MissingSecret, agent_connection_specs, load_secrets
 from exradius.schemas import internal as i
@@ -85,6 +86,10 @@ async def run_spec(run: RunDep, session: DB, state: State):
         runtime=task.agent.runtime,
         mode="resume" if run.resume_request_ids else "start",
         agent_prompt=task.agent.prompt,
+        environment_text=await project_environment_text(
+            session, task.project_id, state.settings.project_default_image
+        ),
+        model=task.agent.model,
         instructions=task.instructions,
         context=task.context,
         attachments=[

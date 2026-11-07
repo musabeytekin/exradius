@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from pydantic import ValidationError
@@ -12,12 +13,14 @@ from sqlalchemy import select
 
 from exradius.api.connection_test import test_connection
 from exradius.api.deps import DB, Admin, State, apply_update, get_or_404
+from exradius.environment import project_environment_text
 from exradius.models import (
     Agent,
     Connection,
     EnvVar,
     Project,
     ProjectAgent,
+    ProjectService,
     ProjectVerification,
     Provider,
     Repository,
@@ -65,6 +68,8 @@ async def get_project(project_id: uuid.UUID, session: DB, _: Admin):
 @router.patch("/projects/{project_id}", response_model=s.ProjectOut)
 async def update_project(project_id: uuid.UUID, body: s.ProjectUpdate, session: DB, _: Admin):
     project = await get_or_404(session, Project, project_id)
+    if body.notes is None and "notes" in body.model_fields_set:
+        body.notes = ""
     apply_update(project, body)
     await session.commit()
     return project
@@ -204,6 +209,100 @@ async def update_env_var(
 @router.delete("/projects/{project_id}/env-vars/{var_id}", status_code=NO_CONTENT)
 async def delete_env_var(project_id: uuid.UUID, var_id: uuid.UUID, session: DB, _: Admin):
     await session.delete(await _env_var(session, project_id, var_id))
+    await session.commit()
+    return Response(status_code=NO_CONTENT)
+
+
+# Services (docs/environment-and-services.md §2) --------------------------------------------
+
+
+def _reserved_service_names(state) -> set[str]:
+    """Host names runs already use on the shared run network: the API's."""
+    host = urlsplit(state.settings.run_api_url).hostname
+    return {"api", "exradius-api", *([host] if host else [])}
+
+
+async def _services(session, project_id: uuid.UUID) -> list[ProjectService]:
+    stmt = (
+        select(ProjectService)
+        .where(ProjectService.project_id == project_id)
+        .order_by(ProjectService.position, ProjectService.name)
+    )
+    return list((await session.scalars(stmt)).all())
+
+
+async def _service(session, project_id: uuid.UUID, service_id: uuid.UUID) -> ProjectService:
+    service = await get_or_404(session, ProjectService, service_id)
+    if service.project_id != project_id:
+        raise HTTPException(404, "ProjectService not found")
+    return service
+
+
+def _check_service_name(name: str, others: list[ProjectService], state) -> None:
+    if name in _reserved_service_names(state):
+        raise HTTPException(422, f"service name {name!r} is reserved")
+    if any(other.name == name for other in others):
+        raise HTTPException(409, f"service {name!r} already exists in this project")
+
+
+def _ready(value) -> dict | None:
+    return value.model_dump() if value is not None else None
+
+
+@router.get("/projects/{project_id}/services", response_model=list[s.ProjectServiceOut])
+async def list_services(project_id: uuid.UUID, session: DB, _: Admin):
+    await get_or_404(session, Project, project_id)
+    return await _services(session, project_id)
+
+
+@router.post("/projects/{project_id}/services", response_model=s.ProjectServiceOut, status_code=201)
+async def create_service(project_id: uuid.UUID, body: s.ProjectServiceIn, session: DB, state: State, _: Admin):
+    await get_or_404(session, Project, project_id)
+    existing = await _services(session, project_id)
+    _check_service_name(body.name, existing, state)
+    position = body.position if body.position is not None else max((x.position for x in existing), default=-1) + 1
+    service = ProjectService(
+        project_id=project_id, name=body.name, image=body.image, env=dict(body.env),
+        ports=list(body.ports), ready=_ready(body.ready), position=position,
+    )
+    session.add(service)
+    await session.commit()
+    return service
+
+
+@router.put("/projects/{project_id}/services/order", response_model=list[s.ProjectServiceOut])
+async def order_services(project_id: uuid.UUID, body: s.ServiceOrder, session: DB, _: Admin):
+    await get_or_404(session, Project, project_id)
+    services = {x.id: x for x in await _services(session, project_id)}
+    if len(body.ids) != len(set(body.ids)) or set(body.ids) != set(services):
+        raise HTTPException(422, "ids must list every service of the project exactly once")
+    for position, service_id in enumerate(body.ids):
+        services[service_id].position = position
+    await session.commit()
+    return await _services(session, project_id)
+
+
+@router.patch("/projects/{project_id}/services/{service_id}", response_model=s.ProjectServiceOut)
+async def update_service(
+    project_id: uuid.UUID, service_id: uuid.UUID, body: s.ProjectServiceUpdate, session: DB, state: State, _: Admin
+):
+    service = await _service(session, project_id, service_id)
+    data = body.model_dump(exclude_unset=True)
+    if data.get("name") is not None and data["name"] != service.name:
+        others = [x for x in await _services(session, project_id) if x.id != service.id]
+        _check_service_name(data["name"], others, state)
+    for key in ("name", "image", "env", "ports", "position"):
+        if data.get(key) is not None:
+            setattr(service, key, data[key])
+    if "ready" in data:
+        service.ready = _ready(body.ready)
+    await session.commit()
+    return service
+
+
+@router.delete("/projects/{project_id}/services/{service_id}", status_code=NO_CONTENT)
+async def delete_service(project_id: uuid.UUID, service_id: uuid.UUID, session: DB, _: Admin):
+    await session.delete(await _service(session, project_id, service_id))
     await session.commit()
     return Response(status_code=NO_CONTENT)
 
@@ -392,6 +491,7 @@ def _agent_out(agent: Agent) -> s.AgentOut:
         provider_id=agent.provider_id,
         identity_name=agent.identity_name,
         identity_email=agent.identity_email,
+        model=agent.model,
     )
 
 
@@ -541,7 +641,7 @@ async def get_verification(project_id: uuid.UUID, verification_id: uuid.UUID, se
 
 
 @router.get("/projects/{project_id}/agents/{agent_id}/resolved", response_model=s.ResolvedAgentOut)
-async def resolved_attachment(project_id: uuid.UUID, agent_id: uuid.UUID, session: DB, _: Admin):
+async def resolved_attachment(project_id: uuid.UUID, agent_id: uuid.UUID, session: DB, state: State, _: Admin):
     """The agent's connections as this project will run them: overrides applied, secret
     references shown as written (never their values), unresolved references listed."""
     link = await get_or_404(session, ProjectAgent, (project_id, agent_id))
@@ -581,6 +681,14 @@ async def resolved_attachment(project_id: uuid.UUID, agent_id: uuid.UUID, sessio
                 unresolved=[r.name for r in references if r.scope is None],
             )
         )
+    project = await get_or_404(session, Project, project_id)
+    default_image = state.settings.project_default_image
     return s.ResolvedAgentOut(
-        project_id=project_id, agent_id=agent_id, secret_overrides=secret_overrides, connections=connections
+        project_id=project_id,
+        agent_id=agent_id,
+        secret_overrides=secret_overrides,
+        connections=connections,
+        model=agent.model,
+        environment_text=await project_environment_text(session, project_id, default_image),
+        image=project.image or default_image,
     )

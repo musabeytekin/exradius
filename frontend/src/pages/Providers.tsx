@@ -10,6 +10,7 @@ import { api, ApiError } from "@/lib/api";
 import { useConfirm } from "@/lib/confirm";
 import { relativeTime } from "@/lib/format";
 import { describeProvider, providerKinds, testDetail } from "@/lib/providers";
+import { runProviderTest, testOk } from "@/lib/providerTest";
 import { qk, useAgents, useProviders, useRuntimes } from "@/lib/queries";
 import { toast } from "@/lib/toast";
 import type { Agent, Provider, ProviderIn, ProviderTest } from "@/lib/types";
@@ -17,22 +18,12 @@ import type { Agent, Provider, ProviderIn, ProviderTest } from "@/lib/types";
 /** `null` while a synchronous test runs, the test id while the worker runs one. */
 type Testing = Record<string, string | null>;
 
-const POLL_MS = 2000;
-const POLL_LIMIT = 120;
-
 function without(m: Testing, id: string): Testing {
   const next = { ...m };
   delete next[id];
   return next;
 }
 
-/** A worker-run test reports `state`; the synchronous one reports `ok`. */
-function testOk(t: ProviderTest): boolean | null {
-  if (typeof t.ok === "boolean") return t.ok;
-  if (t.state === "passed") return true;
-  if (t.state === "failed") return false;
-  return null;
-}
 
 export function ProvidersPage() {
   const providers = useProviders();
@@ -72,14 +63,8 @@ export function ProvidersPage() {
   const runTest = async (p: Provider) => {
     setTesting((m) => ({ ...m, [p.id]: null }));
     try {
-      const r = await api.providers.test(p.id);
-      if (!("test_id" in r)) return finish(p, r);
-      setTesting((m) => ({ ...m, [p.id]: r.test_id }));
-      for (let i = 0; i < POLL_LIMIT && alive.current; i++) {
-        await new Promise((res) => setTimeout(res, POLL_MS));
-        const t = await api.providers.testResult(p.id, r.test_id);
-        if (testOk(t) !== null) return finish(p, t);
-      }
+      const t = await runProviderTest(p.id, { alive: () => alive.current, onQueued: (tid) => setTesting((m) => ({ ...m, [p.id]: tid })) });
+      if (t) return finish(p, t);
       if (alive.current) {
         setTesting((m) => without(m, p.id));
         toast.err(`${p.name}: the test is still running`, "Its result is stored on the provider when it ends.");

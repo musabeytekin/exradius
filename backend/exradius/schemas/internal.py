@@ -36,6 +36,10 @@ class RunSpecResponse(BaseModel):
     runtime: str
     mode: Literal["start", "resume"]
     agent_prompt: str
+    environment_text: str = ""
+    """The generated "# Your environment" section (docs/environment-and-services.md §1)."""
+    model: str | None = None
+    """The agent's model; ``None`` is the runtime's default."""
     instructions: str
     context: Any = None
     attachments: list[AttachmentPath] = Field(default_factory=list)

@@ -27,6 +27,21 @@ MIGRATED_SLUG = "anthropic-migrated"
 MIGRATED_NAME = "Anthropic (migrated)"
 
 
+MODELS: dict[str, tuple[tuple[str, str], ...]] = {
+    "anthropic": (
+        ("claude-opus-5-5", "Most capable; best for complex, long-running engineering work."),
+        ("claude-sonnet-5-5", "Balanced speed and capability for everyday coding tasks."),
+        ("claude-haiku-5-5", "Fastest and cheapest; good for small, well-defined tasks."),
+    ),
+}
+"""The model catalog per provider kind: ``(id, one-line description)``, for the agent form.
+An agent may name any other id the provider accepts."""
+
+
+def provider_models(kind: str) -> list[dict[str, str]]:
+    return [{"id": model_id, "description": text} for model_id, text in MODELS.get(kind, ())]
+
+
 def find_auth_method(kind: str, auth_method: str) -> AuthMethod | None:
     """The auth method as declared by any runtime that accepts this provider kind."""
     for runtime in all_runtimes():

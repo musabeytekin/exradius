@@ -16,8 +16,10 @@ from typing import Any
 
 from sqlalchemy import select
 
-from exradius.models import Project, ProjectVerification, utcnow
+from exradius.models import Project, ProjectService, ProjectVerification, utcnow
+from exradius.resolve import MissingSecret, load_secrets, substitute
 from exradius.worker import prepare
+from exradius.worker.containers import ServiceFailed, ServiceSpec
 from exradius.worker.runs import VERIFY_PREFIX, RunManager
 
 log = logging.getLogger(__name__)
@@ -67,9 +69,26 @@ class ProjectVerifier:
             if project is None:
                 return
             repos = await self.runs.repo_specs(session, project.id)
-            env = await self.runs._project_env(session, project.id)
+            try:
+                env, env_error = await self.runs._project_env(session, project.id), None
+            except MissingSecret as exc:  # reported on the setup steps
+                env, env_error = {}, str(exc)
             slug, image = project.slug, project.image or self.settings.project_default_image
             setup_commands = list(project.setup_commands or [])
+            secrets = await load_secrets(session, self.runs.box, project.id)
+            services = []
+            for row in (
+                await session.scalars(
+                    select(ProjectService)
+                    .where(ProjectService.project_id == project.id)
+                    .order_by(ProjectService.position, ProjectService.name)
+                )
+            ).all():
+                try:
+                    resolved = {k: str(substitute(str(v), secrets)) for k, v in (row.env or {}).items()}
+                    services.append((ServiceSpec(row.name, row.image, resolved, row.ready), None))
+                except MissingSecret as exc:
+                    services.append((ServiceSpec(row.name, row.image, {}, row.ready), str(exc)))
 
         label = self.directory_name(verification_id)
         paths = prepare.run_paths(self.settings.data_dir, label)
@@ -88,13 +107,18 @@ class ProjectVerifier:
             plan.append((f"Fetch mirror {repo.name}", self._mirror_step(slug, repo)))
             plan.append((f"Clone {repo.name} ({repo.branch})", self._clone_step(slug, repo, paths)))
         plan.append(("Prepare attachments folder", self._attachments_step(paths)))
+        network: list[str] = []  # set by the first service step
+        for service, error in services:
+            plan.append((f"Start service {service.name}", self._service_step(label, service, error, network)))
         for command in setup_commands:
-            plan.append((f"Setup: {command}", self._setup_step(image, label, paths, env, command)))
-        cleanup = ("Remove directory", remove_directory)
+            plan.append((f"Setup: {command}", self._setup_step(image, label, paths, env, command, env_error, network)))
+        cleanups = [("Remove directory", remove_directory)]
+        if services:
+            cleanups.insert(0, ("Stop services", self._stop_services_step(label)))
 
         steps: list[dict[str, Any]] = [
             {"name": name, "state": "pending", "started_at": None, "ended_at": None, "log": ""}
-            for name, _ in [*plan, cleanup]
+            for name, _ in [*plan, *cleanups]
         ]
         await self._save(verification_id, steps, state="running", started_at=utcnow())
 
@@ -104,8 +128,9 @@ class ProjectVerifier:
                 steps[index]["state"] = "skipped"
                 continue
             error = await self._step(verification_id, steps, index, action)
-        cleanup_error = await self._step(verification_id, steps, len(plan), cleanup[1])
-        error = error or cleanup_error
+        for offset, (_, action) in enumerate(cleanups):
+            cleanup_error = await self._step(verification_id, steps, len(plan) + offset, action)
+            error = error or cleanup_error
         await self._save(
             verification_id,
             steps,
@@ -157,10 +182,43 @@ class ProjectVerifier:
 
         return action
 
-    def _setup_step(self, image: str, label: str, paths: prepare.RunPaths, env: dict[str, str], command: str):
+    def _service_step(self, label: str, service: ServiceSpec, error: str | None, network: list[str]):
         async def action() -> str:
+            if error:
+                raise StepFailed(error)
+            if not network:
+                network.append(await self.containers.create_run_network(label))
+            try:
+                started = await self.containers.start_service(run_id=label, network=network[0], service=service)
+            except ServiceFailed as exc:
+                raise StepFailed(str(exc)) from exc
+            return f"{service.image} is ready after {started.seconds:g}s ({started.check}); host name {service.name}"
+
+        return action
+
+    def _stop_services_step(self, label: str):
+        async def action() -> str:
+            count = await self.containers.remove_run_services(label)
+            return f"removed {count} service {'container' if count == 1 else 'containers'} and the run network"
+
+        return action
+
+    def _setup_step(
+        self,
+        image: str,
+        label: str,
+        paths: prepare.RunPaths,
+        env: dict[str, str],
+        command: str,
+        env_error: str | None = None,
+        network: list[str] | None = None,
+    ):
+        async def action() -> str:
+            if env_error:
+                raise StepFailed(env_error)
             result = await self.containers.run_setup_command(
-                image=image, run_id=label, paths=paths, env=env, command=command
+                image=image, run_id=label, paths=paths, env=env, command=command,
+                service_network=network[0] if network else None,
             )
             if result.exit_code != 0:
                 raise StepFailed(f"exited with {result.exit_code}\n{result.logs}")
@@ -212,6 +270,7 @@ class ProjectVerifier:
             await self.containers.remove_containers(
                 [c.id for c in await self.containers.list_run_containers(label)]
             )
+            await self.containers.remove_run_services(label)
             await asyncio.to_thread(prepare.remove_run_directory, prepare.run_paths(self.settings.data_dir, label))
             failed.append(verification_id)
         return failed

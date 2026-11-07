@@ -133,6 +133,7 @@ def test_result_payload_defaults():
         "artifacts": [],
         "transcript_url": None,
         "error": "boom",
+        "warnings": [],
     }
 
 

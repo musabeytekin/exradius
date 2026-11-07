@@ -187,7 +187,8 @@ async def test_run_probe_and_setup_containers(manager, fake, tmp_path):
     bundle = [m for m in run["mounts"] if m["Target"] == "/opt/exradius/runtime"]
     assert len(bundle) == 1 and bundle[0]["Source"] == runtime.volume
     assert bundle[0]["Type"] == "volume" and bundle[0]["ReadOnly"] is True
-    assert {m["Target"] for m in run["mounts"]} == {"/work", "/work/.exradius/attachments", "/exradius/state", "/opt/exradius/runtime"}
+    assert {m["Target"] for m in run["mounts"]} == {"/work", "/work/.exradius/attachments", "/exradius/state",
+                                                    "/opt/exradius/runtime", "/etc/passwd", "/etc/group"}
     assert run["user"] == "1000:1000" and run["read_only"] is True and run["cap_drop"] == ["ALL"]
     assert run["environment"]["A"] == "1" and run["environment"]["HOME"] == "/home/runner"
     assert run["environment"]["GIT_CONFIG_KEY_0"] == "safe.directory" and run["environment"]["GIT_CONFIG_VALUE_0"] == "*"

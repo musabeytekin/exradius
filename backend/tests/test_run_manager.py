@@ -14,7 +14,7 @@ from exradius.crypto import hash_token
 from exradius.models import Artifact, EnvVar, InfoRequest, Project, Repository, Run, Secret, Task, TranscriptChunk
 from exradius.states import State
 from exradius.worker.bundles import RuntimeMount
-from exradius.worker.containers import ContainerExit, RunContainer
+from exradius.worker.containers import ContainerExit, RunContainer, ServiceFailed, ServiceStarted, run_network_name
 from exradius.worker.intake import accept_answer, accept_task
 from exradius.worker.runs import RunManager
 
@@ -32,20 +32,29 @@ class FakeContainers:
         self.runtimes_ensured: list[str] = []
         self.existing: dict[str, list[RunContainer]] = {}  # containers left on the daemon
         self._pending: dict[str, tuple[Behaviour, uuid.UUID, dict]] = {}
+        self.networks: set[str] = set()
+        self.services: dict[str, dict[str, object]] = {}  # run label -> service name -> spec
+        self.service_failures: dict[str, str] = {}  # service name -> reason
+        self.service_log: list[tuple[str, str]] = []  # (event, detail)
+        self.setup_networks: list[str | None] = []
+        self.inspect_output = ""
+        self.inspected: list[str] = []
 
     async def ensure_runtime(self, runtime):
         self.runtimes_ensured.append(runtime)
         return RuntimeMount(runtime, "0.1.0", f"exradius-runtime-{runtime}-0.1.0-test")
 
-    async def start_runner(self, *, image, run_id, paths, env, runtime):
+    async def start_runner(self, *, image, run_id, paths, env, runtime, service_network=None):
         assert paths.project.is_dir()
         cid = f"c{len(self.started)}"
-        self.started.append({"image": image, "run_id": run_id, "env": env, "paths": paths, "runtime": runtime})
+        self.started.append({"image": image, "run_id": run_id, "env": env, "paths": paths, "runtime": runtime,
+                             "service_network": service_network})
         self._pending[cid] = (self.behaviours.pop(0), uuid.UUID(run_id), env)
         return cid
 
-    async def run_setup_command(self, *, image, run_id, paths, env, command):
+    async def run_setup_command(self, *, image, run_id, paths, env, command, service_network=None):
         self.setup_commands.append(command)
+        self.setup_networks.append(service_network)
         return ContainerExit(self.setup_exit, "setup output\nboom" if self.setup_exit else "ok")
 
     async def wait(self, container_id):
@@ -62,6 +71,39 @@ class FakeContainers:
         self.removed.extend(container_ids)
         for run_id, containers in self.existing.items():
             self.existing[run_id] = [c for c in containers if c.id not in container_ids]
+
+    async def run_network(self, run_id):
+        name = run_network_name(run_id)
+        return name if name in self.networks else None
+
+    async def create_run_network(self, run_id):
+        self.networks.add(run_network_name(run_id))
+        self.service_log.append(("network", run_id))
+        return run_network_name(run_id)
+
+    async def start_service(self, *, run_id, network, service, timeout=120):
+        assert network == run_network_name(run_id) and network in self.networks
+        running = self.services.setdefault(run_id, {})
+        if service.name in running:
+            return ServiceStarted(service.name, f"s-{service.name}", 0.0, "already running")
+        if service.name in self.service_failures:
+            raise ServiceFailed(f"service {service.name} ({service.image}) {self.service_failures[service.name]}\nlog tail")
+        running[service.name] = service
+        self.service_log.append(("start", service.name))
+        return ServiceStarted(service.name, f"s-{service.name}", 0.5, "running")
+
+    async def remove_run_services(self, run_id):
+        removed = self.services.pop(run_id, {})
+        self.networks.discard(run_network_name(run_id))
+        self.service_log.append(("remove", run_id))
+        return len(removed)
+
+    async def service_run_ids(self):
+        return set(self.services) | {n.removeprefix("exradius-run-") for n in self.networks}
+
+    async def inspect_clones(self, *, image, run_id, paths):
+        self.inspected.append(run_id)
+        return ContainerExit(0, self.inspect_output)
 
     def leave_running(self, run_id: uuid.UUID, container_id: str, behaviour: Behaviour, kind: str = "run"):
         """A container that outlived its worker; waiting on it runs ``behaviour``."""

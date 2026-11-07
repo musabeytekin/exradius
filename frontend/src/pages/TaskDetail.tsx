@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { FileDrop } from "@/components/FileDrop";
+import { EnvironmentPreview } from "@/components/EnvironmentPreview";
+import { environmentTextOf } from "@/lib/environment";
 import { Markdown } from "@/components/Markdown";
 import { TranscriptViewer } from "@/components/transcript/TranscriptViewer";
 import { Tabs } from "@/components/ui/controls";
@@ -444,6 +446,7 @@ function TaskInput({ task }: { task: TaskDetail }) {
         />
         <div className="p-4"><Markdown text={task.instructions || "_No instructions._"} /></div>
       </Card>
+      {environmentTextOf(task.run) && <EnvironmentPreview text={environmentTextOf(task.run)!} title="What the agent was told about the project" />}
       <div className="grid grid-cols-2 gap-4">
         <Card>
           <CardHeader title="Context" description="Rendered into the prompt under # Context." />

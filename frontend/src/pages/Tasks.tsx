@@ -11,7 +11,6 @@ import { api } from "@/lib/api";
 import { elideBase64, fileToAttachment } from "@/lib/files";
 import { absoluteTime, pretty, relativeTime } from "@/lib/format";
 import { qk, useAgents, useProjectAgents, useProjects } from "@/lib/queries";
-import { shortRandom } from "@/lib/slug";
 import { toast } from "@/lib/toast";
 import { ALL_STATES, type TaskMessage } from "@/lib/types";
 import type { TasksSearch } from "@/router";
@@ -117,9 +116,9 @@ function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProj
   const agentOptions = (agents.data ?? []).filter((a) => attached.data?.some((x) => x.agent_id === a.id));
   const [agentSlug, setAgentSlug] = useState<string | null>(initialAgent ?? null);
   const agent = agentOptions.find((a) => a.slug === agentSlug) ?? (agentOptions.length === 1 ? agentOptions[0] : undefined);
-  const [suffix] = useState(() => shortRandom());
-  const [taskId, setTaskId] = useState<string | null>(null);
-  const effectiveId = taskId ?? (project ? `${project.slug}-${suffix}` : "");
+  // The ticket key: typed by the user, never invented (branch names start from it).
+  const [taskId, setTaskId] = useState("");
+  const effectiveId = taskId.trim();
   const [instructions, setInstructions] = useState("");
   const [context, setContext] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -202,11 +201,11 @@ function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProj
               />
             </Field>
           </div>
-          <Field label="Task id" hint="The idempotency key. A second task with the same id is rejected.">
-            <Input mono value={effectiveId} onChange={(e) => setTaskId(e.target.value)} />
+          <Field label="Task id" htmlFor="task-id" hint="The ticket key, used in branch names">
+            <Input id="task-id" mono required autoFocus value={taskId} onChange={(e) => setTaskId(e.target.value)} placeholder="BANK-204" spellCheck={false} />
           </Field>
           <Field label="Instructions">
-            <Textarea autoFocus rows={6} value={instructions} onChange={(e) => setInstructions(e.target.value)} placeholder="Customers report invoices with negative totals since Monday. Find the cause and fix it." />
+            <Textarea rows={6} value={instructions} onChange={(e) => setInstructions(e.target.value)} placeholder="Customers report invoices with negative totals since Monday. Find the cause and fix it." />
           </Field>
           <Field label="Context" optional error={!contextParsed.ok ? contextParsed.error : undefined} hint="JSON the agent sees under # Context. Empty is sent as null.">
             <Textarea mono rows={4} value={context} onChange={(e) => setContext(e.target.value)} invalid={!contextParsed.ok} placeholder={'{ "ticket": "JIRA-4821", "customer": "acme" }'} spellCheck={false} />

@@ -113,8 +113,11 @@ def agent_connection_specs(
 async def project_environment(
     session: AsyncSession, project_id: uuid.UUID, secrets: SecretValues
 ) -> dict[str, str]:
-    """The project's variables and the project's secrets, for the run container."""
+    """The project's variables and the project's secrets, for the run container.
+
+    Variable values may reference secrets with ``${secret:NAME}`` (project, then global),
+    like connection values; a missing one raises ``MissingSecret``."""
     env_vars = (await session.scalars(select(EnvVar).where(EnvVar.project_id == project_id))).all()
-    env = {v.key: v.value for v in env_vars}
+    env = {v.key: str(substitute(v.value, secrets)) for v in env_vars}
     env.update(secrets.project)
     return env

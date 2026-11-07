@@ -63,6 +63,8 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(255))
     image: Mapped[str | None] = mapped_column(String(255))
     setup_commands: Mapped[list[Any]] = mapped_column(default=list)
+    notes: Mapped[str] = mapped_column(Text, default="", server_default="")
+    """Free text from the maintainers, shown to agents in the environment section."""
     created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
 
     repositories: Mapped[list[Repository]] = relationship(
@@ -71,6 +73,30 @@ class Project(Base):
     env_vars: Mapped[list[EnvVar]] = relationship(
         cascade="all, delete-orphan", order_by="EnvVar.key"
     )
+    services: Mapped[list[ProjectService]] = relationship(
+        cascade="all, delete-orphan", order_by="ProjectService.position"
+    )
+
+
+class ProjectService(Base):
+    """A dependency started next to every run, like GitHub Actions ``services:``
+    (docs/environment-and-services.md §2)."""
+
+    __tablename__ = "project_services"
+    __table_args__ = (UniqueConstraint("project_id", "name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(63))
+    """Host name on the run network."""
+    image: Mapped[str] = mapped_column(String(255))
+    env: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    """Values may reference secrets with ``${secret:NAME}``."""
+    ports: Mapped[list[Any]] = mapped_column(default=list)
+    """Documentation for the agent; nothing is published."""
+    ready: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
+    """``None`` (HEALTHCHECK or running), ``{"tcp": port}`` or ``{"command": [...]}``."""
+    position: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Repository(Base):
@@ -173,6 +199,8 @@ class ProviderTest(Base):
     ended_at: Mapped[datetime | None] = mapped_column(Timestamp)
     detail: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The model the test session uses; ``None`` is the runtime's default."""
     fingerprint: Mapped[str] = mapped_column(String(64))
     """Of the provider's credential and settings when the test was requested; the result
     is stored as the provider's ``last_test`` only if they are unchanged."""
@@ -205,6 +233,8 @@ class Agent(Base):
     identity_name: Mapped[str] = mapped_column(String(255))
     """Git author and committer name in runs (docs/agent-identity.md)."""
     identity_email: Mapped[str] = mapped_column(String(255))
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """``None`` uses the runtime's default model."""
     created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
 
     connections: Mapped[list[Connection]] = relationship(
@@ -389,6 +419,7 @@ __all__ = [
     "InfoRequest",
     "Project",
     "ProjectAgent",
+    "ProjectService",
     "ProjectVerification",
     "Provider",
     "ProviderTest",

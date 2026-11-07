@@ -8,15 +8,17 @@ import { Button, Chip, EmptyState, Field, Input, Mono, PageHeader, Skeleton } fr
 import { api, ApiError } from "@/lib/api";
 import { buttonClass } from "@/lib/buttonStyles";
 import { useConfirm } from "@/lib/confirm";
-import { qk, useEnvVars, useProject, useProjectAgents, useProjectSecrets, useRepositories } from "@/lib/queries";
+import { qk, useEnvVars, useProject, useProjectAgents, useProjectSecrets, useRepositories, useServices } from "@/lib/queries";
 import { SLUG_RE } from "@/lib/slug";
 import { toast } from "@/lib/toast";
 import type { Project } from "@/lib/types";
 import type { ProjectTab } from "@/router";
 import { AgentsTab } from "./project/AgentsTab";
 import { EnvironmentTab } from "./project/EnvironmentTab";
+import { NotesTab } from "./project/NotesTab";
 import { RepositoriesTab } from "./project/RepositoriesTab";
 import { SecretsTab } from "./project/SecretsTab";
+import { ServicesTab } from "./project/ServicesTab";
 import { VerifyTab } from "./project/VerifyTab";
 
 export function ProjectDetailPage() {
@@ -28,6 +30,7 @@ export function ProjectDetailPage() {
   const envVars = useEnvVars(projectId);
   const secrets = useProjectSecrets(projectId);
   const agents = useProjectAgents(projectId);
+  const services = useServices(projectId);
   const latest = useQuery({ queryKey: qk.verifications(projectId), queryFn: () => api.projects.verifications(projectId) });
   const [editing, setEditing] = useState(false);
   const confirm = useConfirm();
@@ -127,16 +130,20 @@ export function ProjectDetailPage() {
         <Tabs.List className="mb-5">
           <Tabs.Trigger value="repositories" count={repos.data?.length} attention={failingRepos > 0}>Repositories</Tabs.Trigger>
           <Tabs.Trigger value="environment" count={envVars.data?.length}>Environment</Tabs.Trigger>
+          <Tabs.Trigger value="services" count={services.data?.length}>Services</Tabs.Trigger>
           <Tabs.Trigger value="secrets" count={secrets.data?.length}>Secrets</Tabs.Trigger>
           <Tabs.Trigger value="agents" count={agents.data?.length}>Agents</Tabs.Trigger>
+          <Tabs.Trigger value="notes">Notes</Tabs.Trigger>
           <Tabs.Trigger value="verify" attention={verifyState === "failed"}>Verify</Tabs.Trigger>
         </Tabs.List>
         {p ? (
           <>
             <Tabs.Content value="repositories"><RepositoriesTab project={p} /></Tabs.Content>
             <Tabs.Content value="environment"><EnvironmentTab project={p} /></Tabs.Content>
+            <Tabs.Content value="services"><ServicesTab project={p} /></Tabs.Content>
             <Tabs.Content value="secrets"><SecretsTab project={p} /></Tabs.Content>
             <Tabs.Content value="agents"><AgentsTab project={p} /></Tabs.Content>
+            <Tabs.Content value="notes"><NotesTab key={p.id} project={p} /></Tabs.Content>
             <Tabs.Content value="verify"><VerifyTab project={p} /></Tabs.Content>
           </>
         ) : (

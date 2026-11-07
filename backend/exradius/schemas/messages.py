@@ -132,6 +132,9 @@ class ResultPayload(BaseModel):
     transcript_url: str | None = None
     """HTTP download URL of the run's transcript (JSON lines), served by the Exradius API."""
     error: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    """Work left in the run directory that was discarded with it (uncommitted changes,
+    commits not pushed). Report only."""
 
     _check_transcript_url = field_validator("transcript_url")(_http_url)
 

@@ -55,7 +55,7 @@ async def test_verification_passes(verifier, sessions, containers, project, sett
 
     seen = {}
 
-    async def setup(*, image, run_id, paths, env, command):
+    async def setup(*, image, run_id, paths, env, command, service_network=None):
         seen.setdefault("image", image)
         seen.setdefault("label", run_id)
         seen["feature_checked_out"] = (paths.project / "app" / "feature.txt").exists()

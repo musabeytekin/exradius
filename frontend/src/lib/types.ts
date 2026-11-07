@@ -7,8 +7,22 @@ export interface Admin { id: Uuid; username: string }
 export interface Project {
   id: Uuid; slug: string; name: string; image: string | null;
   setup_commands: string[]; created_at: string;
+  /** What a new engineer would be told (docs/environment-and-services.md §5). Absent on older APIs. */
+  notes?: string;
 }
-export interface ProjectIn { slug: string; name: string; image?: string | null; setup_commands?: string[] }
+export interface ProjectIn { slug: string; name: string; image?: string | null; setup_commands?: string[]; notes?: string }
+
+// --- Services (docs/environment-and-services.md §2) ---
+
+/** null = the image's HEALTHCHECK, else "container is running". */
+export type ServiceReady = null | { tcp: number } | { command: string[] };
+export interface ProjectService {
+  id: Uuid; project_id: Uuid; name: string; image: string;
+  env: Record<string, string>; ports: number[]; ready: ServiceReady; position: number;
+}
+export interface ProjectServiceIn {
+  name: string; image: string; env: Record<string, string>; ports: number[]; ready: ServiceReady;
+}
 
 export interface RepositoryCheck {
   ok: boolean; branches: string[]; default_branch: string | null;
@@ -49,10 +63,12 @@ export interface Agent {
   provider_id?: Uuid | null;
   /** Git identity (docs/agent-identity.md). Absent on older APIs. */
   identity_name?: string | null; identity_email?: string | null;
+  /** null = the runtime's default model. Absent on older APIs. */
+  model?: string | null;
 }
 export interface AgentIn {
   slug: string; name: string; prompt: string; runtime: string; connection_ids: Uuid[]; provider_id?: Uuid | null;
-  identity_name?: string | null; identity_email?: string;
+  identity_name?: string | null; identity_email?: string; model?: string | null;
 }
 
 // --- Providers (docs/providers.md) ---
@@ -66,7 +82,13 @@ export interface AuthMethodSpec {
   name: string; label: string; credential_label: string;
   settings: ProviderSettingSpec[]; notice?: string | null;
 }
-export interface ProviderKindSpec { kind: string; label: string; auth_methods: AuthMethodSpec[] }
+/** A model a provider offers (docs/environment-and-services.md §3). */
+export interface ProviderModel { id: string; label?: string | null; description?: string | null }
+export interface ProviderKindSpec {
+  kind: string; label: string; auth_methods: AuthMethodSpec[];
+  /** Absent on older APIs; entries may be bare ids. */
+  models?: (ProviderModel | string)[] | null;
+}
 
 export interface ProviderLastTest { ok: boolean; tested_at: string; detail: unknown; error: string | null }
 export interface Provider {
@@ -74,6 +96,8 @@ export interface Provider {
   settings: Record<string, string>; is_default: boolean;
   last_test: ProviderLastTest | null; agent_count: number;
   created_at?: string; updated_at?: string;
+  /** Models the provider offers. Absent on older APIs. */
+  models?: (ProviderModel | string)[] | null;
 }
 export interface ProviderIn {
   slug: string; name: string; kind: string; auth_method: string;
@@ -102,6 +126,10 @@ export interface ResolvedConnection {
 export interface ResolvedAgent {
   project_id: Uuid; agent_id: Uuid; secret_overrides: Record<string, string>;
   connections: ResolvedConnection[];
+  /** Absent on older APIs. */
+  model?: string | null;
+  /** The `# Your environment` section as the worker would build it. Absent on older APIs. */
+  environment_text?: string | null;
 }
 
 export type StepState = "pending" | "running" | "passed" | "failed" | "skipped";
@@ -130,6 +158,9 @@ export interface Run {
   id: Uuid; state: TaskState; container_id: string | null; runtime_session_id: string | null;
   started_at: string | null; ended_at: string | null; error: string | null;
   summary: string | null; output: unknown;
+  /** The environment section the run was given, when the API exposes it. */
+  environment_text?: string | null;
+  spec?: { environment_text?: string | null } | null;
 }
 export interface TaskAttachment { id: Uuid; name: string; content_type: string; object_key: string | null; source_url: string | null }
 export interface InfoRequest {

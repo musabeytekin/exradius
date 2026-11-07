@@ -75,6 +75,11 @@ def test_runtimes_declare_their_providers(admin):
                         {"name": "oauth_token", "label": "Claude subscription token (claude setup-token)",
                          "credential_label": "OAuth token", "settings": [], "notice": OAUTH_NOTICE},
                     ],
+                    "models": [
+                        {"id": "claude-opus-5-5", "description": "Most capable; best for complex, long-running engineering work."},
+                        {"id": "claude-sonnet-5-5", "description": "Balanced speed and capability for everyday coding tasks."},
+                        {"id": "claude-haiku-5-5", "description": "Fastest and cheapest; good for small, well-defined tasks."},
+                    ],
                 }
             ],
         }
@@ -350,7 +355,7 @@ async def oauth_provider(sessions, box):
 async def test_provider_test_passes_and_records_last_test(manager, sessions, containers, oauth_provider, settings):
     probes = []
 
-    async def run_probe(*, image, label, env, timeout, runtime):
+    async def run_probe(*, image, label, env, timeout, runtime, model=None):
         probes.append({"image": image, "label": label, "env": env, "runtime": runtime.name})
         return ContainerExit(0, probe_logs())
 
@@ -374,7 +379,7 @@ async def test_provider_test_passes_and_records_last_test(manager, sessions, con
 async def test_provider_test_failure_is_kept_off_a_changed_provider(manager, sessions, containers, oauth_provider, box):
     test_id = await new_test(sessions, oauth_provider)
 
-    async def run_probe(*, image, label, env, timeout, runtime):
+    async def run_probe(*, image, label, env, timeout, runtime, model=None):
         async with sessions() as session:  # the credential is replaced while the probe runs
             (await session.get(Provider, oauth_provider)).credential_encrypted = box.encrypt("oat-new")
             await session.commit()
@@ -414,7 +419,7 @@ async def test_runner_probe_prints_one_result_line(monkeypatch, capsys):
     seen = {}
 
     class FakeRuntime:
-        async def probe(self, env):
+        async def probe(self, env, model=None):
             seen["env"] = env
             return ProbeResult(True, detail="claude-x replied 'OK'")
 
