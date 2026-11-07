@@ -87,7 +87,7 @@ def docker_settings(settings):
 @needs_docker
 async def test_run_container_sandbox(docker_settings, tmp_path):
     """Run containers: /work writable, attachments, bundle and root filesystem read-only,
-    unprivileged user, state mount and tmpfs available, and the bundle's runner and
+    unprivileged user, state mount and the on-disk home and /tmp writable, and the bundle's runner and
     Claude Code start in a project image that has no Exradius content."""
     from exradius.worker import prepare
     from exradius.worker.containers import ContainerManager
@@ -96,7 +96,7 @@ async def test_run_container_sandbox(docker_settings, tmp_path):
     paths = prepare.create_run_directory(settings.data_dir, "it-run")
     prepare.write_attachments(paths.attachments, [("note.txt", b"hello")])
     prepare.seal_read_only(paths.attachments)
-    for path in (paths.project, paths.state):
+    for path in (paths.project, paths.state, paths.home):
         path.chmod(0o777)  # the host user is not uid 1000; the worker chowns instead
 
     containers = ContainerManager(settings, docker_client)
@@ -110,6 +110,8 @@ async def test_run_container_sandbox(docker_settings, tmp_path):
             "! touch /usr/evil 2>/dev/null",
             "! touch /opt/exradius/runtime/evil 2>/dev/null",
             "touch /tmp/ok $HOME/ok $EXRADIUS_STATE_DIR/ok",
+            "test \"$HOME\" = /home/runner && cp /bin/true $HOME/exe && $HOME/exe",  # exec allowed
+            "cp /bin/true /tmp/exe && /tmp/exe && test -k /tmp",  # exec allowed, sticky
             "git --version >/dev/null",
             "! command -v node",
             "/opt/exradius/runtime/bin/claude --version",
@@ -128,6 +130,8 @@ async def test_run_container_sandbox(docker_settings, tmp_path):
     assert "usage: exradius-runner <run_id>" in result.logs
     assert (paths.project / "written.txt").read_text() == "ok\n"
     assert (paths.state / "ok").exists()
+    assert (paths.home / "ok").exists() and (paths.home / "exe").exists()  # on disk, not a tmpfs
+    assert (paths.tmp / "ok").exists() and (paths.tmp / "exe").exists()
     prepare.remove_run_directory(paths)
 
 

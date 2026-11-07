@@ -67,8 +67,16 @@ current version.
 ### 2.4 The run user
 
 The bundle is world-readable and executable, so the unprivileged run user can execute it
-regardless of the project image's own users. Home, `/tmp` and the state mount stay as
-they are. `CLAUDE_CONFIG_DIR` still points into the state mount.
+regardless of the project image's own users. `CLAUDE_CONFIG_DIR` still points into the
+state mount.
+
+The home, `/home/runner`, and `/tmp` are the run's `runs/<run_id>/home` and `tmp`
+directories on disk, bind-mounted (exec allowed) into setup, run and resume containers alike
+and owned by the run user (`tmp` with mode 1777). Package manager caches (`~/.cache/yarn`,
+`~/.npm`, `~/.m2`, `~/go/pkg/mod`), the archives Yarn Berry stages in `/tmp`, and build
+output therefore take disk, not memory, and a cache filled by a setup command is still there
+for the agent and after a resume. Both are removed with the rest of the run directory. The
+provider probe has no run directory and keeps tmpfs for both.
 
 Project images often have their own passwd entry for uid 1000 with another home (Ubuntu's
 `ubuntu:x:1000:1000::/home/ubuntu`), and tools that read the home from passwd rather than

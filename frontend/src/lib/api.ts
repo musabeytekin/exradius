@@ -160,6 +160,8 @@ export const api = {
     keys: (id: string) => get<(string | T.SecretStoreKey)[]>(`/stores/${id}/keys`),
     /** Write-only: the value is never returned. */
     setKey: (id: string, key: string, value: string) => put<unknown>(`/stores/${id}/keys/${encodeURIComponent(key)}`, { value }),
+    /** Set or replace several values in one transaction; returns the store's key list. */
+    setKeys: (id: string, values: Record<string, string>) => put<T.SecretStoreKey[]>(`/stores/${id}/keys`, { values }),
     removeKey: (id: string, key: string) => del(`/stores/${id}/keys/${encodeURIComponent(key)}`),
   },
   gitCredentials: {

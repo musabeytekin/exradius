@@ -233,6 +233,8 @@ class RunManager:
         uid, gid = self.settings.run_uid_gid
         await asyncio.to_thread(prepare.chown_tree, paths.project, uid, gid, paths.attachments)
         await asyncio.to_thread(prepare.chown_tree, paths.state, uid, gid)
+        await asyncio.to_thread(prepare.chown_tree, paths.home, uid, gid)
+        await asyncio.to_thread(prepare.chown_tree, paths.tmp, uid, gid)
         await asyncio.to_thread(prepare.seal_read_only, paths.attachments)
 
     async def _fetch(self, object_key: str | None, source_url: str | None) -> bytes:

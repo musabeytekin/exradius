@@ -159,6 +159,10 @@ class ContainerManager:
                 read_only=True,
             ),
             Mount(target=self.settings.run_state_mount, source=self.host_path(paths.state), type="bind"),
+            # On disk, so package manager caches, staged downloads and build output do not
+            # sit in memory; bind mounts are exec, like the tmpfs mounts they replaced.
+            Mount(target=HOME_DIR, source=self.host_path(paths.home), type="bind"),
+            Mount(target="/tmp", source=self.host_path(paths.tmp), type="bind"),
         ]
 
     def _create(
@@ -176,8 +180,12 @@ class ContainerManager:
     ):
         """``paths=None`` creates a container without the run mounts (provider probes);
         ``runtime`` mounts that bundle read-only (runs and probes, not setup commands);
-        ``service_network`` also joins the run's own network, where its services are."""
+        ``service_network`` also joins the run's own network, where its services are.
+        With ``paths`` the home and ``/tmp`` are the run's ``home`` and ``tmp`` directories,
+        shared by the run's setup, run and resume containers; without, both are tmpfs."""
         uid, gid = self.settings.run_uid_gid
+        if paths:
+            prepare.ensure_user_dirs(paths, uid, gid)
         mounts = self._mounts(paths) + self._identity_mounts(paths) if paths else []
         if runtime is not None:
             mounts.append(self._runtime_mount(runtime))
@@ -197,7 +205,7 @@ class ContainerManager:
             mounts=mounts,
             user=f"{uid}:{gid}",
             read_only=True,
-            tmpfs={
+            tmpfs=None if paths else {
                 "/tmp": "rw,exec,mode=1777",
                 HOME_DIR: f"rw,exec,uid={uid},gid={gid},mode=0755",
             },

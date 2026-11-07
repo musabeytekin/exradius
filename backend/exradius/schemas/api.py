@@ -224,6 +224,10 @@ class StoreValueIn(BaseModel):
     value: str = Field(min_length=1)
 
 
+class StoreValuesIn(BaseModel):
+    values: dict[str, Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+
+
 # Verification ------------------------------------------------------------------------------
 
 

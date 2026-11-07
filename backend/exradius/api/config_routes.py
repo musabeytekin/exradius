@@ -315,9 +315,38 @@ async def delete_store(store_id: uuid.UUID, session: DB, _: Admin):
 @router.get("/stores/{store_id}/keys", response_model=list[s.StoreKeyOut])
 async def list_store_keys(store_id: uuid.UUID, session: DB, _: Admin):
     await get_or_404(session, SecretStore, store_id)
-    return (await session.scalars(
+    return await _entries(session, store_id)
+
+
+async def _entries(session, store_id: uuid.UUID) -> list[SecretStoreEntry]:
+    return list((await session.scalars(
         select(SecretStoreEntry).where(SecretStoreEntry.store_id == store_id).order_by(SecretStoreEntry.key)
-    )).all()
+    )).all())
+
+
+KEY_RULE = "a key consists of letters, digits, '_', '.' and '-'"
+
+
+@router.put("/stores/{store_id}/keys", response_model=list[s.StoreKeyOut])
+async def set_store_keys(store_id: uuid.UUID, body: s.StoreValuesIn, session: DB, state: State, _: Admin):
+    """Set or replace several values at once; nothing is written if any key name is invalid."""
+    await get_or_404(session, SecretStore, store_id)
+    bad = sorted(k for k in body.values if not SECRET_KEY.match(k))
+    if bad:
+        raise HTTPException(422, f"{KEY_RULE}: {', '.join(map(repr, bad))}")
+    existing = {e.key: e for e in (await session.scalars(
+        select(SecretStoreEntry).where(SecretStoreEntry.store_id == store_id, SecretStoreEntry.key.in_(body.values))
+    )).all()}
+    now = utcnow()
+    for key, value in body.values.items():
+        entry = existing.get(key)
+        if entry is None:
+            entry = SecretStoreEntry(store_id=store_id, key=key, value_encrypted="")
+            session.add(entry)
+        entry.value_encrypted = state.box.encrypt(value)
+        entry.updated_at = now
+    await session.commit()
+    return await _entries(session, store_id)
 
 
 @router.put("/stores/{store_id}/keys/{key}", response_model=s.StoreKeyOut)
@@ -325,7 +354,7 @@ async def set_store_key(store_id: uuid.UUID, key: str, body: s.StoreValueIn, ses
     """Set or replace a value; keys are the ``NAME`` of ``${secret:NAME}``."""
     await get_or_404(session, SecretStore, store_id)
     if not SECRET_KEY.match(key):
-        raise HTTPException(422, "a key consists of letters, digits, '_', '.' and '-'")
+        raise HTTPException(422, KEY_RULE)
     entry = await session.scalar(
         select(SecretStoreEntry).where(SecretStoreEntry.store_id == store_id, SecretStoreEntry.key == key)
     )

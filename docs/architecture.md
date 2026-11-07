@@ -184,6 +184,8 @@ The worker:
 1. Creates the run directory on the host: `/var/lib/exradius/runs/<run_id>/` containing
    - `project/` — becomes the container's working directory;
    - `state/` — runtime state that must survive suspend/resume (for Claude Code, the session files under its home directory);
+   - `home/` — the run user's home, mounted at `/home/runner` (`$HOME`). It is on disk, like an engineer's home directory, because package manager caches and build output land there: one `yarn install` of a large Node project leaves 800 MiB in its cache (`~/.yarn/berry/cache` for Outline), and in memory (a tmpfs) two such runs at once exhausted a 7.7 GB Docker VM. Setup commands, the agent container and every resume share it, so a cache filled by setup is warm for the agent; it goes away with the run directory (§5.5);
+   - `tmp/` — the run's `/tmp`, mode 1777, on disk for the same reason: Yarn Berry stages every package archive in `/tmp/xfs-*/archive.zip` until it exits, as much again as its cache (814 MiB for Outline);
    - `attachments` are written to `project/.exradius/attachments/`.
 2. For each repository of the project: refreshes the per-project bare mirror at `/var/lib/exradius/mirrors/<project>/<repo>.git` with `git fetch`, then clones from the mirror into `project/<repo-folder>/` with `git clone --local` (hardlinked objects, fast) and checks out the configured branch.
 3. Runs the project's setup commands with `project/` as working directory, inside the run image (so toolchains match). Non-zero exit fails the run.
@@ -424,10 +426,11 @@ Details the design left open, and the simplest choice made for each in version o
 - Containers run as `1000:1000` with these settings:
   - a read-only root filesystem;
   - `cap_drop: ALL` and `no-new-privileges`;
-  - tmpfs for `/tmp` and for `HOME=/home/runner`;
+  - `HOME=/home/runner` and `/tmp`, bind-mounted from the run's `home/` and `tmp/` directories (exec allowed, like the tmpfs mounts they replaced), so what a run writes takes disk, not memory. Setup, run and resume containers and Verify's setup containers all mount the same ones. Only containers without a run directory (the provider probe) and the delivery check (which mounts `/work` read-only and needs neither) get tmpfs for both. A run directory from before they were on disk gets empty ones when its container starts;
   - membership of the network named by `EXRADIUS_RUN_NETWORK` (`exradius-runs`), so they reach the API at `EXRADIUS_RUN_API_URL` (`http://exradius-api:8000`). Only the API is on that network; see "Networks" in §12.
 
-  The worker runs as root and chowns `project/` and `state/` to the run user.
+  The worker runs as root and chowns `project/`, `state/`, `home/` and `tmp/` to the run user.
+- Removing a run directory copes with whatever the run left: read-only files and directories (sealed attachments, Go's module cache, `chmod -w` build output), unreadable directories, deep `node_modules` trees, sockets and FIFOs. A plain `rmtree` runs first; if it fails, the worker gives the owner `rwx` on every directory (walking by directory descriptor, never following symlinks) and removes the rest.
 - Attachments are written root-owned with mode `0444`. Their directory is also bind-mounted read-only over `/work/.exradius/attachments`. Answer attachments go to `.exradius/attachments/<request_id>/`.
 - The worker sees its data directory at `EXRADIUS_DATA_DIR`. Bind mounts are created by the host's Docker daemon, so `EXRADIUS_HOST_DATA_DIR` gives the same directory as the host sees it. The compose file mounts both at the same host path.
 - Mirrors are created with `git clone --mirror`, refreshed with `git fetch --prune` and serialised with a file lock per mirror. Clones use `git clone --local --branch <branch>`, after which `origin` is reset to the real remote URL. A repository's `credential` is used for the mirror fetch as an HTTP Basic `extraHeader` (a bare token becomes `x-access-token:<token>`), and for pushing only through the credential helper of `push: true` (Agent identity below). It is never written into the clone. A mirror's `HEAD` follows the remote's default branch at every fetch, so a repository without `branch` clones that one.
@@ -535,7 +538,7 @@ Details the design left open, and the simplest choice made for each in version o
   - `GIT_CONFIG_GLOBAL=<state>/git/config`. These override project variables of the same names.
   - Setup containers and the provider probe get none of this: they have no agent or task, and the probe has no state mount.
 - **Global git config in the state mount.**
-  - `$HOME` is a tmpfs that starts empty in every container, so the run's global config lives at `<state>/git/config`, named by `GIT_CONFIG_GLOBAL` (git 2.32 or later; Ubuntu 22.04 and Debian bookworm images have it). With older git, only the identity variables apply.
+  - The run's global config lives at `<state>/git/config`, not `$HOME/.gitconfig` (the home also persists, but belongs to the agent and its tools), named by `GIT_CONFIG_GLOBAL` (git 2.32 or later; Ubuntu 22.04 and Debian bookworm images have it). With older git, only the identity variables apply.
   - The worker creates `config` once with just `[include] path = exradius.gitconfig`, and rewrites `exradius.gitconfig` at every start. So the agent's own `git config --global` changes survive resume, and the managed settings follow the current agent and repositories.
   - `exradius.gitconfig` sets `user.name`, `user.email`, `core.hooksPath=<state>/git-hooks`, `push.autoSetupRemote=true`, `init.defaultBranch=main` and the credential helpers. All values are quoted.
 - **Commit trailers.** `<state>/git-hooks/prepare-commit-msg` runs `git interpret-trailers --if-exists doNothing` for `Exradius-Task: $EXRADIUS_TASK_ID` and `Exradius-Agent: $EXRADIUS_AGENT`, so amending or rebasing never duplicates them. Because `core.hooksPath` replaces the hooks directory, a repository's own hooks (and any husky-style setup) do not run in v1.

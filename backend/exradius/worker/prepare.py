@@ -5,6 +5,8 @@ Layout under the data directory::
     runs/<run_id>/project/                      container working directory (/work)
     runs/<run_id>/project/.exradius/attachments read-only attachments
     runs/<run_id>/state/                        runtime state kept across suspend/resume
+    runs/<run_id>/home/                         the run user's home (/home/runner): caches, build output
+    runs/<run_id>/tmp/                          the run's /tmp, on disk for the same reason
     mirrors/<project>/<repo>.git                per-project bare mirrors (shared, kept)
 
 Everything here is synchronous; the worker calls it through ``asyncio.to_thread``.
@@ -17,6 +19,7 @@ import fcntl
 import os
 import re
 import shutil
+import stat
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -36,6 +39,12 @@ class RunPaths:
     project: Path
     state: Path
     attachments: Path
+    home: Path
+    """Mounted at ``/home/runner`` in setup, run and resume containers. On disk, not a tmpfs:
+    package manager caches there reach hundreds of MiB per run (§5.1)."""
+    tmp: Path
+    """Mounted at ``/tmp`` in the same containers, mode 1777: Yarn Berry stages every package
+    archive there before copying it into its cache, as much again as the cache itself."""
 
     @property
     def etc(self) -> Path:
@@ -58,14 +67,44 @@ class RepoSpec:
 def run_paths(data_dir: Path, run_id: str) -> RunPaths:
     root = data_dir / "runs" / run_id
     project = root / "project"
-    return RunPaths(root=root, project=project, state=root / "state", attachments=project / ATTACHMENTS_REL)
+    return RunPaths(
+        root=root,
+        project=project,
+        state=root / "state",
+        attachments=project / ATTACHMENTS_REL,
+        home=root / "home",
+        tmp=root / "tmp",
+    )
 
 
 def create_run_directory(data_dir: Path, run_id: str) -> RunPaths:
     paths = run_paths(data_dir, run_id)
     paths.attachments.mkdir(parents=True, exist_ok=True)
     paths.state.mkdir(parents=True, exist_ok=True)
+    _make_user_dirs(paths)
     return paths
+
+
+USER_DIR_MODES = {"home": 0o755, "tmp": 0o1777}
+"""The run user's directories on disk and their modes (owner: the run user, see ``chown_tree``)."""
+
+
+def _make_user_dirs(paths: RunPaths) -> None:
+    for name, mode in USER_DIR_MODES.items():
+        directory: Path = getattr(paths, name)
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(mode)  # explicit: mkdir applies the umask and never sets the sticky bit
+
+
+def ensure_user_dirs(paths: RunPaths, uid: int, gid: int) -> None:
+    """The run's ``home`` and ``tmp``, created for the run user if missing: a run directory
+    made before they were on disk has neither, and its resume must not fail on the bind
+    mounts. Existing ones are left as they are."""
+    for directory in (paths.home, paths.tmp):
+        if not directory.exists():
+            directory.mkdir(parents=True, exist_ok=True)
+            directory.chmod(USER_DIR_MODES[directory.name])
+            chown_tree(directory, uid, gid)
 
 
 def identity_files(uid: int, gid: int, home: str) -> tuple[str, str]:
@@ -248,13 +287,41 @@ def chown_tree(path: Path, uid: int, gid: int, skip: Path | None = None) -> None
 
 
 def remove_run_directory(paths: RunPaths) -> None:
+    """Remove the run directory, whatever the run left in it: read-only files and
+    directories (sealed attachments, Go's module cache, ``chmod -w`` build output), deep
+    ``node_modules`` trees, sockets and FIFOs, symlinks pointing anywhere. Symlinks are
+    removed, never followed."""
     if not paths.root.exists():
         return
+    try:
+        shutil.rmtree(paths.root)
+        return
+    except OSError:
+        pass  # permissions: open up the tree (only the parts that refused) and try again
+    _make_tree_removable(paths.root)
+    shutil.rmtree(paths.root, onexc=_removal_failed)
 
-    def _make_writable(func, target, _exc):  # read-only attachment dirs
-        parent = Path(target).parent
-        parent.chmod(0o755)
-        Path(target).chmod(0o755)
-        func(target)
 
-    shutil.rmtree(paths.root, onexc=_make_writable)
+def _make_tree_removable(root: Path) -> None:
+    """Give the owner rwx on every directory below ``root``, top-down so that unreadable
+    directories become listable before the walk enters them. Files need nothing: removing
+    one takes write permission on its directory only. ``fwalk`` works relative to directory
+    descriptors, so trees longer than ``PATH_MAX`` are no problem."""
+    def _open_up(name: str, dir_fd: int | None = None) -> None:
+        try:
+            mode = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
+            if stat.S_ISDIR(mode) and mode & 0o700 != 0o700:  # never a symlink's target
+                os.chmod(name, stat.S_IMODE(mode) | 0o700, dir_fd=dir_fd)
+        except OSError:
+            pass
+
+    _open_up(str(root))
+    for _current, dirs, _files, dir_fd in os.fwalk(root, onerror=lambda _exc: None):
+        for name in dirs:
+            _open_up(name, dir_fd)
+
+
+def _removal_failed(func, target, exc: BaseException) -> None:
+    if isinstance(exc, FileNotFoundError):  # gone meanwhile
+        return
+    raise exc

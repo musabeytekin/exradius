@@ -2,7 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { Table } from "@/components/ui/controls";
-import { Banner, Button, Card, CardHeader, Chip, Input, Mono, Skeleton } from "@/components/ui/primitives";
+import { Banner, Button, Card, CardHeader, Chip, Field, Input, Mono, Skeleton } from "@/components/ui/primitives";
 import { api, ApiError } from "@/lib/api";
 import { buttonClass } from "@/lib/buttonStyles";
 import { keyName, requiredKeys, storeNameOf } from "@/lib/projectConfig";
@@ -50,20 +50,25 @@ export function SecretsTab({ project }: { project: Project }) {
       {keys.isLoading ? (
         <div className="p-4"><Skeleton className="h-24" /></div>
       ) : req.length === 0 ? null : (
-        <Table.Root>
-          <Table.Head>
-            <tr><Table.Th>Key</Table.Th><Table.Th>State</Table.Th><Table.Th className="w-[420px]">Value</Table.Th></tr>
-          </Table.Head>
-          <tbody>
-            {req.map((k) => (
-              <Table.Row key={k.key}>
-                <Table.Td><Mono className="font-medium">{k.key}</Mono></Table.Td>
-                <Table.Td>{k.present ? <Chip tone="ok" dot>present</Chip> : <Chip tone="warn" dot>missing</Chip>}</Table.Td>
-                <Table.Td><KeyValueSetter store={store} keyName={k.key} present={k.present} projectId={project.id} /></Table.Td>
-              </Table.Row>
-            ))}
-          </tbody>
-        </Table.Root>
+        <>
+          {missing > 0 && <MissingKeys store={store} keys={req.filter((k) => !k.present).map((k) => k.key)} projectId={project.id} />}
+          {missing < req.length && (
+            <Table.Root>
+              <Table.Head>
+                <tr><Table.Th>Key</Table.Th><Table.Th>State</Table.Th><Table.Th className="w-[420px]">Value</Table.Th></tr>
+              </Table.Head>
+              <tbody>
+                {req.filter((k) => k.present).map((k) => (
+                  <Table.Row key={k.key}>
+                    <Table.Td><Mono className="font-medium">{k.key}</Mono></Table.Td>
+                    <Table.Td><Chip tone="ok" dot>present</Chip></Table.Td>
+                    <Table.Td><KeyValueSetter store={store} keyName={k.key} present projectId={project.id} /></Table.Td>
+                  </Table.Row>
+                ))}
+              </tbody>
+            </Table.Root>
+          )}
+        </>
       )}
     </Card>
   );
@@ -91,6 +96,59 @@ function MissingStore({ project, name }: { project: Project; name: string }) {
         <Button variant="primary" icon="plus" loading={create.isPending} onClick={() => create.mutate()}>Create store {name}</Button>
       </div>
     </Card>
+  );
+}
+
+function MissingKeys({ store, keys, projectId }: { store: Pick<SecretStore, "id" | "name">; keys: string[]; projectId: string }) {
+  const qc = useQueryClient();
+  const save = useMutation({
+    mutationFn: (values: Record<string, string>) => api.stores.setKeys(store.id, values),
+    onSuccess: (_, values) => {
+      qc.invalidateQueries({ queryKey: qk.storeKeys(store.id) });
+      qc.invalidateQueries({ queryKey: qk.stores });
+      qc.invalidateQueries({ queryKey: qk.projects });
+      qc.invalidateQueries({ queryKey: qk.project(projectId) });
+      const n = Object.keys(values).length;
+      toast.ok(`${n} ${n === 1 ? "key" : "keys"} set in ${store.name}`);
+    },
+    onError: (e) => toast.err("Could not set the keys", e),
+  });
+  // Values go in as variables but the mutation is reset once it settles, so they are not kept in its cache.
+  return <MissingKeysForm keys={keys} saving={save.isPending} onSave={(values) => save.mutateAsync(values).then(() => true, () => false).finally(() => save.reset())} />;
+}
+
+/** One write-only input per missing key, saved together. Unfilled inputs are left out. */
+export function MissingKeysForm({ keys, saving, onSave }: {
+  keys: string[]; saving?: boolean; onSave: (values: Record<string, string>) => Promise<boolean> | void;
+}) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const filled = Object.fromEntries(keys.filter((k) => values[k]).map((k) => [k, values[k]]));
+  const count = Object.keys(filled).length;
+  return (
+    <form
+      className="flex flex-col gap-3 border-b border-border px-4 py-4"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (count && (await onSave(filled)) !== false) setValues({});
+      }}
+    >
+      <div className="grid gap-3 sm:grid-cols-2">
+        {keys.map((k) => (
+          <Field key={k} label={<Mono className="text-xs">{k}</Mono>} htmlFor={`missing-${k}`}>
+            <Input
+              id={`missing-${k}`}
+              type="password"
+              autoComplete="off"
+              value={values[k] ?? ""}
+              onChange={(e) => setValues((v) => ({ ...v, [k]: e.target.value }))}
+            />
+          </Field>
+        ))}
+      </div>
+      <div className="flex justify-end">
+        <Button type="submit" size="sm" variant="primary" loading={saving} disabled={!count}>Save all</Button>
+      </div>
+    </form>
   );
 }
 

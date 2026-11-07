@@ -4,10 +4,11 @@ import { useState } from "react";
 import { Table } from "@/components/ui/controls";
 import { Icon } from "@/components/ui/icons";
 import { Dialog } from "@/components/ui/overlays";
-import { Banner, Button, Card, CardHeader, EmptyState, Field, Input, Mono, PageHeader, Skeleton, SkeletonRows } from "@/components/ui/primitives";
+import { Banner, Button, Card, CardHeader, EmptyState, Field, Input, Mono, PageHeader, Skeleton, SkeletonRows, Textarea } from "@/components/ui/primitives";
 import { api, ApiError, refusal } from "@/lib/api";
 import { buttonClass } from "@/lib/buttonStyles";
 import { useConfirm } from "@/lib/confirm";
+import { parseDotenv } from "@/lib/dotenv";
 import { relativeTime } from "@/lib/format";
 import { SECRET_KEY_RE, STORE_NAME_RE, storeNameOf } from "@/lib/projectConfig";
 import { qk, useProjects, useStoreKeys, useStores } from "@/lib/queries";
@@ -127,6 +128,7 @@ export function StoreDetailPage() {
   const keys = useStoreKeys(storeId);
   const [refused, setRefused] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [pasting, setPasting] = useState(false);
 
   const remove = useMutation({
     mutationFn: () => api.stores.remove(storeId),
@@ -183,6 +185,7 @@ export function StoreDetailPage() {
         actions={
           <>
             <Button variant="primary" icon="plus" onClick={() => setAdding(true)}>Add key</Button>
+            <Button variant="secondary" icon="upload" onClick={() => setPasting(true)}>Paste .env</Button>
             <Button
               variant="secondary"
               icon="trash"
@@ -243,6 +246,7 @@ export function StoreDetailPage() {
         )}
       </Card>
       {adding && <AddKeyDialog store={store} taken={names} onOpenChange={setAdding} />}
+      {pasting && <PasteEnvDialog store={store} onOpenChange={setPasting} />}
     </>
   );
 }
@@ -287,6 +291,63 @@ function AddKeyDialog({ store, taken, onOpenChange }: { store: SecretStore; take
           <Input id="key-value" type="password" autoComplete="off" value={value} onChange={(e) => setValue(e.target.value)} />
         </Field>
       </div>
+    </Dialog>
+  );
+}
+
+function PasteEnvDialog({ store, onOpenChange }: { store: SecretStore; onOpenChange: (o: boolean) => void }) {
+  const qc = useQueryClient();
+  const [text, setText] = useState("");
+  const parsed = parseDotenv(text);
+  const keys = Object.keys(parsed.values ?? {});
+  const save = useMutation({
+    mutationFn: () => api.stores.setKeys(store.id, parsed.values!),
+    onSuccess: () => {
+      setText("");
+      qc.invalidateQueries({ queryKey: qk.storeKeys(store.id) });
+      qc.invalidateQueries({ queryKey: qk.stores });
+      qc.invalidateQueries({ queryKey: qk.projects });
+      toast.ok(`${keys.length} ${keys.length === 1 ? "key" : "keys"} set in ${store.name}`);
+      onOpenChange(false);
+    },
+    onError: (e) => toast.err("Could not set the keys", e),
+  });
+  return (
+    <Dialog
+      open
+      width={600}
+      onOpenChange={onOpenChange}
+      title={<>Paste .env into <span className="font-mono">{store.name}</span></>}
+      description="Keys that already exist in this store are replaced."
+      onSubmit={() => keys.length && save.mutate()}
+      footer={
+        <>
+          <Button variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button type="submit" variant="primary" loading={save.isPending} disabled={!keys.length}>
+            {keys.length ? `Save ${keys.length} ${keys.length === 1 ? "key" : "keys"}` : "Save"}
+          </Button>
+        </>
+      }
+    >
+      <Field
+        label="KEY=value lines"
+        htmlFor="dotenv"
+        error={parsed.error}
+        hint={keys.length ? <>Sets <Mono className="text-xs">{keys.join(", ")}</Mono></> : undefined}
+      >
+        <Textarea
+          id="dotenv"
+          mono
+          autoFocus
+          rows={10}
+          spellCheck={false}
+          autoComplete="off"
+          invalid={!!parsed.error}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={"DB_PASSWORD=...\nAPI_TOKEN=..."}
+        />
+      </Field>
     </Dialog>
   );
 }

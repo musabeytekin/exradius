@@ -188,7 +188,12 @@ async def test_run_probe_and_setup_containers(manager, fake, tmp_path):
     assert len(bundle) == 1 and bundle[0]["Source"] == runtime.volume
     assert bundle[0]["Type"] == "volume" and bundle[0]["ReadOnly"] is True
     assert {m["Target"] for m in run["mounts"]} == {"/work", "/work/.exradius/attachments", "/exradius/state",
-                                                    "/opt/exradius/runtime", "/etc/passwd", "/etc/group"}
+                                                    "/home/runner", "/tmp", "/opt/exradius/runtime",
+                                                    "/etc/passwd", "/etc/group"}
+    for target, source in (("/home/runner", paths.home), ("/tmp", paths.tmp)):
+        mount = next(m for m in run["mounts"] if m["Target"] == target)
+        assert mount["Type"] == "bind" and mount["Source"] == str(source) and not mount.get("ReadOnly")
+    assert not run["tmpfs"]  # home and /tmp are on disk, not in memory
     assert run["user"] == "1000:1000" and run["read_only"] is True and run["cap_drop"] == ["ALL"]
     assert run["environment"]["A"] == "1" and run["environment"]["HOME"] == "/home/runner"
     assert run["environment"]["GIT_CONFIG_KEY_0"] == "safe.directory" and run["environment"]["GIT_CONFIG_VALUE_0"] == "*"
@@ -206,6 +211,9 @@ async def test_run_probe_and_setup_containers(manager, fake, tmp_path):
     setup = fake.ran[-1]
     assert setup["entrypoint"] == ["/bin/sh", "-c"] and setup["command"] == ["make"]
     assert "/opt/exradius/runtime" not in {m["Target"] for m in setup["mounts"]}  # no bundle for setup
+    assert next(m for m in setup["mounts"] if m["Target"] == "/home/runner")["Source"] == str(paths.home)
+    assert next(m for m in setup["mounts"] if m["Target"] == "/tmp")["Source"] == str(paths.tmp)
+    assert not setup["tmpfs"]  # the same home and /tmp as the run container
 
     await manager.run_probe(image="exradius-project-default:0.1.0", label="provider-test-1",
                             env={"CLAUDE_CODE_OAUTH_TOKEN": "t"}, timeout=10, runtime=runtime)
@@ -213,6 +221,8 @@ async def test_run_probe_and_setup_containers(manager, fake, tmp_path):
     assert probe["image"] == "exradius-project-default:0.1.0"
     assert probe["entrypoint"] == [ENTRYPOINT] and probe["command"] == ["--probe", "claude_code"]
     assert [m["Target"] for m in probe["mounts"]] == ["/opt/exradius/runtime"]
+    assert probe["tmpfs"] == {"/tmp": "rw,exec,mode=1777",  # no run directory: both in memory
+                              "/home/runner": "rw,exec,uid=1000,gid=1000,mode=0755"}
 
 
 async def test_docker_report_lists_every_image_and_the_runtimes(manager, fake):

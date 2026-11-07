@@ -5,9 +5,10 @@ container:
 
 - ``GIT_AUTHOR_*`` and ``GIT_COMMITTER_*`` from the agent's identity, ``EXRADIUS_AGENT`` and
   ``EXRADIUS_TASK_ID``;
-- a global git config in the state mount, so it survives resume. ``$HOME`` is a tmpfs that
-  starts empty in every container, so the config is not ``$HOME/.gitconfig`` but
-  ``<state>/git/config``, named by ``GIT_CONFIG_GLOBAL``. That file is created once and only
+- a global git config in the state mount, so it survives resume. It is not
+  ``$HOME/.gitconfig`` (``$HOME`` is the run's home directory, which also persists, but is
+  the agent's and its tools' to fill) but ``<state>/git/config``, named by
+  ``GIT_CONFIG_GLOBAL``. That file is created once and only
   includes ``<state>/git/exradius.gitconfig``, which the worker rewrites at every start; the
   agent's own ``git config --global`` changes land in the first one and are kept;
 - ``<state>/git-hooks/prepare-commit-msg``, which adds the ``Exradius-Task`` and
