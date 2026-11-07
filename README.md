@@ -1,293 +1,324 @@
 # Exradius
 
-Exradius is a self-hosted execution harness for AI agents. Tasks arrive on a RabbitMQ
-queue. A worker runs the named agent against the named project in an isolated Docker
-container through the Claude Agent SDK. Status changes, questions from the agent and
-results are published back on a topic exchange. Exradius only executes: managing tasks
-and integrating with ticketing, chat or CI tools is the job of an integration layer you
-build on top of the queues.
+**A self-hosted harness that runs AI coding agents on a company's own codebases.**
+A ticket arrives on a queue. Exradius brings up a fully provisioned, isolated workstation
+for the project (its repositories, toolchain and services such as Postgres or RabbitMQ),
+runs a Claude Code agent in it, and publishes what happened: status changes, questions for a
+human, and a result with a branch or pull request.
 
-The design is in [docs/architecture.md](docs/architecture.md). It ends with
-implementation notes that record the details the design left open.
+Exradius only executes. It has no ticket model and no chat integration: whatever tracker a
+company uses publishes tasks on RabbitMQ and consumes the events. It runs on one machine
+with Docker Compose and is administered from a web panel.
 
-## Repository layout
+[![A ticket in a tracker is assigned to the Exradius agent](docs/media/assign-ticket.jpg)](docs/media/assign-ticket.mp4)
 
+*Assigning a ticket to the agent: the tracker's integration turns it into an Exradius task
+([video, 6 s](docs/media/assign-ticket.mp4)).*
+
+## Seen working
+
+Agents run by Exradius opened these pull requests on forks of four open-source codebases,
+each project set up from its own config repository:
+
+| Project | Stack | Pull request |
+|---|---|---|
+| [Plane](https://github.com/makeplane/plane) | TypeScript/React monorepo and a Django API; Postgres, Valkey, RabbitMQ, MinIO | [Register estimate routes in the public API](https://github.com/musabeytekin/plane/pull/1) |
+| [Saleor](https://github.com/saleor/saleor) | Django GraphQL API and the React dashboard, two repositories; Postgres, Valkey | [Trim whitespace around email on registration and login](https://github.com/musabeytekin/saleor/pull/1) |
+| [Outline](https://github.com/outline/outline) | TypeScript, Node and React, Yarn 4 | [Reject a past expiry when creating API keys](https://github.com/musabeytekin/outline/pull/1) |
+| [Bank of Anthos](https://github.com/GoogleCloudPlatform/bank-of-anthos) | Java and Python microservices; Postgres | [Label transactions as deposit or payment](https://github.com/musabeytekin/bank-of-anthos/pull/1) |
+
+These tickets were written for the trials. A graded evaluation on real upstream bugs is the
+next step (see [Status](#status)).
+
+## How a task runs
+
+```mermaid
+flowchart LR
+    tracker["Tracker or<br/>integration layer"] -- task --> tasks[("exradius.tasks")]
+    tasks --> worker["Worker"]
+    worker -- reads at branch head --> config["Config repository<br/>exradius.yaml"]
+    worker -- clones, builds, starts --> run["Run container<br/>workstation + Claude Code"]
+    worker -- starts --> services["Service containers<br/>postgres, redis, ..."]
+    run -. private network .- services
+    run -- pushes branch, opens PR --> git["Git host"]
+    worker -- status, questions, result --> events[("exradius.events")]
+    events --> tracker
+    tracker -- answers --> answers[("exradius.answers")]
+    answers --> worker
 ```
-backend/            Python 3.14 package `exradius` (uv)
-  exradius/api/       admin API (session cookie) and internal run API (run token)
-  exradius/worker/    broker consumers, run preparation, container control
-  exradius/runner/    run container entrypoint (inside the runtime bundle) and the built-in
-                      `exradius` MCP server
-  exradius/runtimes/  Runtime protocol and ClaudeCodeRuntime
-  exradius/models/    SQLAlchemy models and Alembic migrations
-  exradius/schemas/   Pydantic models for broker messages and APIs
-  exradius/messaging/ RabbitMQ topology and publishing
-  tests/
-deploy/
-  docker-compose.yml  api, worker, frontend, postgres, rabbitmq (management UI)
-  backend.Dockerfile              exradius-backend: the api and worker services
-  runtime-claude-code.Dockerfile  exradius-runtime-claude-code: the Claude Code runtime bundle
-  project-default.Dockerfile      exradius-project-default: image for projects without one
-frontend/           admin panel: React 19, TypeScript, Vite, Tailwind CSS 4
-docs/
-  architecture.md     the system design
-  onboarding.md       the admin panel and onboarding design
+
+1. **Intake.** The worker reads the project's `exradius.yaml` afresh, rejects the task with
+   a reason if the config has errors or the secret store lacks a key it references, and
+   stores the task before acknowledging the message.
+2. **Preparing.** It clones the repositories from per-project mirrors into a fresh run
+   directory, builds the workstation image when the config gives a Dockerfile (cached by
+   tree hash), starts the services on a network of the run's own, and runs the setup
+   commands (`pnpm install`, `uv sync`, ...).
+3. **Running.** The agent works in `/work`, where every folder is a git clone. Its system
+   prompt holds Exradius's operating rules and a generated description of the environment:
+   image, repositories with branch and push rights, services with their settings, the
+   project's notes.
+4. **Questions.** When the ticket is not enough, the agent calls `request_information`.
+   The run stops, the question goes out as an event, and an answer on `exradius.answers`
+   resumes the same session.
+5. **Ending.** The agent pushes a branch named after the task (or attaches a patch when it
+   may not push) and submits its result. The worker uploads the transcript, warns about
+   any work left unpushed, publishes `task.result` and removes the run.
+
+Several runs of one project can go at once, each in its own directory and network.
+
+## Design decisions
+
+- **The agent authors; the harness never acts for it.** The worker never commits, pushes,
+  merges or opens pull requests. The agent pushes with a per-repository credential, under its
+  own git identity, and every commit carries `Exradius-Task` and `Exradius-Agent` trailers.
+  Approving and deploying stay with people.
+- **A project is a git repository.** `exradius.yaml` declares repositories, workstation,
+  services, environment, MCP connections and agents. It is reviewed in pull requests like
+  code. The panel only manages what cannot live in git: secret stores, model providers and
+  one credential per git host. The schema is strict, so unknown keys are errors, not
+  warnings, and each run records the config commit it used.
+- **Enforce, don't configure.** Whatever Exradius needs inside a run is enforced at kernel,
+  Docker or git command-line level, never through a setting a project can override. For
+  example, Plane's husky hooks set a repository-local `core.hooksPath` that silently dropped
+  the task trailers. The hooks path now comes from git's command-line config, which outranks
+  every config file, and a dispatcher runs the project's own hooks after Exradius's
+  ([docs/run-environment.md](docs/run-environment.md)).
+- **Hardened, isolated runs.** One container per run: an unprivileged user, read-only root
+  filesystem, all capabilities dropped, an optional memory limit reserved against the
+  machine's budget. A run joins only its own service network and a runs network where
+  nothing but the Exradius API answers, so a project service called `postgres` can never
+  resolve to Exradius's database.
+- **Any image can be the workstation.** The agent runtime (a relocatable Python with the
+  Claude Agent SDK and a pinned Claude Code binary) is a bundle mounted read-only into the
+  container. A project's image needs only bash and git on glibc; `node:22`, `python:3.14`
+  and `maven` images work unchanged.
+- **Postgres is the source of truth.** Every state change locks the run row and writes its
+  event in the same transaction; events are published after commit and retried until
+  marked as published. Finalisation happens exactly once, and a restarted worker
+  reconciles the runs it finds in flight.
+- **Secrets appear only at run start.** Stores are encrypted at rest and write-only
+  through the API. Prompts, the panel, events and logs show `$NAME` placeholders.
+- **No special-case permissions.** An agent may fully use every MCP server it is given;
+  what it does with them is a matter of its role, not of flags.
+
+## A project, as code
+
+Adapted from the Plane config repository, shortened, with a cache and a memory limit added:
+
+```yaml
+version: 1
+
+project:
+  slug: plane
+  name: Plane
+
+secret_store: plane               # every ${secret:NAME} resolves from this store
+
+repositories:
+  - name: plane
+    url: https://github.com/musabeytekin/plane.git
+    branch: preview
+    credential: "${secret:GITHUB_TOKEN}"
+    push: true
+
+workstation:
+  dockerfile: docker/workstation.Dockerfile   # node 22, pnpm, uv, Python 3.12
+  setup:
+    - cd plane && pnpm install --frozen-lockfile
+    - cd plane/apps/api && uv sync --locked
+  cache: [~/.local/share/pnpm/store]          # kept across runs
+
+resources:
+  memory: 6g
+
+services:
+  postgres:
+    image: postgres:15.7-alpine
+    env: {POSTGRES_USER: plane, POSTGRES_PASSWORD: plane, POSTGRES_DB: plane}
+    ports: [5432]
+    ready: {command: [pg_isready, -h, 127.0.0.1, -U, plane]}
+  redis:
+    image: valkey/valkey:7.2.11-alpine
+    ports: [6379]
+    ready: {tcp: 6379}
+
+env:
+  DATABASE_URL: postgresql://plane:plane@postgres:5432/plane
+  REDIS_URL: redis://redis:6379/
+  pnpm_config_store_dir: /home/runner/.local/share/pnpm/store   # keep pnpm's store in the cache
+
+notes: |
+  API tests: from apps/api, `uv run pytest plane/tests/unit`. Web checks: `pnpm check:lint`,
+  `pnpm check:types`, vitest per package. Pull requests target `preview`.
+
+connections:
+  github:
+    catalog: github
+    config: {token: "${secret:GITHUB_TOKEN}"}
+
+agents:
+  developer:
+    connections: [github]
+    role: |
+      You implement what the ticket asks, run the checks for what you touched, push a
+      branch and open a pull request against preview.
+  scout:
+    role: You investigate questions about the codebase and report evidence. You never change code.
 ```
 
-## Running the stack
+The full format is in [docs/config-repo.md](docs/config-repo.md).
 
-You need Docker with Compose v2.
+### Writing the config: the setup skill
+
+Working out a project's toolchain and services is where onboarding takes the most time,
+so it is automated by a Claude Code plugin,
+[exradius-skill](https://github.com/musabeytekin/exradius-skill). Run in the project's
+checkout, it reads the code, writes `exradius.yaml`, a workstation Dockerfile when a stock
+image is not enough, and a README for the admin. It checks all of it locally with Docker,
+using the same container flags as Exradius, then creates the config repository. Plane was
+set up this way and passed Exradius's Verify on the first try.
+
+```bash
+claude plugin marketplace add musabeytekin/exradius-skill
+claude plugin install exradius@exradius-skill
+```
+
+Then `/exradius:exradius-project` inside Claude Code. In the panel, Verify runs by itself
+when a project is added and on every new config commit. It builds the image, starts the
+services and runs setup; when that fails, it names the cause.
+
+## Running it
+
+You need Docker with Compose v2 and an Anthropic API key (or a Claude Code OAuth token).
 
 ```bash
 cp deploy/.env.example deploy/.env
 ```
 
-Edit `deploy/.env`:
+In `deploy/.env`, set:
+- `EXRADIUS_SECRET_KEY`: a Fernet key from `cd backend && uv run exradius generate-key`.
+- `EXRADIUS_ADMIN_PASSWORD`: the first admin password.
+- `EXRADIUS_DATA_DIR`: an absolute host path for runs, mirrors, caches and stored
+  transcripts. On macOS it must be under `/Users`.
 
-- `EXRADIUS_SECRET_KEY` is the Fernet key that encrypts secrets at rest. Generate one with
-  `cd backend && uv run exradius generate-key`.
-- `EXRADIUS_ADMIN_PASSWORD` is the first password of the single admin user (`admin` by
-  default). It only creates the user when none exists. After that, change the password in
-  the admin panel under Settings (`POST /api/auth/password`); editing the variable has no
-  effect.
-- `EXRADIUS_DATA_DIR` is the host directory for run directories, git mirrors and the
-  object store (transcripts, artifacts and attachments, under `objects/`). The api and
-  worker services both mount it. The worker bind-mounts parts of it into run containers
-  through the host's Docker daemon, so it must be an absolute host path. On macOS with Docker Desktop, choose a folder under
-  `/Users`, for example `/Users/you/exradius-data`.
-- `EXRADIUS_PUBLIC_API_URL` is the address at which consumers of the events reach the API
-  (default `http://localhost:8000`). The artifact and transcript links in `task.result`
-  are signed download URLs on it, so the integration layer can fetch them without logging
-  in.
-- To keep objects in an S3 API instead of the filesystem, uncomment
-  `EXRADIUS_OBJECT_STORE=s3` and the `EXRADIUS_S3_*` lines.
-- If ports 8000, 5672, 15672 or 5432 are already in use, change the `EXRADIUS_*_PORT`
-  values. The admin panel's port is `EXRADIUS_FRONTEND_PORT` (default 3000).
-
-Build and start the stack:
+The file documents the rest (S3 instead of the filesystem, ports, worker concurrency).
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-The API service runs the database migrations (`alembic upgrade head`) at start. Once it is
-up:
+- Panel: http://localhost:3000
+- API: http://localhost:8000 (OpenAPI at `/docs`)
+- RabbitMQ UI: http://localhost:15672
 
-- Admin panel: http://localhost:3000 (sign in with `EXRADIUS_ADMIN_USERNAME` and
-  `EXRADIUS_ADMIN_PASSWORD`)
-- API: http://localhost:8000 (OpenAPI docs at `/docs`)
-- RabbitMQ management UI: http://localhost:15672 (user `exradius`, password `exradius`)
+In the panel:
+1. Add a model provider (Providers).
+2. Add a credential for the host of your config repository (Settings).
+3. Create the secret store your config names (Stores).
+4. Add the project by its config repository URL (Projects). The Secrets tab lists the keys
+   the config references and which are still missing; Verify runs once they are filled.
 
-Compose builds three images:
+Tasks can then be sent from the panel's Tasks page or from the command line.
 
-- `exradius-backend` for the api and worker;
-- `exradius-runtime-claude-code`, the Claude Code runtime bundle. It has its own Python with
-  the Agent SDK and a pinned native Claude Code binary, and needs no Node;
-- `exradius-project-default`, Ubuntu LTS with git, curl and build-essential.
+## Sending a task
 
-A project's `image` can be any glibc-based Linux image with `bash` and `git` (Debian-based
-official images have both), such as `python:3.14`,
-`node:22` or `maven:3-eclipse-temurin-21`; Alpine and other musl images are not supported.
-Projects without an image use `exradius-project-default`. The worker copies the runtime
-bundle into a Docker volume and mounts it read-only into every run container, so project
-images need no Exradius content. The agent sees the project image's tools and the project's
-variables, not the bundle's: the bundle is not on `PATH`, and its Python ignores the
-project's `PYTHONPATH` and similar variables.
+A task names a project and an agent by slug:
 
-## Configuring a project and an agent
-
-The admin API uses a session cookie, so the examples below keep a cookie jar.
-
-```bash
-API=http://localhost:8000
-curl -s -c jar -H 'content-type: application/json' \
-  -d '{"username":"admin","password":"<EXRADIUS_ADMIN_PASSWORD>"}' $API/api/auth/login
-
-# A model provider: the credential that runs use. The first one becomes the default.
-# auth_method is "api_key" (an Anthropic API key) or "oauth_token" (a token from
-# `claude setup-token`); GET /api/system/runtimes lists what each runtime accepts.
-PROVIDER=$(curl -s -b jar -H 'content-type: application/json' \
-  -d '{"slug":"anthropic","name":"Anthropic","kind":"anthropic","auth_method":"api_key","credential":"sk-ant-..."}' \
-  $API/api/providers | jq -r .id)
-curl -s -b jar -X POST $API/api/providers/$PROVIDER/test
-
-# A project with one repository (any git URL the worker can reach)
-PROJECT=$(curl -s -b jar -H 'content-type: application/json' \
-  -d '{"slug":"demo","name":"Demo","setup_commands":[]}' $API/api/projects | jq -r .id)
-curl -s -b jar -H 'content-type: application/json' \
-  -d '{"name":"app","url":"https://github.com/octocat/Hello-World.git","branch":"master"}' \
-  $API/api/projects/$PROJECT/repositories
-
-# An agent, attached to the project
-AGENT=$(curl -s -b jar -H 'content-type: application/json' \
-  -d '{"slug":"helper","name":"Helper","prompt":"You are a careful software engineer. When you are done, call submit_result."}' \
-  $API/api/agents | jq -r .id)
-curl -s -b jar -H 'content-type: application/json' \
-  -d "{\"agent_id\":\"$AGENT\"}" $API/api/projects/$PROJECT/agents
+```json
+{
+  "version": 1,
+  "task_id": "PLANE-214",
+  "project": "plane",
+  "agent": "developer",
+  "instructions": "Estimates created through the public API return 404. Fix it.",
+  "context": {"reporter": "support"},
+  "correlation": {"ticket": "PLANE-214"}
+}
 ```
 
-The other resources follow the same pattern:
+Events go to the `exradius.events` topic exchange: `task.status` on every state change
+(`queued`, `preparing`, `running`, `waiting_for_input`, `resuming`, then `completed`,
+`failed` or `cancelled`), `task.info_request` when the agent asks something, and
+`task.result` with the summary, the structured output, signed links to artifacts and the
+transcript. `correlation` comes back unchanged on every event. The task ID must be new:
+reusing one, even of a failed task, gets the task rejected.
 
-- `/api/projects/{id}/env-vars`
-- `/api/projects/{id}/secrets` and `/api/secrets` (global). Secrets are write-only: the
-  API never returns their values.
-- `/api/connections` (MCP servers, `stdio` or `http`), plus
-  `POST /api/connections/{id}/test`, which starts the server and lists its tools.
-- `/api/providers`, plus `POST /api/providers/{id}/default` and
-  `POST /api/providers/{id}/test`. Credentials are write-only. An agent uses the default
-  provider unless its `provider_id` names another one. With no provider, tasks are
-  rejected with `no provider configured`.
-- `/api/agents` with `connection_ids` and an optional `provider_id`.
-- `/api/projects/{id}/agents/{agent_id}` for overrides.
-- `/api/tasks`, `/api/tasks/{task_id}`, `/api/tasks/{task_id}/transcript` and
-  `POST /api/tasks/{task_id}/cancel`.
-
-In a connection's `env` and `headers` you can reference a secret by name with
-`${secret:NAME}`.
-
-## Publishing a first task
-
-### With the CLI
-
-The `exradius` CLI ships with the backend package. The broker URL comes from
-`--broker` or `EXRADIUS_BROKER_URL`.
+The backend ships a CLI for trying this from a shell:
 
 ```bash
 cd backend
 export EXRADIUS_BROKER_URL=amqp://exradius:exradius@localhost:5672/
-
-# In one terminal: print events until the task's result arrives
-uv run exradius events --task-id demo-1 --until-result
-
-# In another terminal: publish the task
-uv run exradius publish-task --task-id demo-1 --project demo --agent helper \
-  --instructions "Summarise what the repository in app/ does." \
-  --context '{"requested_by":"readme"}'
+uv run exradius events --task-id PLANE-214 --until-result      # in one terminal
+uv run exradius publish-task --task-id PLANE-214 --project plane --agent developer \
+  --instructions "Estimates created through the public API return 404. Fix it."
+uv run exradius answer --task-id PLANE-214 --request-id <id> --answer "Yes, v1 only."
 ```
 
-The event stream shows `task.status` events (`queued`, `preparing`, `running`, then
-`completed` or `failed`) and finally a `task.result` event. Its `transcript_url` and
-artifact `url`s are signed download links, for example `curl -o transcript.jsonl
-"<transcript_url>"`. If the agent calls
-`request_information`, a `task.info_request` event arrives and the run waits. To answer:
-
-```bash
-uv run exradius answer --task-id demo-1 --request-id <request_id> --answer "Yes."
-```
-
-### With a short Python script
-
-```python
-import asyncio, json
-import aio_pika
-
-async def main():
-    connection = await aio_pika.connect_robust("amqp://exradius:exradius@localhost:5672/")
-    async with connection:
-        channel = await connection.channel()
-        events = await channel.declare_exchange("exradius.events", aio_pika.ExchangeType.TOPIC, durable=True)
-        queue = await channel.declare_queue(exclusive=True)
-        await queue.bind(events, routing_key="task.#")
-
-        task = {
-            "version": 1,
-            "task_id": "demo-2",
-            "project": "demo",
-            "agent": "helper",
-            "instructions": "List the files in app/ and describe them.",
-            "correlation": {"ticket": "DEMO-2"},
-        }
-        await channel.default_exchange.publish(
-            aio_pika.Message(json.dumps(task).encode(), content_type="application/json",
-                             delivery_mode=aio_pika.DeliveryMode.PERSISTENT),
-            routing_key="exradius.tasks",
-        )
-
-        async with queue.iterator() as messages:
-            async for message in messages:
-                async with message.process():
-                    event = json.loads(message.body)
-                    print(message.routing_key, event["payload"])
-                    if message.routing_key == "task.result" and event["task_id"] == "demo-2":
-                        break
-
-asyncio.run(main())
-```
+The message contracts are in [docs/architecture.md](docs/architecture.md) §4.
 
 ## Development
 
 ```bash
-cd backend
-uv sync
-uv run pytest
+cd backend && uv sync && uv run pytest      # 400+ tests: SQLite, local bare git repositories, no services
+cd frontend && npm install && npm run dev   # http://localhost:5173, proxies /api to localhost:8000
+cd frontend && npm run lint && npm test && npm run build
 ```
 
-The unit tests use SQLite, an in-memory object store and local temporary git
-repositories, so they need no external services. The integration tests in
-`tests/test_integration.py` run only when their infrastructure is available:
+`tests/test_integration.py` also exercises a real RabbitMQ (`EXRADIUS_TEST_BROKER_URL`) and,
+when Docker is reachable with the images built, the run container sandbox itself. After
+backend changes, rebuild with
+`docker compose -f deploy/docker-compose.yml up -d --build api worker`.
 
-- `EXRADIUS_TEST_BROKER_URL=amqp://… uv run pytest tests/test_integration.py` tests
-  event publishing against a real RabbitMQ.
-- With Docker running and the `exradius-project-default:0.1.0` and
-  `exradius-runtime-claude-code:0.1.0` images built
-  (`docker compose -f deploy/docker-compose.yml build project-default runtime-claude-code`),
-  tests extract the bundle into its volume and check the run container sandbox:
-  unprivileged user, read-only root filesystem, attachments and bundle, a writable
-  `/work`, and the bundle's runner and Claude Code starting in a project image that has
-  no Exradius content.
+**Stack.** Backend: Python 3.14, FastAPI, SQLAlchemy and Alembic on Postgres, aio-pika on
+RabbitMQ, the Docker SDK, the Claude Agent SDK and MCP. Panel: React 19, TypeScript, Vite,
+Tailwind CSS 4, Radix, TanStack Router and Query.
 
-To run the services outside Docker, set `EXRADIUS_DATABASE_URL`, `EXRADIUS_BROKER_URL`,
-`EXRADIUS_SECRET_KEY` and `EXRADIUS_DATA_DIR` (and `EXRADIUS_OBJECT_STORE=s3` with the
-`EXRADIUS_S3_*` variables if you want S3). Then run
-`uv run alembic upgrade head`, `uv run exradius-api` and `uv run exradius-worker`.
+## Repository layout
 
-## Admin panel
-
-The admin panel is in `frontend/`. It is built with React 19, TypeScript, Vite,
-Tailwind CSS 4, Radix primitives, TanStack Query and TanStack Router. It talks only to the
-admin API under `/api`, on the same origin, so the session cookie works without CORS.
-[docs/onboarding.md](docs/onboarding.md) describes its pages and the rules its forms
-follow.
-
-### Dev server
-
-You need Node 24. Start the stack first, because the dev server proxies `/api` to
-http://localhost:8000:
-
-```bash
-cd frontend
-npm install
-npm run dev
+```
+backend/exradius/
+  api/          admin API (session cookie) and the internal run API (per-run token)
+  worker/       intake, run orchestration, clones, image builds, containers, Verify
+  runner/       the process inside the run container and the built-in exradius MCP server
+  runtimes/     the runtime interface and its Claude Code implementation
+  models/       SQLAlchemy models and Alembic migrations
+  schemas/      broker messages, API bodies and the exradius.yaml schema
+  messaging/    RabbitMQ topology and publishing
+backend/tests/
+frontend/src/   the admin panel
+deploy/         Compose stack and the three images: backend, Claude Code runtime bundle,
+                default project image
+docs/           design notes
 ```
 
-Open http://localhost:5173. To point the proxy at another API, set
-`EXRADIUS_API_URL=http://host:port` before `npm run dev`.
+## Design notes
 
-### Checks
+| Document | Covers |
+|---|---|
+| [architecture.md](docs/architecture.md) | the system, message contracts, run lifecycle, state machine, implementation notes, operating rules |
+| [config-repo.md](docs/config-repo.md) | projects as config repositories and the `exradius.yaml` format |
+| [run-environment.md](docs/run-environment.md) | what is enforced inside a run, and how: hooks, credentials, memory, caches |
+| [runtime-bundles.md](docs/runtime-bundles.md) | the relocatable agent runtime and the run container sandbox |
+| [environment-and-services.md](docs/environment-and-services.md) | service containers and the environment section of the prompt |
+| [agent-identity.md](docs/agent-identity.md) | agents' git identities, trailers and push credentials |
+| [setup-and-verify.md](docs/setup-and-verify.md) | Verify with diagnosis, and the setup skill |
+| [providers.md](docs/providers.md) | model providers and credential tests |
+| [onboarding.md](docs/onboarding.md) | the admin panel |
 
-```bash
-cd frontend
-npm run lint     # ESLint, including the React hooks rules
-npm test         # Vitest: transcript viewer, setup checklist, secret reference validation, provider form
-npm run build    # type check (tsc -b), then the production bundle in dist/
-```
+## Status
 
-### Compose service
+Exradius is working software that has been exercised on the four codebases above. Its
+scope today: one company per installation, a single admin user, and Claude Code as the
+only runtime.
 
-The `frontend` service in `deploy/docker-compose.yml` builds `frontend/Dockerfile`. The
-Dockerfile builds the bundle with Node, then serves it with nginx on port 3000
-(`EXRADIUS_FRONTEND_PORT`). nginx proxies `/api/` to the `api` service with buffering
-off, so the per-task event stream arrives live. It falls back to `index.html` for
-client-side routes. To rebuild only the panel:
+Not done yet:
 
-```bash
-docker compose -f deploy/docker-compose.yml up -d --build frontend
-```
-
-nginx resolves the API's name per request through Docker's embedded DNS, so a rebuilt `api`
-container is picked up without restarting the panel. While the API does not answer, the
-panel shows "Exradius API is not reachable" and retries.
-
-Outside compose, set `EXRADIUS_API_UPSTREAM` on the image to the API's address, for
-example `http://exradius-api:8000`, and `EXRADIUS_RESOLVER` to a DNS server that resolves
-it (default `127.0.0.11`, Docker's embedded DNS).
+- **A graded evaluation.** Every trial so far used tickets written for it. Next is a
+  repeatable evaluation on real upstream bugs: the agent gets the original issue text,
+  and the upstream fix's tests, which the agent never sees, are run on its branch.
+- **Egress control.** Outbound network is open during runs; an allowlist for the agent
+  phase is planned.
+- **Corporate networks.** There is no support yet for a corporate proxy, CA bundle or
+  package mirrors at installation level.
+- **Usage and cost.** Neither is recorded per run.
