@@ -57,6 +57,43 @@ def _scalar(value: Any) -> Any:
 Text = Annotated[str, BeforeValidator(_scalar)]
 EnvMap = dict[EnvKey, Text]
 
+MEMORY_UNITS = {"b": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
+MEMORY_PATTERN = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([bkmg])$", re.I)
+MIN_MEMORY = 6 * 1024**2
+"""Docker's smallest container memory limit."""
+
+
+def memory_bytes(text: str) -> int:
+    """A Docker size string (``512m``, ``6g``, ``1.5g``) in bytes."""
+    match = MEMORY_PATTERN.match(text.strip())
+    if not match:
+        raise ValueError(f"not a size: {text!r}")
+    return int(float(match.group(1)) * MEMORY_UNITS[match.group(2).lower()])
+
+
+def format_memory(value: int) -> str:
+    """Bytes as the shortest Docker size string that is exact to one decimal (``6g``)."""
+    for unit in ("g", "m", "k"):
+        amount = value / MEMORY_UNITS[unit]
+        if amount >= 1:
+            return f"{amount:.1f}".removesuffix(".0") + unit
+    return f"{value}b"
+
+
+def _memory(value: Any) -> Any:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return value  # the string check reports it
+    text = str(value).strip()
+    if not MEMORY_PATTERN.match(text):
+        raise ValueError("must be a size with a unit, such as 512m or 6g")
+    if memory_bytes(text) < MIN_MEMORY:
+        raise ValueError("must be at least 6m")
+    return text
+
+
+Memory = Annotated[str, BeforeValidator(_memory)]
+"""A Docker size string with a unit: ``512m``, ``6g``."""
+
 
 class _Model(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -97,6 +134,15 @@ class _Image(_Model):
 class Workstation(_Image):
     setup: list[NonEmpty] = Field(default_factory=list)
     """Run after cloning, in the workstation, with the project directory as cwd."""
+    cache: list[NonEmpty] = Field(default_factory=list)
+    """Directories kept across the project's runs (``~/.cache/uv``): ``~``-relative or
+    absolute, outside ``/work`` (docs/run-environment.md §5)."""
+
+
+class Resources(_Model):
+    memory: Memory | None = None
+    """The workstation's memory (setup, run and resume containers): reserved before a run
+    starts and enforced as its limit. ``None`` reserves nothing and limits nothing."""
 
 
 class Ready(_Model):
@@ -110,6 +156,10 @@ class ServiceDef(_Image):
     """Documentation for the agent; nothing is published."""
     ready: Ready | None = None
     """``None``: the image's HEALTHCHECK, else "running"."""
+    command: list[Text] | None = Field(default=None, min_length=1)
+    """The container command; the image's entrypoint is kept."""
+    memory: Memory | None = None
+    """Reserved and enforced like ``resources.memory``."""
 
 
 class ConnectionDef(_Model):
@@ -148,6 +198,7 @@ class ProjectConfig(_Model):
     secret_store: Name | None = None
     repositories: list[RepositoryDef] = Field(default_factory=list)
     workstation: Workstation = Field(default_factory=Workstation)
+    resources: Resources = Field(default_factory=Resources)
     services: dict[str, ServiceDef] = Field(default_factory=dict)
     env: EnvMap = Field(default_factory=dict)
     notes: str = ""
@@ -155,6 +206,16 @@ class ProjectConfig(_Model):
     agents: dict[str, AgentDef] = Field(min_length=1)
 
     # -- derived values --------------------------------------------------------------
+
+    @property
+    def workstation_memory(self) -> int | None:
+        return memory_bytes(self.resources.memory) if self.resources.memory else None
+
+    def memory_reservation(self) -> int:
+        """Bytes a run or verification reserves: the workstation and every service that
+        declares its memory (docs/run-environment.md §4)."""
+        declared = [self.resources.memory, *(s.memory for s in self.services.values())]
+        return sum(memory_bytes(m) for m in declared if m)
 
     def agent_name(self, slug: str) -> str:
         agent = self.agents[slug]
@@ -385,6 +446,36 @@ def _check_image(where: str, item: _Image, config_dir: str, lookup: Lookup | Non
             errors.append(f"{where}.{key}: {path or '.'} is not a {'file' if kind == 'blob' else 'directory'}")
 
 
+CACHE_RESERVED = ("/work", "/exradius", "/opt/exradius", "/proc", "/sys", "/dev", "/etc/passwd", "/etc/group")
+"""Absolute paths a cache may not be or lie under: the project directory, Exradius's own
+mounts, the kernel's file systems and the generated identity files."""
+
+
+def cache_problem(entry: str) -> str | None:
+    """Why a ``workstation.cache`` entry is not usable, or ``None``."""
+    if "\x00" in entry or "\\" in entry or "\n" in entry:
+        return "must be a plain path"
+    if entry.startswith("~/"):
+        rest = entry[2:]
+    elif entry.startswith("/"):
+        rest = entry[1:]
+    else:
+        return "must start with ~/ (the home directory) or / (an absolute path)"
+    parts = [p for p in rest.split("/") if p not in ("", ".")]
+    if ".." in parts:
+        return "must not use '..'"
+    if not parts:
+        return "must name a directory below ~ or /, not the home or the root itself"
+    if entry.startswith("/"):
+        path = "/" + "/".join(parts)
+        for reserved in CACHE_RESERVED:
+            if path == reserved or path.startswith(reserved + "/"):
+                return f"must be outside {reserved}" if reserved == "/work" else f"{reserved} is reserved"
+        if path in ("/home", "/home/runner", "/tmp", "/etc", "/usr", "/bin", "/lib", "/var", "/opt"):
+            return f"must name a directory below {path}, not {path} itself"
+    return None
+
+
 def _uses_launcher(command: str | None) -> str | None:
     return command if command in catalog.LAUNCHERS else None
 
@@ -402,6 +493,17 @@ def _check(config: ProjectConfig, config_dir: str, lookup: Lookup | None, errors
             warnings.append(f"{where}.credential: written in the file; use ${{secret:NAME}}")
 
     _check_image("workstation", config.workstation, config_dir, lookup, errors)
+    seen_caches: set[str] = set()
+    for index, entry in enumerate(config.workstation.cache):
+        where = f"workstation.cache[{index}]"
+        problem = cache_problem(entry)
+        if problem:
+            errors.append(f"{where}: {problem}")
+            continue
+        normal = posixpath.normpath(entry)
+        if normal in seen_caches:
+            errors.append(f"{where}: {entry!r} is listed twice")
+        seen_caches.add(normal)
     default_workstation = not (config.workstation.image or config.workstation.dockerfile)
 
     for name, service in config.services.items():

@@ -16,11 +16,17 @@ export interface ConfigRepository {
 }
 export interface ConfigWorkstation {
   image?: string | null; dockerfile?: string | null; context?: string | null; setup?: string[] | null;
+  /** Directories kept across the project's runs (`~/.cache/uv`). */
+  cache?: string[] | null;
 }
 export type ConfigReady = null | { tcp?: number | null; command?: string[] | null };
 export interface ConfigService {
   name?: string; image?: string | null; dockerfile?: string | null; context?: string | null;
   env?: Record<string, string> | null; ports?: number[] | null; ready?: ConfigReady;
+  /** The container command; the image's entrypoint is kept. */
+  command?: string[] | null;
+  /** Declared memory as written (`512m`): reserved and enforced. */
+  memory?: string | null;
 }
 export interface ConfigConnection {
   name?: string; catalog?: string | null; config?: Record<string, string> | null;
@@ -40,6 +46,8 @@ export interface ProjectConfig {
   secret_store?: string | null;
   repositories?: ConfigRepository[] | null;
   workstation?: ConfigWorkstation | null;
+  /** `memory`: the workstation's declared memory as written (`6g`). */
+  resources?: { memory?: string | null } | null;
   services?: Record<string, ConfigService> | ConfigService[] | null;
   env?: Record<string, string> | null;
   notes?: string | null;
@@ -96,6 +104,8 @@ export interface Project {
   /** The latest verification and what it says about the commit read (setup-and-verify.md §1.2). */
   verification?: VerificationSummary | null;
   freshness?: Freshness | null;
+  /** Disk usage of the project's caches; only on the project page, null when there are none. */
+  cache_bytes?: number | null;
 }
 export type Freshness = "current" | "stale" | "failed" | "running" | "never";
 export interface VerificationSummary {
@@ -199,6 +209,8 @@ export const ALL_STATES: TaskState[] = [
 export interface TaskSummary {
   task_id: string; project: string; agent: string; state: TaskState;
   received_at: string; run_id: Uuid | null;
+  /** `memory` while the run waits for its memory reservation (it stays queued). */
+  waiting_for?: string | null;
 }
 export interface Run {
   id: Uuid; state: TaskState; container_id: string | null; runtime_session_id: string | null;
@@ -210,6 +222,7 @@ export interface Run {
   /** The config repository commit the run used. */
   config_commit?: string | null;
   agent_snapshot?: AgentSnapshot | null;
+  waiting_for?: string | null;
 }
 export interface TaskAttachment { id: Uuid; name: string; content_type: string; object_key: string | null; source_url: string | null }
 export interface InfoRequest {

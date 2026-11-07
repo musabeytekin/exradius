@@ -23,16 +23,19 @@ from exradius.config import Settings
 from exradius.crypto import SecretBox, hash_token, new_run_token
 from exradius.db import SessionFactory
 from exradius.models import Artifact, InfoRequest, Project, ProjectVerification, Run, TranscriptChunk, utcnow
-from exradius.project_state import assess, read_config, remember, store_values
+from exradius.project_state import assess, cached, read_config, remember, store_values
 from exradius.providers import provider_problem, resolve_provider, runtime_environment, strip_credentials
 from exradius.resolve import StoreValues, repo_specs, service_environment, workstation_environment
 from exradius.schemas.project_config import ProjectConfig
 from exradius.schemas.messages import ArtifactRef, InfoRequestPayload, ResultPayload
 from exradius.states import ACTIVE, TERMINAL, State, can_transition, is_terminal
 from exradius.storage import ObjectStore
-from exradius.worker import git_identity, prepare
+from exradius.schemas.project_config import memory_bytes
+from exradius.worker import caches, git_identity, prepare
 from exradius.worker.builds import BuildFailed, ImageBuilder, Images
-from exradius.worker.containers import ContainerExit, ContainerManager, ServiceFailed, ServiceSpec
+from exradius.worker.caches import CacheMount
+from exradius.worker.containers import HOME_DIR, KILLED, ContainerExit, ContainerManager, ServiceFailed, ServiceSpec
+from exradius.worker.memory import Abandoned, MemoryGate, TooLarge
 from exradius.worker.delivery import delivery_warnings
 from exradius.worker.lifecycle import PendingEvent, run_event, transition
 
@@ -42,6 +45,13 @@ Emit = Callable[[list[PendingEvent]], Awaitable[None]]
 
 VERIFY_PREFIX = "verify-"
 """Run directories of project verifications are ``runs/verify-<verification_id>``."""
+WAITING_FOR_MEMORY = "memory"
+"""``runs.waiting_for`` while a run waits for its memory reservation (it stays queued, or
+waiting_for_input when it waits to resume)."""
+
+
+def exceeded_memory(config: ProjectConfig) -> str:
+    return f"exceeded its declared memory ({config.resources.memory})"
 
 
 class RunCancelled(Exception):
@@ -79,6 +89,8 @@ class RunManager:
         self.emit = emit
         self.box = SecretBox(settings.secret_key)
         self.builder = ImageBuilder(settings, sessions, containers)
+        self.memory = MemoryGate()
+        """Shared by runs and verifications; the worker sets the budget at start."""
         self.worker_id: str | None = None
         """Stamped on runs this worker drives through preparing/running/resuming, so a
         restarting worker can tell its own dead runs from a live worker's."""
@@ -114,8 +126,41 @@ class RunManager:
 
     # -- preparing ----------------------------------------------------------------------
 
-    async def execute(self, run_id: uuid.UUID) -> None:
-        """Prepare and run a freshly queued run until it ends or waits for input."""
+    def cache_mounts(self, slug: str, config: ProjectConfig) -> list[CacheMount]:
+        return caches.mounts(self.settings.data_dir, slug, config.workstation.cache, HOME_DIR)
+
+    async def _mark_waiting(self, run_id: uuid.UUID) -> None:
+        """Shown in the panel's task row; the worker id lets a restarted worker take the
+        run over (``waiting_runs``)."""
+        async with self.sessions() as session:
+            run = await self._lock(session, run_id)
+            if run is not None and not is_terminal(run.state):
+                run.waiting_for = WAITING_FOR_MEMORY
+                run.worker_id = self.worker_id
+            await session.commit()
+
+    def _still_in(self, run_id: uuid.UUID, state: State) -> Callable[[], Awaitable[bool]]:
+        async def check() -> bool:
+            return await self._state(run_id) == state
+
+        return check
+
+    async def execute(self, run_id: uuid.UUID, memory: int = 0) -> None:
+        """Reserve the run's declared memory (waiting in ``queued`` until it fits), then
+        prepare and run it until it ends or waits for input."""
+        try:
+            async with self.memory.reserve(
+                memory,
+                on_wait=lambda: self._mark_waiting(run_id),
+                still_wanted=self._still_in(run_id, State.QUEUED),
+            ):
+                await self._execute(run_id)
+        except TooLarge as exc:
+            await self.end(run_id, State.FAILED, error=str(exc))
+        except Abandoned:
+            await self.finalize(run_id)
+
+    async def _execute(self, run_id: uuid.UUID) -> None:
         try:
             run = await self._move(
                 run_id,
@@ -123,6 +168,7 @@ class RunManager:
                 expect={State.QUEUED},
                 directory=str(self.paths(run_id).root),
                 worker_id=self.worker_id,
+                waiting_for=None,
             )
             await self._prepare(run)
             await self._start_container(run_id, from_state=State.PREPARING)
@@ -153,15 +199,20 @@ class RunManager:
 
         network = await self.start_services(str(run.id), services) if services else None
 
+        cache_mounts = self.cache_mounts(task.project.slug, config)
         for command in config.workstation.setup:
             if await self._state(run.id) != State.PREPARING:
                 raise RunCancelled("cancelled during setup")
             result = await self.containers.run_setup_command(
                 image=images.workstation, run_id=str(run.id), paths=paths, env=env, command=command,
-                service_network=network,
+                service_network=network, memory=config.workstation_memory, caches=cache_mounts,
             )
             if result.exit_code != 0:
                 tail = result.logs[-2000:].strip()
+                if result.exit_code == KILLED and config.workstation_memory:
+                    raise prepare.PreparationError(
+                        f"setup command {command!r} {exceeded_memory(config)} and was killed (exit 137):\n{tail}"
+                    )
                 raise prepare.PreparationError(
                     f"setup command {command!r} exited with {result.exit_code}:\n{tail}"
                 )
@@ -209,13 +260,7 @@ class RunManager:
     def service_specs(config: ProjectConfig, images: Images, secrets: StoreValues) -> list[ServiceSpec]:
         """The config's services with their images and secrets resolved now."""
         return [
-            ServiceSpec(
-                name=name,
-                image=images.services[name],
-                env=service_environment(service, secrets),
-                ready=service.ready.model_dump(exclude_none=True) if service.ready else None,
-            )
-            for name, service in config.services.items()
+            service_spec(name, service, images.services[name], secrets) for name, service in config.services.items()
         ]
 
     async def start_services(self, label: str, services: list[ServiceSpec]) -> str:
@@ -279,16 +324,15 @@ class RunManager:
         else:
             service_network = await self.containers.run_network(str(run_id))
 
-        # Identity, commit trailers and push credentials; rewritten at every start (resume too).
-        env.update(
-            await asyncio.to_thread(
-                git_identity.prepare_git,
-                self.paths(run_id).state,
-                identity,
-                repos,
-                state_mount=self.settings.run_state_mount,
-                owner=self.settings.run_uid_gid,
-            )
+        # Identity, commit trailers and push credentials; rewritten at every start (resume
+        # too), and applied after every other variable.
+        git_env = await asyncio.to_thread(
+            git_identity.prepare_git,
+            self.paths(run_id).state,
+            identity,
+            repos,
+            state_mount=self.settings.run_state_mount,
+            owner=self.settings.run_uid_gid,
         )
         env.update(
             EXRADIUS_RUN_ID=str(run_id),
@@ -303,6 +347,9 @@ class RunManager:
             env=env,
             runtime=runtime_mount,
             service_network=service_network,
+            git_env=git_env,
+            memory=config.workstation_memory,
+            caches=self.cache_mounts(task.project.slug, config),
         )
         try:
             await self._move(
@@ -369,7 +416,11 @@ class RunManager:
                 events.append(transition(session, run, State.COMPLETED))
                 await session.commit()
             else:
-                if not run.error:
+                config = ProjectConfig.model_validate(run.config, strict=False) if run.config else None
+                if exit_info.exit_code == KILLED and config is not None and config.workstation_memory:
+                    tail = exit_info.logs[-2000:].strip()
+                    run.error = f"the run {exceeded_memory(config)} and was killed (exit 137):\n{tail}"
+                elif not run.error:
                     tail = exit_info.logs[-2000:].strip()
                     run.error = f"runner exited with code {exit_info.exit_code} without reporting an outcome:\n{tail}"
                 events.append(transition(session, run, State.FAILED, reason=run.error[:500]))
@@ -393,8 +444,28 @@ class RunManager:
         )
         return found is not None
 
+    async def _reservation(self, run_id: uuid.UUID) -> int:
+        """What a run that has read its config reserves."""
+        async with self.sessions() as session:
+            config = await session.scalar(select(Run.config).where(Run.id == run_id))
+        return ProjectConfig.model_validate(config, strict=False).memory_reservation() if config else 0
+
     async def resume(self, run_id: uuid.UUID) -> None:
-        """Deliver answered info requests to a waiting run in a new container."""
+        """Deliver answered info requests to a waiting run in a new container, once its
+        declared memory fits (it stays waiting_for_input until then)."""
+        try:
+            async with self.memory.reserve(
+                await self._reservation(run_id),
+                on_wait=lambda: self._mark_waiting(run_id),
+                still_wanted=self._still_in(run_id, State.WAITING_FOR_INPUT),
+            ):
+                await self._resume(run_id)
+        except TooLarge as exc:
+            await self.end(run_id, State.FAILED, error=str(exc))
+        except Abandoned:
+            return
+
+    async def _resume(self, run_id: uuid.UUID) -> None:
         try:
             async with self.sessions() as session:
                 run = await self._lock(session, run_id)
@@ -415,6 +486,7 @@ class RunManager:
                     request.delivered_at = utcnow()
                 run.resume_request_ids = [str(r.id) for r in answered]
                 run.worker_id = self.worker_id
+                run.waiting_for = None
                 event = transition(session, run, State.RESUMING)
                 attachments = [
                     (str(r.id), a) for r in answered for a in (r.answer_attachments or [])
@@ -596,6 +668,32 @@ class RunManager:
             await self.end(run_id, State.FAILED, error=f"worker restarted while the run was {state}")
         return to_attach
 
+    async def waiting_runs(self, is_alive: Callable[[str], Awaitable[bool]]) -> list[tuple[uuid.UUID, int]]:
+        """Queued runs that were waiting for memory in a worker that is no longer alive:
+        their task message was acknowledged, so nothing else would start them. Returned
+        with what they reserve (from the project's latest read config), claimed for this
+        worker."""
+        async with self.sessions() as session:
+            rows = (await session.execute(
+                select(Run.id, Run.worker_id).where(Run.state == State.QUEUED, Run.waiting_for.is_not(None))
+            )).all()
+        found = []
+        for run_id, owner in rows:
+            if owner is not None and owner != self.worker_id and await is_alive(owner):
+                continue
+            async with self.sessions() as session:
+                run = await self._lock(session, run_id)
+                if run is None or run.state != State.QUEUED or run.worker_id != owner:
+                    await session.rollback()
+                    continue
+                run.worker_id = self.worker_id
+                project = await session.get(Project, run.task.project_id)
+                snapshot = cached(project) if project else None
+                await session.commit()
+            config = snapshot.config if snapshot else None
+            found.append((run_id, config.memory_reservation() if config else 0))
+        return found
+
     async def _claim(self, run_id: uuid.UUID, owner: str | None) -> tuple[State, str | None, str | None] | None:
         async with self.sessions() as session:
             run = await self._lock(session, run_id)
@@ -608,7 +706,12 @@ class RunManager:
             return claimed
 
     async def reattach(self, run_id: uuid.UUID, container_id: str) -> None:
-        """Resume supervising a runner container that outlived its worker."""
+        """Resume supervising a runner container that outlived its worker. Its memory is
+        taken at once: the container is already running."""
+        async with self.memory.reserve(await self._reservation(run_id), wait=False):
+            await self._reattach(run_id, container_id)
+
+    async def _reattach(self, run_id: uuid.UUID, container_id: str) -> None:
         try:
             events: list[PendingEvent] = []
             async with self.sessions() as session:
@@ -740,3 +843,16 @@ class RunManager:
                 .distinct()
             )
             return list(rows.all())
+
+
+def service_spec(name: str, service, image: str, secrets: StoreValues) -> ServiceSpec:
+    """A config service with its image and secrets resolved now."""
+    return ServiceSpec(
+        name=name,
+        image=image,
+        env=service_environment(service, secrets),
+        ready=service.ready.model_dump(exclude_none=True) if service.ready else None,
+        command=list(service.command) if service.command else None,
+        memory=memory_bytes(service.memory) if service.memory else None,
+        memory_text=service.memory,
+    )

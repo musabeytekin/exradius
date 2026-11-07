@@ -46,16 +46,19 @@ class FakeContainers:
         self.builds: list[dict] = []
         self.build_ok = True
         self.setup_images: list[str] = []
+        self.setup_limits: list[tuple] = []  # (memory, caches) per setup command
 
     async def ensure_runtime(self, runtime):
         self.runtimes_ensured.append(runtime)
         return RuntimeMount(runtime, "0.1.0", f"exradius-runtime-{runtime}-0.1.0-test")
 
-    async def start_runner(self, *, image, run_id, paths, env, runtime, service_network=None):
+    async def start_runner(self, *, image, run_id, paths, env, runtime, service_network=None, git_env=None,
+                           memory=None, caches=()):
         assert paths.project.is_dir()
         cid = f"c{len(self.started)}"
+        env = {**env, **(git_env or {})}  # what the container sees
         self.started.append({"image": image, "run_id": run_id, "env": env, "paths": paths, "runtime": runtime,
-                             "service_network": service_network})
+                             "service_network": service_network, "memory": memory, "caches": list(caches)})
         self._pending[cid] = (self.behaviours.pop(0), uuid.UUID(run_id), env)
         return cid
 
@@ -71,8 +74,10 @@ class FakeContainers:
         self.images.add(tag)
         return True, "Successfully built\n"
 
-    async def run_setup_command(self, *, image, run_id, paths, env, command, service_network=None):
+    async def run_setup_command(self, *, image, run_id, paths, env, command, service_network=None, memory=None,
+                                caches=()):
         self.setup_commands.append(command)
+        self.setup_limits.append((memory, list(caches)))
         self.setup_images.append(image)
         self.setup_networks.append(service_network)
         return ContainerExit(self.setup_exit, "setup output\nboom" if self.setup_exit else "ok")

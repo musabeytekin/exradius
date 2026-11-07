@@ -96,6 +96,7 @@ function Header({ taskId, task, state, feedStatus }: { taskId: string; task?: Ta
       meta={
         <>
           {state && <StateChip state={state} />}
+          {task?.waiting_for === "memory" && state === task.state && <span className="text-xs text-muted">waiting for memory</span>}
           {task && (
             <>
               {project ? (
@@ -182,7 +183,7 @@ function Body({ task, state, live, feed, result }: { task: TaskDetail; state: Ta
               loading={feed.loading}
               infoRequests={task.info_requests}
               downloadUrl={task.run_id ? api.runTranscriptUrl(task.run_id) : null}
-              emptyHint={state === "queued" ? "Queued: waiting for a free worker slot." : state === "preparing" ? "Preparing: reading the config, building images, cloning and running setup." : undefined}
+              emptyHint={state === "queued" ? (task.waiting_for === "memory" ? "Queued: waiting for memory." : "Queued: waiting for a free worker slot.") : state === "preparing" ? "Preparing: reading the config, building images, cloning and running setup." : undefined}
             />
           </Tabs.Content>
           <Tabs.Content value="input" className="pt-4"><TaskInput task={task} /></Tabs.Content>

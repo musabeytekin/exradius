@@ -600,6 +600,81 @@ Details the design left open, and the simplest choice made for each in version o
 - `POST /api/projects` asks for a verification once the file was read (with or without validation errors); re-read and `PATCH` ask for one when `snapshot_commit` changed to a commit (the PATCH case is not in the design: it is a re-read with another branch or path). At most one verification per project is `pending` or `running`: a request then returns that one (the project row is locked while checking), and the manual Verify answers with its id. When the broker cannot be reached, the automatic request leaves the new row failed with `broker: …` and the add or re-read still succeeds; the manual Verify answers 503 as before.
 - `ProjectOut` gains `verification` (the latest one's `id, state, commit, ended_at, diagnosis`) and `freshness` (`current`, `stale`, `failed`, `running`, `never`; passed at another commit than `snapshot_commit` is `stale`, so are rows from before `0002`). `VerificationOut` gains `commit` and `diagnosis`. Nothing is gated on freshness.
 
+**The run environment** (`docs/run-environment.md` §3-§8, implemented 2026-11-07; the principle is §14)
+
+- **Git at the command-line level** (`worker/git_identity.py`). `prepare_git` returns the
+  identity, the credential variables and `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`:
+  `safe.directory=*`, `core.hooksPath=<state>/git-hooks`, `credential.<host>.useHttpPath`,
+  and per push remote an empty `credential.<url>.helper` (drops every helper read before
+  the command line) followed by ours. The container gets them after every other variable,
+  and any `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`/`PARAMETERS` in the project's `env` is
+  dropped, so neither a file nor the project's environment replaces them. Setup containers
+  and the delivery check get `safe.directory` alone. The managed global config keeps
+  `user.*`, `push.autoSetupRemote` and `init.defaultBranch`.
+  - The hooks directory holds every name of githooks(5) except `push-to-checkout` (its
+    presence alone replaces git's `updateInstead`), each the same dispatcher: trailers in
+    `prepare-commit-msg`, then `exec` of the project's hook with the arguments and stdin.
+    The project's hooks path is the last `core.hooksPath` of `git config --show-scope
+    --get-all` that is not `command` (system, global, local or worktree, so the agent's
+    own `git config --global core.hooksPath` counts too), else
+    `$(git rev-parse --git-common-dir)/hooks`. Not `git rev-parse --git-path hooks`, as
+    the design said: that already answers with the forced path. A hooks path that is the
+    dispatcher's own directory is skipped. `--show-scope` needs git 2.26.
+- **Claude Code settings** (`runtimes/claude_code.py`). `SETTINGS` (`includeCoAuthoredBy:
+  false`, `attribution.commit` and `.pr` empty) goes to the SDK's `settings` option, which
+  the CLI receives as `--settings`; command-line settings outrank `.claude/settings.json`,
+  `.claude/settings.local.json` and user settings key by key. `setting_sources` stays the
+  default (all), so `CLAUDE.md`, `AGENTS.md` and `.claude/` load. Nothing is written to
+  `CLAUDE_CONFIG_DIR/settings.json` any more. The gap left: managed settings
+  (`/etc/claude-code/managed-settings.json` and `managed-settings.d/`) outrank
+  `--settings`, and a project's workstation image could bake one. Mounting our own file
+  there would close it but was not done: it is a Docker-level change to a system path of
+  the project's image, for a case no project has.
+- **Memory** (`worker/memory.py`, `MemoryGate` on `RunManager.memory`, shared by runs and
+  verifications). The budget is `EXRADIUS_RUN_MEMORY_BUDGET` (a Docker size) or the
+  daemon's `MemTotal` less 1 GiB, set at worker start; a daemon that does not answer leaves
+  it unknown and nothing waits. Intake returns the reservation from the config it read
+  (`ProjectConfig.memory_reservation()`); `execute` waits inside the concurrency slot, so
+  the broker keeps the backlog, but the task message was already acknowledged by intake
+  (the design said unacknowledged: intake must persist the task before it knows the size).
+  While it waits the run stays `queued` with `runs.waiting_for = 'memory'` and the
+  worker's id (migration `0003`), and no status event is published; `task.status` is
+  unchanged. `TaskSummaryOut` and `RunOut` carry `waiting_for`, and the panel's task row
+  says "waiting for memory". A restarted worker takes over queued runs with
+  `waiting_for` whose worker is dead (`waiting_runs`, in `recover`). A waiter rechecks
+  every 10 s whether its run is still queued, so a cancelled run stops waiting. A resume
+  reserves the same amount (the run stays `waiting_for_input` meanwhile); a re-attached
+  container takes its reservation without waiting. More than the whole budget fails the
+  run at once ("the project declares 12g of memory, more than this worker's budget for
+  runs (7g, EXRADIUS_RUN_MEMORY_BUDGET)"). While a run waits for an answer its services
+  keep running but nothing is reserved.
+  - Declared memory is `mem_limit` and an equal `memswap_limit` on the setup, run and
+    resume containers and on services; undeclared sets neither. Exit 137 under a declared
+    limit becomes "the run exceeded its declared memory (6g) and was killed (exit 137)",
+    "setup command '…' exceeded its declared memory (6g) …", or for a service that dies
+    before it is ready "service <name> (<image>) exceeded its declared memory (512m): …".
+  - Verify adds "Reserve memory (6.5g)" as its first step after "Read config" when anything
+    is declared, held until the verification ends; its log is "reserved 6.5g of the
+    worker's 14g". `diagnose.py` names a declared limit that was exceeded and a reservation
+    larger than the budget.
+- **Caches** (`worker/caches.py`). `<data_dir>/caches/<slug>/<n>-<sanitised path>` (index
+  in the list, the path's characters outside `[A-Za-z0-9._-]` as `_`), created for the run
+  user and bind-mounted into setup, run and resume containers and Verify's setup steps. A
+  cache below the home gets its mount point created in the run's home directory for the
+  run user first: Docker would create the missing parents as root and `~/.cache` would no
+  longer be writable. `ProjectOut.cache_bytes` (allocated blocks, hard links once) is
+  computed on `GET /api/projects/{id}` only, not on the list; `null` without a cache
+  directory. The walk took 4 s for Plane's 1.2 GB (75,000 files) where the data directory
+  is a Docker Desktop file share, so the API keeps a size for a minute and then returns it
+  while a background walk refreshes it (`caches.SizeMemo`); only the first view of a
+  project waits. `DELETE /api/projects/{id}` removes the project's caches.
+- **Service `command`** is the container's `command`; the entrypoint is the image's.
+- **Store changes** (`config_routes._verify_after_keys`). After `POST /api/stores`,
+  `PUT /api/stores/{id}/keys` and `PUT /api/stores/{id}/keys/{key}`, every project whose
+  latest read names the store, is runnable now and whose freshness is neither `current`
+  nor `running` gets a verification through `_request_verification` (the one-open rule;
+  without the broker it fails at once and the store change still succeeds).
+
 ## 13. Operating rules and prompt layout (agreed 2026-11-06)
 
 Supersedes the prompt layout in §5.2. Tasks arrive from external trackers and never mention
@@ -643,3 +718,40 @@ recorded as the result summary when `submit_result` is not called.
 
 Admin-side consequences: starter prompts describe roles only and never mention the tools;
 the guide panel shows the operating rules verbatim so an admin knows they are injected.
+
+## 14. The run environment principle (agreed 2026-11-07)
+
+> From the inside, a run looks like a developer's own workstation. Exradius deviates only
+> where security requires it, and every deviation, and everything Exradius needs to stay
+> true inside a run, is enforced at the level of the kernel, Docker or the command line,
+> never through a setting a project, a tool or the agent can reset.
+
+Across the first four projects (bank, Outline, Saleor, Plane) one finding kept its shape: a
+tool assumed a normal developer environment and the run container was not one. Every fix
+moved from a setting at the configuration level, where userland tools expect to be in
+charge, to one where they cannot interfere:
+
+| Finding | Root cause | Fix |
+|---|---|---|
+| Maven ignored `~/.m2` (bank) | `HOME` set as an environment variable; Java reads the home from passwd | a generated `/etc/passwd` mounted into the container |
+| A run was killed, exit 137 (Outline) | the home and `/tmp` were tmpfs, so a package install lived in RAM | bind mounts on disk |
+| `postgres` resolved to Exradius's own database (bank) | runs joined the stack network | a dedicated network |
+| Commit trailers missing (Plane) | `core.hooksPath` set in the run's global git config; husky's `prepare` script wrote a repo-local one, which wins | the hooks path at the git command-line level, with a dispatcher that also runs the project's own hooks |
+
+Where each thing Exradius sets inside a run lives now (the audit of
+`docs/run-environment.md` §2.1, after that batch):
+
+| What | Level |
+|---|---|
+| uid 1000 as `runner`, home `/home/runner` | passwd and group files bind-mounted |
+| read-only root, no capabilities, no-new-privileges | Docker |
+| networks (`exradius-runs` + the run's own) | Docker |
+| `/work`, home, `/tmp`, state, attachments, caches | bind mounts |
+| declared memory | cgroup limit (Docker) |
+| `safe.directory`, `core.hooksPath`, push credential helpers | git command line (`GIT_CONFIG_*`) |
+| author and committer identity | `GIT_AUTHOR_*`/`GIT_COMMITTER_*`, plus the managed global config |
+| `push.autoSetupRemote`, `init.defaultBranch` | managed global config (conveniences a project may change) |
+| Claude Code settings the runtime needs | `--settings` (only managed settings rank higher; §12) |
+
+A new requirement inside a run follows the same rule: find the level a project's own
+tooling cannot reach, or record the gap in §12.

@@ -54,29 +54,37 @@ def test_config_hook_and_environment(tmp_path):
         "EXRADIUS_AGENT": "bug-fixer", "EXRADIUS_TASK_ID": "T-42",
         # N is the repository's index; only push-allowed http(s) remotes with a secret.
         "EXRADIUS_GIT_CREDENTIAL_0": "ghp_token", "EXRADIUS_GIT_CREDENTIAL_1": "s3cret",
+        # The hooks path and the helpers at the command-line level, where no file overrides them.
+        "GIT_CONFIG_COUNT": "7",
+        "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*",
+        "GIT_CONFIG_KEY_1": "core.hooksPath", "GIT_CONFIG_VALUE_1": "/exradius/state/git-hooks",
+        "GIT_CONFIG_KEY_2": "credential.https://git.example.useHttpPath", "GIT_CONFIG_VALUE_2": "true",
+        "GIT_CONFIG_KEY_3": "credential.https://git.example/acme/api.git.helper", "GIT_CONFIG_VALUE_3": "",
+        "GIT_CONFIG_KEY_4": "credential.https://git.example/acme/api.git.helper",
+        "GIT_CONFIG_VALUE_4": '!f() { test "$1" = get || exit 0; echo "username=x-access-token"; '
+                              'echo "password=$EXRADIUS_GIT_CREDENTIAL_0"; }; f',
+        "GIT_CONFIG_KEY_5": "credential.https://git.example/acme/docs.git.helper", "GIT_CONFIG_VALUE_5": "",
+        "GIT_CONFIG_KEY_6": "credential.https://git.example/acme/docs.git.helper",
+        "GIT_CONFIG_VALUE_6": '!f() { test "$1" = get || exit 0; echo "username=deploy"; '
+                              'echo "password=$EXRADIUS_GIT_CREDENTIAL_1"; }; f',
     }
     managed = (tmp_path / "git" / "exradius.gitconfig").read_text()
     assert '\tname = "Bug \\"Fixer\\" Bot"\n' in managed
     assert '\temail = "bug-fixer@agents.example"\n' in managed
-    assert '\thooksPath = "/exradius/state/git-hooks"\n' in managed
     assert "[push]\n\tautoSetupRemote = true\n" in managed and "[init]\n\tdefaultBranch = main\n" in managed
-    assert '[credential "https://git.example"]\n\tuseHttpPath = true\n' in managed
-    assert (
-        '[credential "https://git.example/acme/api.git"]\n\thelper =\n'
-        '\thelper = "!f() { test \\"$1\\" = get || exit 0; echo \\"username=x-access-token\\"; '
-        'echo \\"password=$EXRADIUS_GIT_CREDENTIAL_0\\"; }; f"\n'
-    ) in managed
-    assert 'echo \\"username=deploy\\"' in managed and "EXRADIUS_GIT_CREDENTIAL_1" in managed
-    assert "ro.git" not in managed and "ssh.git" not in managed
+    # Nothing a repository-local value could override lives in a file any more.
+    assert "[core]" not in managed and "[credential" not in managed
     # Secrets never land on disk, only the variable names.
     for secret in ("ghp_token", "s3cret", "ghp_other"):
-        assert secret not in managed
+        assert secret not in managed and secret not in (tmp_path / "git-hooks" / "pre-commit").read_text()
 
     assert (tmp_path / "git" / "config").read_text().endswith("[include]\n\tpath = exradius.gitconfig\n")
-    hook = tmp_path / "git-hooks" / "prepare-commit-msg"
-    assert hook.read_text() == git_identity.PREPARE_COMMIT_MSG and os.access(hook, os.X_OK)
-    assert '--trailer "Exradius-Task: $EXRADIUS_TASK_ID"' in hook.read_text()
-    assert '--trailer "Exradius-Agent: $EXRADIUS_AGENT"' in hook.read_text()
+    hooks = sorted(p.name for p in (tmp_path / "git-hooks").iterdir())
+    assert hooks == sorted(git_identity.HOOK_NAMES) and "push-to-checkout" not in hooks
+    for name in hooks:
+        hook = tmp_path / "git-hooks" / name
+        assert hook.read_text() == git_identity.DISPATCHER and os.access(hook, os.X_OK)
+    assert '--trailer "Exradius-Task: $EXRADIUS_TASK_ID"' in git_identity.DISPATCHER
 
 
 def test_global_config_is_kept_and_managed_config_rewritten(tmp_path):
@@ -127,6 +135,67 @@ def test_commit_gets_identity_and_trailers(prepared_run, tmp_path):
     run_git("config", "--global", "alias.st", "status", cwd=app, env=env)
     assert "st = status" in (paths.state / "git" / "config").read_text()
     assert not (tmp_path / "home" / ".gitconfig").exists()
+
+
+def _hook(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(0o755)
+
+
+def test_project_hooks_run_after_the_exradius_part(prepared_run, tmp_path):
+    """A repository-local core.hooksPath (husky's prepare script writes one) neither drops
+    the trailers nor stops the project's own hooks."""
+    paths = prepared_run
+    env = container_env(tmp_path / "home", prepare_git(paths.state, IDENTITY, [], state_mount=str(paths.state)))
+    app = paths.project / "app"
+    run_git("config", "core.hooksPath", ".husky/_", cwd=app, env=env)  # as `husky` does
+    ran = tmp_path / "ran.log"
+    _hook(app / ".husky" / "_" / "pre-commit", f'echo "pre-commit $(git rev-parse --show-toplevel)" >> {ran}\n')
+    _hook(app / ".husky" / "_" / "commit-msg", f'echo "commit-msg $(basename "$1")" >> {ran}\n')
+    _hook(app / ".husky" / "_" / "prepare-commit-msg", 'echo "Project-Ticket: PLANE-1" >> "$1"\n')
+    (app / "fix.txt").write_text("fixed\n")
+    run_git("add", "fix.txt", cwd=app, env=env)
+    run_git("commit", "-m", "Fix the invoices", cwd=app, env=env)
+
+    message = run_git("log", "-1", "--format=%B", cwd=app, env=env).stdout
+    assert "Exradius-Task: T-42" in message and "Exradius-Agent: bug-fixer" in message
+    assert "Project-Ticket: PLANE-1" in message  # the project's own prepare-commit-msg ran too
+    assert ran.read_text().splitlines() == [f"pre-commit {app.resolve()}", "commit-msg COMMIT_EDITMSG"]
+
+
+def test_a_failing_project_hook_fails_the_commit(prepared_run, tmp_path):
+    paths = prepared_run
+    env = container_env(tmp_path / "home", prepare_git(paths.state, IDENTITY, [], state_mount=str(paths.state)))
+    app = paths.project / "app"
+    run_git("config", "core.hooksPath", ".husky/_", cwd=app, env=env)
+    _hook(app / ".husky" / "_" / "pre-commit", 'echo "lint-staged: 1 error" >&2\nexit 3\n')
+    (app / "bad.txt").write_text("bad\n")
+    run_git("add", "bad.txt", cwd=app, env=env)
+    commit = run_git("commit", "-m", "Bad change", cwd=app, env=env, check=False)
+    assert commit.returncode != 0 and "lint-staged: 1 error" in commit.stderr
+    assert run_git("rev-list", "--count", "HEAD", cwd=app, env=env).stdout.strip() == "1"  # nothing committed
+
+
+def test_default_hooks_folder_and_stdin(prepared_run, tmp_path):
+    """Without a configured hooks path the project's hooks are in .git/hooks; hooks that
+    read stdin (pre-push, reference-transaction) get it unchanged."""
+    paths = prepared_run
+    env = container_env(tmp_path / "home", prepare_git(paths.state, IDENTITY, [], state_mount=str(paths.state)))
+    app = paths.project / "app"
+    seen = tmp_path / "stdin.log"
+    _hook(app / ".git" / "hooks" / "post-commit", f'echo post-commit >> {seen}\n')
+    _hook(app / ".git" / "hooks" / "reference-transaction", f'[ "$1" = committed ] && cat >> {seen}\nexit 0\n')
+    (app / "x.txt").write_text("x\n")
+    run_git("add", "x.txt", cwd=app, env=env)
+    run_git("commit", "-m", "X", cwd=app, env=env)
+    lines = seen.read_text().splitlines()
+    assert "post-commit" in lines
+    assert any(line.endswith(" refs/heads/main") for line in lines)
+    # A project env that sets its own command-line config cannot reach the container.
+    from exradius.worker import git_identity as gi
+
+    assert gi.without_command_line_config({"GIT_CONFIG_COUNT": "0", "GIT_CONFIG_KEY_0": "x", "A": "1"}) == {"A": "1"}
 
 
 class GitHttpServer:

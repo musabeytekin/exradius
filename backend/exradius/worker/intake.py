@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 class TaskIntake:
     run_id: uuid.UUID | None
     events: list[PendingEvent] = field(default_factory=list)
+    memory: int = 0
+    """What the run reserves, from the config intake read (docs/run-environment.md §4)."""
 
 
 def _first_error(exc: ValidationError) -> str:
@@ -136,7 +138,7 @@ async def accept_task(
             await session.rollback()
             return await rejected(f"duplicate task_id {message.task_id!r}")
         log.info("accepted task %s as run %s", task.id, run.id)
-        return TaskIntake(run_id=run.id, events=[event])
+        return TaskIntake(run_id=run.id, events=[event], memory=snapshot.config.memory_reservation())
 
 
 @dataclass

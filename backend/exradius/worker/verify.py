@@ -10,6 +10,7 @@ step in ``project_verifications.steps`` as it goes, and removes the directory at
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -19,13 +20,15 @@ from sqlalchemy import select
 
 from exradius.models import Project, ProjectVerification, utcnow
 from exradius.project_state import assess, read_config, remember, store_values
-from exradius.resolve import StoreValues, repo_specs, service_environment, workstation_environment
-from exradius.schemas.project_config import ProjectConfig, ServiceDef
+from exradius.resolve import StoreValues, repo_specs, workstation_environment
+from exradius.schemas.project_config import ProjectConfig, ServiceDef, format_memory
 from exradius.worker import prepare
 from exradius.worker.builds import BuildFailed, BuildJob, build_jobs
-from exradius.worker.containers import ServiceFailed, ServiceSpec
+from exradius.worker.caches import CacheMount
+from exradius.worker.containers import KILLED, ServiceFailed
 from exradius.worker.diagnose import diagnose_steps
-from exradius.worker.runs import VERIFY_PREFIX, RunManager
+from exradius.worker.memory import TooLarge
+from exradius.worker.runs import VERIFY_PREFIX, RunManager, exceeded_memory, service_spec
 
 log = logging.getLogger(__name__)
 
@@ -135,7 +138,11 @@ class ProjectVerifier:
         repos = repo_specs(config, secrets)
         env = workstation_environment(config, secrets)  # complete: "Read config" found every key
 
+        reserved = contextlib.AsyncExitStack()  # the memory reservation, released at the end
         plan: list[tuple[str, Callable[[], Awaitable[str]]]] = []
+        if config.memory_reservation():
+            plan.append((f"Reserve memory ({format_memory(config.memory_reservation())})",
+                         self._reserve_step(config, reserved)))
         for job in build_jobs(config):
             plan.append((job.step, self._build_step(project_id, slug, read["commit"], job, images)))
         plan.append(("Create directory", create_directory))
@@ -146,8 +153,10 @@ class ProjectVerifier:
         network: list[str] = []  # set by the first service step
         for name, service in config.services.items():
             plan.append((f"Start service {name}", self._service_step(label, name, service, images, secrets, network)))
+        cache_mounts = self.runs.cache_mounts(slug, config)
         for command in config.workstation.setup:
-            plan.append((f"Setup: {command}", self._setup_step(images, label, paths, env, command, network)))
+            plan.append((f"Setup: {command}", self._setup_step(images, label, paths, env, command, network, config,
+                                                                 cache_mounts)))
         cleanups = [("Remove directory", remove_directory)]
         if config.services:
             cleanups.insert(0, ("Stop services", self._stop_services_step(label)))
@@ -155,15 +164,31 @@ class ProjectVerifier:
         offset = len(steps)
         steps += [_pending(name) for name, _ in [*plan, *cleanups]]
         await self._save(verification_id, steps)
-        for index, (_, action) in enumerate(plan):
-            if error is not None:
-                steps[offset + index]["state"] = "skipped"
-                continue
-            error = await self._step(verification_id, steps, offset + index, action)
-        for extra, (_, action) in enumerate(cleanups):
-            cleanup_error = await self._step(verification_id, steps, offset + len(plan) + extra, action)
-            error = error or cleanup_error
+        async with reserved:
+            for index, (_, action) in enumerate(plan):
+                if error is not None:
+                    steps[offset + index]["state"] = "skipped"
+                    continue
+                error = await self._step(verification_id, steps, offset + index, action)
+            for extra, (_, action) in enumerate(cleanups):
+                cleanup_error = await self._step(verification_id, steps, offset + len(plan) + extra, action)
+                error = error or cleanup_error
         await self._finish(verification_id, steps, slug, error)
+
+    def _reserve_step(self, config: ProjectConfig, stack: contextlib.AsyncExitStack):
+        """Wait, as a run would, until the declared memory fits the worker's budget; held
+        until the verification ends."""
+
+        async def action() -> str:
+            amount = config.memory_reservation()
+            try:
+                reservation = await stack.enter_async_context(self.runs.memory.reserve(amount))
+            except TooLarge as exc:
+                raise StepFailed(str(exc)) from exc
+            waited = f" after waiting {reservation.waited:.0f}s" if reservation.waited >= 1 else ""
+            return f"reserved {self.runs.memory.describe(amount)}{waited}"
+
+        return action
 
     async def _finish(self, verification_id: uuid.UUID, steps: list[dict[str, Any]], slug: str, error: str | None) -> None:
         await self._save(
@@ -233,12 +258,7 @@ class ProjectVerifier:
         self, label: str, name: str, service: ServiceDef, images: dict[str, str], secrets: StoreValues, network: list[str]
     ):
         async def action() -> str:
-            spec = ServiceSpec(
-                name=name,
-                image=images[name],
-                env=service_environment(service, secrets),
-                ready=service.ready.model_dump(exclude_none=True) if service.ready else None,
-            )
+            spec = service_spec(name, service, images[name], secrets)
             if not network:
                 network.append(await self.containers.create_run_network(label))
             try:
@@ -264,12 +284,17 @@ class ProjectVerifier:
         env: dict[str, str],
         command: str,
         network: list[str],
+        config: ProjectConfig,
+        cache_mounts: list[CacheMount],
     ):
         async def action() -> str:
             result = await self.containers.run_setup_command(
                 image=images["workstation"], run_id=label, paths=paths, env=env, command=command,
-                service_network=network[0] if network else None,
+                service_network=network[0] if network else None, memory=config.workstation_memory,
+                caches=cache_mounts,
             )
+            if result.exit_code == KILLED and config.workstation_memory:
+                raise StepFailed(f"exited with 137: {exceeded_memory(config)}\n{result.logs}")
             if result.exit_code != 0:
                 raise StepFailed(f"exited with {result.exit_code}\n{result.logs}")
             return result.logs

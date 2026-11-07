@@ -31,16 +31,21 @@ separate identity entity.
    `GIT_COMMITTER_EMAIL` from the agent's identity. Also `EXRADIUS_AGENT=<slug>` and
    `EXRADIUS_TASK_ID=<task id>` for the hook below (these two are part of the container's
    environment and therefore visible to the agent, which is fine).
-2. **Git config in the run's home** (`$HOME/.gitconfig`, written into the state mount so it
-   survives resume): `user.name`, `user.email`, `core.hooksPath=<state>/git-hooks`,
-   `credential.helper` (see 4), `push.autoSetupRemote=true`, `init.defaultBranch=main`.
-3. **Commit trailers:** `<state>/git-hooks/prepare-commit-msg` appends
-   `Exradius-Task: <task id>` and `Exradius-Agent: <slug>` to every commit message unless
-   already present. Hooks the repository itself defines are not run (hooksPath replaces
-   them); that is acceptable in v1 and documented.
-4. **No co-author line:** the Claude Code runtime writes `{"includeCoAuthoredBy": false}`
-   into `settings.json` under `CLAUDE_CONFIG_DIR` before the session starts, unless that
-   file exists. Commits then carry only the agent's identity and the two trailers above.
+2. **Git config in the run's home** (`GIT_CONFIG_GLOBAL` in the state mount, so it
+   survives resume): `user.name`, `user.email`, `push.autoSetupRemote=true`,
+   `init.defaultBranch=main`. `core.hooksPath=<state>/git-hooks` and the credential helpers
+   (see 4) are git command-line config (`GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n`), which no
+   config file outranks (docs/run-environment.md §3).
+3. **Commit trailers:** every hook name in `<state>/git-hooks/` is one dispatcher. In
+   `prepare-commit-msg` it appends `Exradius-Task: <task id>` and `Exradius-Agent: <slug>`
+   unless already present; then, for every hook, it runs the repository's own hook of that
+   name (from the hooks path a config file sets, such as husky's `.husky/_`, else
+   `.git/hooks`) with the same arguments and stdin, and exits with its status. A failing
+   project hook fails the commit, as for a developer.
+4. **No co-author line:** the Claude Code runtime passes `{"includeCoAuthoredBy": false,
+   "attribution": {"commit": "", "pr": ""}}` as `--settings`, which outranks the
+   repository's `.claude/settings.json`. Commits then carry only the agent's identity and
+   the two trailers above.
 5. **The run user is `runner`:** setup and run containers get a generated `/etc/passwd` and
    `/etc/group` (read-only) mapping the run uid/gid to `runner` with home `/home/runner`,
    so tools that read the home from passwd agree with `$HOME` (runtime-bundles.md §2.4).
@@ -49,7 +54,7 @@ separate identity entity.
 
 - When a repository has `push_allowed` and an auth secret, the worker exports the secret as
   `EXRADIUS_GIT_CREDENTIAL_<N>` (N = repository index) and configures a credential helper
-  for that remote's host that answers from the variable:
+  for that remote's URL, at the git command-line level, that answers from the variable:
   `credential.<url>.helper=!f() { echo username=x-access-token; echo password=$EXRADIUS_GIT_CREDENTIAL_N; }; f`
   (username is the part before `:` when the secret is `user:token`). Nothing is written
   into the clone's `.git/config`.

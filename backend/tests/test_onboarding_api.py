@@ -194,12 +194,13 @@ def test_freshness(admin, control, sync_db, tmp_path):
 def test_verify_with_broker_down(admin, control, sync_db, tmp_path):
     control.healthy = False
     project = setup_configuration(admin, tmp_path)["project"]  # adding still works
-    [auto] = admin.get(f"/api/projects/{project['id']}/verifications").json()
-    assert auto["state"] == "failed" and "broker" in auto["error"]
+    # One when the project was added, one when its last key arrived (§8): both failed.
+    found = admin.get(f"/api/projects/{project['id']}/verifications").json()
+    assert len(found) == 2 and all(v["state"] == "failed" and "broker" in v["error"] for v in found)
     assert project["freshness"] == "failed"
     assert admin.post(f"/api/projects/{project['id']}/verify").status_code == 503
     latest = admin.get(f"/api/projects/{project['id']}/verifications").json()
-    assert len(latest) == 2 and latest[0]["state"] == "failed" and "broker" in latest[0]["error"]
+    assert len(latest) == 3 and latest[0]["state"] == "failed" and "broker" in latest[0]["error"]
 
 
 # The resolved agent --------------------------------------------------------------------------------
@@ -417,3 +418,37 @@ def test_stream_requires_login(client):
     assert client.get("/api/tasks/x/stream").status_code == 401
 
 
+
+
+def test_keys_arriving_verify_the_project_again(admin, control, sync_db, tmp_path):
+    """docs/run-environment.md §8: a verification that failed for missing keys is rerun once
+    the store has them all, under the one-open rule; a current one is left alone."""
+    remote = make_config_repo(tmp_path, {"exradius.yaml": API_CONFIG})
+    project = admin.post("/api/projects", json={"config_url": str(remote)}).json()
+    [auto] = control.verified
+    finish(sync_db, auto, "failed", project["commit"])  # the store did not exist
+
+    store = admin.post("/api/stores", json={"name": "billing"}).json()
+    assert control.verified == [auto]  # created, but keys are still missing
+    assert admin.put(f"/api/stores/{store['id']}/keys", json={"values": {"GIT_TOKEN": "t", "DOCS_KEY": "d"}}).status_code == 200
+    assert control.verified == [auto]  # SENTRY_TOKEN is still missing
+    assert admin.put(f"/api/stores/{store['id']}/keys/SENTRY_TOKEN", json={"value": "s"}).json()["key"] == "SENTRY_TOKEN"
+    assert len(control.verified) == 2  # all present now
+    second = control.verified[1]
+    assert admin.put(f"/api/stores/{store['id']}/keys/SENTRY_TOKEN", json={"value": "s2"}).status_code == 200
+    assert control.verified == [auto, second]  # that one is still open
+
+    finish(sync_db, second, "passed", project["commit"])
+    assert admin.put(f"/api/stores/{store['id']}/keys", json={"values": {"EXTRA": "x"}}).status_code == 200
+    assert control.verified == [auto, second]  # current: nothing to do
+
+
+def test_store_created_after_the_project(admin, control, sync_db, tmp_path):
+    """A project whose config names a store but needs no key verifies when the store appears."""
+    config = "version: 1\nproject: {slug: plain}\nsecret_store: later\nagents:\n  dev: {}\n"
+    remote = make_config_repo(tmp_path, {"exradius.yaml": config})
+    project = admin.post("/api/projects", json={"config_url": str(remote)}).json()
+    [auto] = control.verified
+    finish(sync_db, auto, "failed", project["commit"])
+    admin.post("/api/stores", json={"name": "later"})
+    assert len(control.verified) == 2

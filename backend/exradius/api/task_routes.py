@@ -48,7 +48,7 @@ async def list_tasks(
     offset: int = Query(0, ge=0),
 ):
     stmt = (
-        select(Task, Run.id)
+        select(Task, Run.id, Run.waiting_for)
         .join(Run, Run.task_id == Task.id, isouter=True)
         .join(Project, Project.id == Task.project_id)
         .order_by(Task.received_at.desc())
@@ -70,8 +70,9 @@ async def list_tasks(
             state=task.state,
             received_at=task.received_at,
             run_id=run_id,
+            waiting_for=waiting_for,
         )
-        for task, run_id in rows
+        for task, run_id, waiting_for in rows
     ]
 
 
@@ -97,6 +98,7 @@ async def get_task(task_id: str, session: DB, _: Admin):
         state=task.state,
         received_at=task.received_at,
         run_id=run.id if run else None,
+        waiting_for=run.waiting_for if run else None,
         instructions=task.instructions,
         context=task.context,
         correlation=task.correlation,

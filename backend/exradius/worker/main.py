@@ -16,7 +16,9 @@ from exradius.config import Settings, get_settings
 from exradius.db import make_engine, make_session_factory
 from exradius.models import Event, utcnow
 from exradius.storage import make_store
+from exradius.schemas.project_config import format_memory, memory_bytes
 from exradius.worker.containers import ContainerManager
+from exradius.worker.memory import HEADROOM
 from exradius.worker.intake import accept_answer, accept_task
 from exradius.worker.lifecycle import PendingEvent
 from exradius.worker.heartbeat import Heartbeat
@@ -92,7 +94,7 @@ class Worker:
             await message.ack()  # persisted: safe to acknowledge
             await self.emit(intake.events)
             if intake.run_id is not None:
-                await self.runs.execute(intake.run_id)
+                await self.runs.execute(intake.run_id, intake.memory)
 
     async def on_answer(self, message: AbstractIncomingMessage) -> None:
         try:
@@ -109,6 +111,10 @@ class Worker:
     async def _resume(self, run_id: uuid.UUID) -> None:
         async with self.slots:
             await self.runs.resume(run_id)
+
+    async def _execute_waiting(self, run_id: uuid.UUID, memory: int) -> None:
+        async with self.slots:
+            await self.runs.execute(run_id, memory)
 
     async def _reattach(self, run_id: uuid.UUID, container_id: str) -> None:
         async with self.slots:
@@ -134,6 +140,8 @@ class Worker:
         whose answer arrived while no worker could act on it."""
         for run_id, container_id in await self.runs.reconcile(self.presence.is_alive):
             self._spawn(self._reattach(run_id, container_id))
+        for run_id, memory in await self.runs.waiting_runs(self.presence.is_alive):
+            self._spawn(self._execute_waiting(run_id, memory))
         await self.verifier.reconcile(self.presence.is_alive)
         await self.provider_tester.reconcile(self.presence.is_alive)
         removed = await self.runs.sweep_orphans()
@@ -141,6 +149,21 @@ class Worker:
             log.info("removed %d orphaned run directories", len(removed))
         for run_id in await self.runs.resumable_runs():
             self._spawn(self._resume(run_id))
+
+    async def set_memory_budget(self) -> None:
+        """``EXRADIUS_RUN_MEMORY_BUDGET``, else the Docker daemon's memory less 1 GiB. A
+        daemon that does not answer leaves the budget unknown: nothing waits."""
+        if self.settings.run_memory_budget:
+            budget = memory_bytes(self.settings.run_memory_budget)
+        else:
+            try:
+                total = int((await asyncio.to_thread(self.containers.client.info)).get("MemTotal") or 0)
+            except Exception:  # noqa: BLE001 - reported, the worker still starts
+                log.exception("could not read the Docker daemon's memory; reservations are not enforced")
+                return
+            budget = max(total - HEADROOM, 0) or None
+        self.runs.memory.budget = budget
+        log.info("memory budget for runs: %s", format_memory(budget) if budget else "unknown")
 
     async def prepare_runtimes(self) -> None:
         """Extract the runtime bundles now rather than at the first run, and remove the
@@ -191,6 +214,7 @@ class Worker:
             control_queue = await other_channel.declare_queue(messaging.CONTROL_QUEUE, durable=True)
 
             await self.presence.start()
+            await self.set_memory_budget()
             await self.prepare_runtimes()
             self.heartbeat.start()
             await self.recover()

@@ -154,9 +154,10 @@ The worker changes nothing in the clone and pushes nothing.
   passwd. The worker mounts a generated `/etc/passwd` and `/etc/group` read-only into the
   agent and setup containers: `root` plus `runner:x:<uid>:<gid>::/home/runner:/bin/bash`
   and the matching group. Document in runtime-bundles §2.4.
-- **Co-author line**: the Claude Code runtime writes `{"includeCoAuthoredBy": false}` into
-  `settings.json` under `CLAUDE_CONFIG_DIR` before the session starts, unless the file
-  exists. Commits then carry only the identity and the Exradius trailers.
+- **Co-author line**: the Claude Code runtime passes `{"includeCoAuthoredBy": false}` (and
+  empty `attribution`) as `--settings` (docs/run-environment.md §7; it was a
+  `settings.json` under `CLAUDE_CONFIG_DIR` until then). Commits then carry only the
+  identity and the Exradius trailers.
 - **Task id required**: the panel's New task form requires a task id (the ticket key) and
   no longer invents one; the API keeps accepting a missing id for integrations.
 - **Notes**: `projects.notes` text field and a Notes tab (one text area, hint "Write what

@@ -245,6 +245,8 @@ class Run(Base):
     the run spec use what the run started with."""
     agent_snapshot: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
     """name, model, provider, runtime, identity and connection names of the agent."""
+    waiting_for: Mapped[str | None] = mapped_column(String(30))
+    """``memory`` while the run waits for its memory reservation (docs/run-environment.md §4)."""
 
     task: Mapped[Task] = relationship(lazy="joined", innerjoin=True)
 

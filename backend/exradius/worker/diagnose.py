@@ -100,6 +100,31 @@ def _killed(f: Failure) -> str | None:
             "or give the worker's Docker more memory.")
 
 
+DECLARED = re.compile(r"exceeded its declared memory \(([^)]+)\)")
+SERVICE_STEP = re.compile(r"^Start service (\S+)")
+
+
+def _declared_memory(f: Failure) -> str | None:
+    """A container killed by its own declared limit (docs/run-environment.md §4)."""
+    match = DECLARED.search(f.log)
+    if not match:
+        return None
+    limit = match.group(1)
+    if service := SERVICE_STEP.match(f.step):
+        return (f"Service {service.group(1)} exceeded its declared memory ({limit}) and was killed: "
+                "raise its `memory` in the config.")
+    what = _code(f.command) if f.command else f"the {f.subject} step"
+    return (f"{what[0].upper()}{what[1:]} exceeded the workstation's declared memory ({limit}) and was killed: "
+            "raise `resources.memory` in the config, or lower the command's parallelism.")
+
+
+def _reservation(f: Failure) -> str | None:
+    if not f.step.startswith("Reserve memory") or "more than this worker's budget" not in f.log:
+        return None
+    return (f"{f.log.strip().splitlines()[0][0].upper()}{f.log.strip().splitlines()[0][1:]}: lower the "
+            "declared memory, or raise the budget.")
+
+
 # Services ------------------------------------------------------------------------------------
 
 SERVICE = re.compile(r"^service (\S+) \(([^)]*)\) (.*)$", re.M)
@@ -234,7 +259,7 @@ def _build(f: Failure) -> str | None:
     return f"{sentence} {mismatch}" if mismatch else sentence
 
 
-RULES: list[Rule] = [_config, _clone, _killed, _service, _build, _setup_mismatch, _missing_tool]
+RULES: list[Rule] = [_config, _clone, _reservation, _declared_memory, _killed, _service, _build, _setup_mismatch, _missing_tool]
 
 
 def diagnose(step: str, log: str) -> str | None:

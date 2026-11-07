@@ -74,20 +74,20 @@ def bundled_cli(runtime_dir: Path | None) -> str | None:
     return str(cli)
 
 
-SETTINGS = {"includeCoAuthoredBy": False}
-"""Written to ``settings.json`` under ``CLAUDE_CONFIG_DIR`` unless one exists: commits carry
-the agent's identity and the Exradius trailers, not Claude Code's co-author line."""
+SETTINGS = {"includeCoAuthoredBy": False, "attribution": {"commit": "", "pr": ""}}
+"""Claude Code settings Exradius needs in every session: commits carry the agent's identity
+and the Exradius trailers, not Claude Code's co-author line or pull request footer.
+
+Passed as ``--settings`` (the SDK's ``settings`` option), which ranks above the
+repository's ``.claude/settings.json`` and ``settings.local.json`` and the user settings in
+``CLAUDE_CONFIG_DIR``, key by key, so a repository cannot turn them back on. Only managed
+settings (``/etc/claude-code/``, which a project's image could bake) rank higher
+(docs/architecture.md §12). All setting sources still load, so the repository's
+``CLAUDE.md``, ``AGENTS.md`` and ``.claude/`` commands, agents and skills are there."""
 
 
-def write_default_settings(config_dir: Path) -> bool:
-    """Create ``config_dir/settings.json`` with ``SETTINGS`` unless the file exists (the
-    agent's own changes survive resume). True when it was written."""
-    target = config_dir / "settings.json"
-    if target.exists():
-        return False
-    config_dir.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(SETTINGS, indent=2) + "\n")
-    return True
+def settings_argument() -> str:
+    return json.dumps(SETTINGS, separators=(",", ":"))
 
 
 OAUTH_NOTICE = (
@@ -192,6 +192,7 @@ class ClaudeCodeRuntime:
             # Capability is tool availability: the agent may use everything it is given.
             permission_mode="bypassPermissions",
             resume=resume,
+            settings=settings_argument(),
             # Session files live under the state mount so they survive suspend/resume.
             env=self.session_environment(spec.env, self.config_dir(spec)),
             stderr=lambda line: print(line, file=sys.stderr, flush=True),
@@ -214,7 +215,6 @@ class ClaudeCodeRuntime:
     ) -> RunOutcome:
         from claude_agent_sdk import ClaudeSDKClient, ResultMessage, SystemMessage
 
-        write_default_settings(self.config_dir(spec))
         session_id = resume
         result: ResultMessage | None = None
         interrupted = False

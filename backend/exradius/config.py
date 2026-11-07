@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     """The same directory as the Docker daemon sees it. Defaults to ``data_dir``."""
     worker_concurrency: int = 4
     """Prefetch count of the task consumer: how many runs one worker executes at once."""
+    run_memory_budget: str | None = None
+    """Memory the runs and verifications of this worker may reserve together, as a Docker
+    size (``24g``). Default: the Docker daemon's ``MemTotal`` less 1 GiB, read at start."""
     runtime_image_claude_code: str = Field(default_factory=lambda: f"exradius-runtime-claude-code:{package_version()}")
     """Image holding the Claude Code runtime bundle (deploy/runtime-claude-code.Dockerfile)."""
     project_default_image: str = Field(default_factory=lambda: f"exradius-project-default:{package_version()}")
@@ -81,7 +84,7 @@ class Settings(BaseSettings):
     docker_url: str | None = None
     """Docker daemon URL; ``None`` uses the environment (``DOCKER_HOST`` or the local socket)."""
 
-    @field_validator("s3_endpoint_url", "s3_access_key", "s3_secret_key", mode="before")
+    @field_validator("s3_endpoint_url", "s3_access_key", "s3_secret_key", "run_memory_budget", mode="before")
     @classmethod
     def _empty_is_unset(cls, value: str | None) -> str | None:
         return value or None

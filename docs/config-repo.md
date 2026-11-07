@@ -54,6 +54,11 @@ workstation:                      # the agent's container image; one of image / 
   # context: docker/                            # build context, default: the Dockerfile's directory
   setup:                          # run after cloning, in the workstation, project dir as cwd
     - cp -r /opt/m2 ~/.m2
+  cache:                          # optional; kept across the project's runs, shared by them
+    - ~/.m2/repository            # ~-relative or absolute, outside /work
+
+resources:                        # optional
+  memory: 6g                      # the workstation (setup, run, resume); reserved and enforced
 
 services:                         # dependencies started next to the agent, by host name
   postgres:
@@ -64,6 +69,10 @@ services:                         # dependencies started next to the agent, by h
       POSTGRES_PASSWORD: ${secret:DB_PASSWORD}
     ports: [5432]                 # documentation for the agent; nothing is published
     ready: {command: [pg_isready, -U, app]}   # or {tcp: 5432}; default: image HEALTHCHECK or "running"
+    memory: 512m                  # optional; reserved and enforced like resources.memory
+  minio:
+    image: minio/minio
+    command: [server, /data]      # optional; the container command, the entrypoint is kept
 
 env:                              # project environment, in the workstation and setup
   DATABASE_URL: postgres://app:${secret:DB_PASSWORD}@postgres:5432/app
@@ -110,6 +119,19 @@ Rules:
   stay inside the repository (no `..`, no absolute paths, no symlinks leaving it).
 - Service names: `[a-z][a-z0-9-]*`, not `api`, `exradius-api`, nor any repository folder
   name. Agent and connection names: `[a-z][a-z0-9-]*`.
+- `resources.memory` and a service's `memory` are Docker sizes with a unit (`512m`, `6g`,
+  `1.5g`; at least `6m`). Each is reserved before a run or verification starts (it waits
+  in `queued` until the worker's budget fits) and is the container's memory limit, swap
+  included; a container killed by it fails with "exceeded its declared memory (6g)".
+  Undeclared reserves nothing and limits nothing (docs/run-environment.md §4).
+- `workstation.cache` entries start with `~/` or `/`, name a directory below the home or
+  the root (not `~`, `/tmp` or `/home/runner` themselves), use no `..`, lie outside `/work`
+  and outside `/exradius`, `/opt/exradius`, `/proc`, `/sys`, `/dev`, `/etc/passwd` and
+  `/etc/group`, and are listed once. Each is bind-mounted from
+  `<data_dir>/caches/<slug>/<n>-<sanitised path>/` into the setup, run and resume
+  containers and Verify; nothing cleans them, the project page shows their size, and they
+  are deleted with the project (docs/run-environment.md §5).
+- A service's `command` is a non-empty list of strings; there is no `entrypoint` key.
 - Unknown keys anywhere are errors (typos must not pass silently). `version` must be 1.
 
 ## 3. Reading, validating, snapshotting

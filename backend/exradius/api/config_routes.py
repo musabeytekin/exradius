@@ -33,6 +33,7 @@ from exradius.providers import provider_problem, resolve_provider
 from exradius.resolve import connection_view
 from exradius.schemas import api as s
 from exradius.schemas.project_config import NAME_PATTERN, SECRET_REF
+from exradius.worker import caches
 
 router = APIRouter(prefix="/api")
 NO_CONTENT = status.HTTP_204_NO_CONTENT
@@ -63,7 +64,9 @@ async def _latest_verification(session, project_id: uuid.UUID) -> ProjectVerific
     )
 
 
-async def _project_out(session, project: Project) -> s.ProjectOut:
+async def _project_out(session, project: Project, *, data_dir=None) -> s.ProjectOut:
+    """``data_dir`` adds the size of the project's caches (a walk of the directory, kept
+    for a minute: the project page only, not the list)."""
     snapshot = cached(project) or ProjectConfigSnapshot.unreadable("the config has not been read yet")
     latest = await _latest_verification(session, project.id)
     health = await assess(session, project, snapshot)
@@ -101,6 +104,7 @@ async def _project_out(session, project: Project) -> s.ProjectOut:
         created_at=project.created_at,
         verification=s.VerificationSummary.model_validate(latest) if latest else None,
         freshness=freshness(latest, project.snapshot_commit),
+        cache_bytes=await caches.sizes.get(data_dir, project.slug) if data_dir else None,
     )
 
 
@@ -169,8 +173,8 @@ async def create_project(body: s.ProjectIn, session: DB, state: State, _: Admin)
 
 
 @router.get("/projects/{project_id}", response_model=s.ProjectOut)
-async def get_project(project_id: uuid.UUID, session: DB, _: Admin):
-    return await _project_out(session, await get_or_404(session, Project, project_id))
+async def get_project(project_id: uuid.UUID, session: DB, state: State, _: Admin):
+    return await _project_out(session, await get_or_404(session, Project, project_id), data_dir=state.settings.data_dir)
 
 
 @router.post("/projects/{project_id}/reread", response_model=s.ProjectOut)
@@ -211,6 +215,8 @@ async def delete_project(project_id: uuid.UUID, session: DB, state: State, _: Ad
     await session.delete(project)
     await session.commit()
     await asyncio.to_thread(_remove_mirror, state, project_id)
+    await asyncio.to_thread(caches.remove, state.settings.data_dir, project.slug)
+    caches.sizes.forget(state.settings.data_dir, project.slug)
     return Response(status_code=NO_CONTENT)
 
 
@@ -318,13 +324,32 @@ async def list_stores(session: DB, _: Admin):
     return [await _store_out(session, store) for store in stores]
 
 
+async def _verify_after_keys(session, state, name: str) -> None:
+    """Projects naming the store whose required keys are now all present and whose
+    verification is not current get one (docs/run-environment.md §8): a failure for a
+    missing store or keys is not rerun by a new config commit, since there is none."""
+    projects = (await session.scalars(select(Project).order_by(Project.slug))).all()
+    for project in projects:
+        snapshot = cached(project)
+        if snapshot is None or snapshot.store != name or snapshot.commit is None:
+            continue
+        health = await assess(session, project, snapshot)
+        if not health.runnable:
+            continue
+        latest = await _latest_verification(session, project.id)
+        if freshness(latest, project.snapshot_commit) in ("current", "running"):
+            continue
+        await _request_verification(session, state, project.id, strict=False)
+
+
 @router.post("/stores", response_model=s.StoreOut, status_code=201)
-async def create_store(body: s.StoreIn, session: DB, _: Admin):
+async def create_store(body: s.StoreIn, session: DB, state: State, _: Admin):
     if await session.scalar(select(SecretStore.id).where(SecretStore.name == body.name)):
         raise HTTPException(409, f"store {body.name!r} already exists")
     store = SecretStore(name=body.name, kind="internal")
     session.add(store)
     await session.commit()
+    await _verify_after_keys(session, state, store.name)
     return await _store_out(session, store)
 
 
@@ -378,6 +403,8 @@ async def set_store_keys(store_id: uuid.UUID, body: s.StoreValuesIn, session: DB
         entry.value_encrypted = state.box.encrypt(value)
         entry.updated_at = now
     await session.commit()
+    store = await session.get(SecretStore, store_id)
+    await _verify_after_keys(session, state, store.name)
     return await _entries(session, store_id)
 
 
@@ -396,6 +423,9 @@ async def set_store_key(store_id: uuid.UUID, key: str, body: s.StoreValueIn, ses
     entry.value_encrypted = state.box.encrypt(body.value)
     entry.updated_at = utcnow()
     await session.commit()
+    store = await session.get(SecretStore, store_id)
+    await _verify_after_keys(session, state, store.name)
+    await session.refresh(entry)
     return entry
 
 

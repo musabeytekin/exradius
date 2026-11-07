@@ -109,6 +109,9 @@ class ProjectOut(BaseModel):
     """Agent slugs of the config, for the send form."""
     config: dict[str, Any] | None
     """The parsed file (secret references as written), for read-only rendering."""
+    cache_bytes: int | None = None
+    """Disk usage of the project's caches (``workstation.cache``), on the project page only;
+    ``null`` when none exist on disk."""
     raw: str | None
     """The file's text."""
     created_at: datetime
@@ -372,6 +375,8 @@ class RunOut(_Out):
     """The config repository commit the run used."""
     agent_snapshot: dict[str, Any] | None = None
     """name, model, provider, runtime, identity and connections of the agent at run start."""
+    waiting_for: str | None = None
+    """``memory`` while the run waits for its memory reservation."""
 
 
 class TaskSummaryOut(BaseModel):
@@ -381,6 +386,8 @@ class TaskSummaryOut(BaseModel):
     state: str
     received_at: datetime
     run_id: uuid.UUID | None
+    waiting_for: str | None = None
+    """``memory`` while the run waits for its memory reservation (it stays queued)."""
 
 
 class AttachmentOut(_Out):

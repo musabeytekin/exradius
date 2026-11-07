@@ -85,7 +85,12 @@ export function TasksPage() {
                   <Table.Td><Mono className="font-medium">{t.task_id}</Mono></Table.Td>
                   <Table.Td><Mono className="text-xs text-muted">{t.project}</Mono></Table.Td>
                   <Table.Td><Mono className="text-xs text-muted">{t.agent}</Mono></Table.Td>
-                  <Table.Td><StateChip state={t.state} /></Table.Td>
+                  <Table.Td>
+                    <span className="flex items-center gap-2">
+                      <StateChip state={t.state} />
+                      {t.waiting_for === "memory" && (t.state === "queued" || t.state === "waiting_for_input") && <span className="text-xs text-muted">waiting for memory</span>}
+                    </span>
+                  </Table.Td>
                   <Table.Td className="text-right">
                     <Tooltip content={absoluteTime(t.received_at)}><span className="text-xs tabular text-subtle">{relativeTime(t.received_at)}</span></Tooltip>
                   </Table.Td>

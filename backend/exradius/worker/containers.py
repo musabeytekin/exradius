@@ -15,7 +15,9 @@ from docker.types import Mount
 
 from exradius.config import Settings
 from exradius.worker.bundles import ENTRYPOINT, LABEL_ROLE, ROLE_BUNDLE, RuntimeBundles, RuntimeMount
-from exradius.worker import prepare
+from exradius.worker import caches as cache_dirs
+from exradius.worker import git_identity, prepare
+from exradius.worker.caches import CacheMount
 from exradius.worker.prepare import RunPaths
 
 log = logging.getLogger(__name__)
@@ -24,10 +26,6 @@ WORK_DIR = "/work"
 HOME_DIR = "/home/runner"
 LABEL_RUN = "exradius.run_id"
 LABEL_KIND = "exradius.kind"
-GIT_ENV = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*"}
-"""Command-line level git config for every container: the checkout under /work need not be
-owned by the run user as git sees it (bind mounts from Docker Desktop hosts), and project
-images carry no system git config of ours."""
 INTERNAL_ROLES = {ROLE_BUNDLE, "backend"}
 """``exradius.role`` labels of Exradius' own images, which cannot be project images."""
 LABEL_SERVICE = "exradius.service"
@@ -80,6 +78,12 @@ class ServiceSpec:
     image: str
     env: dict[str, str] = field(default_factory=dict)
     ready: dict | None = None
+    command: list[str] | None = None
+    """The container command; the image's entrypoint is kept."""
+    memory: int | None = None
+    """Declared memory in bytes: the cgroup limit, swap included."""
+    memory_text: str | None = None
+    """The same as written in the config (``512m``), for messages."""
 
 
 class ServiceFailed(Exception):
@@ -112,6 +116,16 @@ def listening_ports(proc_net: str) -> set[int]:
 class ContainerExit:
     exit_code: int
     logs: str
+
+
+KILLED = 137
+"""SIGKILL: what a container gets from its cgroup when it exceeds its memory limit."""
+
+
+def memory_args(memory: int | None) -> dict:
+    """``mem_limit`` and an equal ``memswap_limit`` (swap must not hide an overrun);
+    nothing when undeclared, which is unlimited."""
+    return {"mem_limit": memory, "memswap_limit": memory} if memory else {}
 
 
 @dataclass
@@ -149,6 +163,9 @@ class ContainerManager:
     def _runtime_mount(self, runtime: RuntimeMount) -> Mount:
         return Mount(target=self.settings.runtime_mount, source=runtime.volume, type="volume", read_only=True)
 
+    def _cache_mounts(self, caches: list[CacheMount]) -> list[Mount]:
+        return [Mount(target=c.target, source=self.host_path(c.source), type="bind") for c in caches]
+
     def _mounts(self, paths: RunPaths) -> list[Mount]:
         return [
             Mount(target=WORK_DIR, source=self.host_path(paths.project), type="bind"),
@@ -177,12 +194,18 @@ class ContainerManager:
         command: list[str],
         runtime: RuntimeMount | None = None,
         service_network: str | None = None,
+        git_env: dict[str, str] | None = None,
+        memory: int | None = None,
+        caches: list[CacheMount] = (),
     ):
         """``paths=None`` creates a container without the run mounts (provider probes);
         ``runtime`` mounts that bundle read-only (runs and probes, not setup commands);
         ``service_network`` also joins the run's own network, where its services are.
         With ``paths`` the home and ``/tmp`` are the run's ``home`` and ``tmp`` directories,
         shared by the run's setup, run and resume containers; without, both are tmpfs.
+        ``git_env`` is the agent's identity and command-line git config, applied last (only
+        ``safe.directory`` without it); ``memory`` is the declared limit; ``caches`` are the
+        project's cache directories (docs/run-environment.md §3-§5).
 
         The user, read-only root, dropped capabilities, passwd entry and mounts below are
         mirrored by the developer-side check in the ``exradius-project`` skill
@@ -191,6 +214,9 @@ class ContainerManager:
         if paths:
             prepare.ensure_user_dirs(paths, uid, gid)
         mounts = self._mounts(paths) + self._identity_mounts(paths) if paths else []
+        if paths and caches:
+            cache_dirs.ensure(caches, paths.home, HOME_DIR, uid, gid)
+            mounts += self._cache_mounts(caches)
         if runtime is not None:
             mounts.append(self._runtime_mount(runtime))
         return self.client.containers.run(
@@ -199,11 +225,11 @@ class ContainerManager:
             command=command,
             detach=True,
             environment={
-                **env,
+                **git_identity.without_command_line_config(env),
                 "HOME": HOME_DIR,
                 "EXRADIUS_STATE_DIR": self.settings.run_state_mount,
                 "EXRADIUS_WORK_DIR": WORK_DIR,
-                **GIT_ENV,
+                **(git_env or git_identity.BASE_ENVIRONMENT),
             },
             working_dir=WORK_DIR if paths else HOME_DIR,
             mounts=mounts,
@@ -215,6 +241,7 @@ class ContainerManager:
             },
             cap_drop=["ALL"],
             security_opt=["no-new-privileges"],
+            **memory_args(memory),
             **self._network_args(service_network),
             labels={LABEL_RUN: run_id, LABEL_KIND: kind},
             name=f"exradius-{kind}-{run_id[:8]}-{_suffix()}",
@@ -250,6 +277,9 @@ class ContainerManager:
         env: dict[str, str],
         runtime: RuntimeMount,
         service_network: str | None = None,
+        git_env: dict[str, str] | None = None,
+        memory: int | None = None,
+        caches: list[CacheMount] = (),
     ) -> str:
         container = await asyncio.to_thread(
             self._create,
@@ -262,6 +292,9 @@ class ContainerManager:
             command=[run_id],
             runtime=runtime,
             service_network=service_network,
+            git_env=git_env,
+            memory=memory,
+            caches=caches,
         )
         return container.id
 
@@ -274,6 +307,8 @@ class ContainerManager:
         env: dict[str, str],
         command: str,
         service_network: str | None = None,
+        memory: int | None = None,
+        caches: list[CacheMount] = (),
     ) -> ContainerExit:
         container = await asyncio.to_thread(
             self._create,
@@ -285,6 +320,8 @@ class ContainerManager:
             entrypoint=["/bin/sh", "-c"],
             command=[command],
             service_network=service_network,
+            memory=memory,
+            caches=caches,
         )
         return await self.wait(container.id)
 
@@ -299,7 +336,7 @@ class ContainerManager:
                 entrypoint=["/bin/sh", "-c"],
                 command=[INSPECT_CLONES_SCRIPT],
                 detach=True,
-                environment={"HOME": HOME_DIR, "GIT_OPTIONAL_LOCKS": "0", **GIT_ENV},
+                environment={"HOME": HOME_DIR, "GIT_OPTIONAL_LOCKS": "0", **git_identity.BASE_ENVIRONMENT},
                 working_dir=WORK_DIR,
                 mounts=[Mount(target=WORK_DIR, source=self.host_path(paths.project), type="bind", read_only=True)],
                 user=f"{uid}:{gid}",
@@ -410,8 +447,10 @@ class ContainerManager:
             # run() pulls a missing image first; the readiness clock starts after it.
             container = self.client.containers.run(
                 service.image,
+                command=list(service.command) if service.command else None,
                 detach=True,
                 environment=dict(service.env),
+                **memory_args(service.memory),
                 hostname=service.name,
                 network=network,
                 networking_config={network: self.client.api.create_endpoint_config(aliases=[service.name])},
@@ -449,7 +488,12 @@ class ContainerManager:
             container.reload()
             state = container.attrs.get("State") or {}
             if state.get("Status") in ("exited", "dead") or (state and not state.get("Running", True)):
-                raise ServiceFailed(f"exited with code {state.get('ExitCode')} before it was ready")
+                code = state.get("ExitCode")
+                if code == KILLED and service.memory:
+                    raise ServiceFailed(
+                        f"exceeded its declared memory ({service.memory_text}): exited with code {code} before it was ready"
+                    )
+                raise ServiceFailed(f"exited with code {code} before it was ready")
             if "tcp" in ready:
                 code, output = _exec(container, ["cat", "/proc/net/tcp", "/proc/net/tcp6"])
                 if int(ready["tcp"]) in listening_ports(output):

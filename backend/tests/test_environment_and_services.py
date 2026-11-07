@@ -34,7 +34,7 @@ from exradius.schemas.project_config import parse_config
 from exradius.worker.builds import Images
 from exradius.runner.prompt import OPERATING_RULES, build_system_prompt
 from exradius.runtimes import RunSpec
-from exradius.runtimes.claude_code import ClaudeCodeRuntime, write_default_settings
+from exradius.runtimes.claude_code import ClaudeCodeRuntime
 from exradius.schemas.internal import RunSpecResponse
 from exradius.states import State
 from exradius.worker import prepare
@@ -855,10 +855,12 @@ def test_runtime_passes_the_model(tmp_path):
     assert runtime.options(RunSpec(**base)).model is None
 
 
-def test_default_settings_turn_off_the_co_author_line(tmp_path):
-    config = tmp_path / "claude"
-    assert write_default_settings(config) is True
-    assert json.loads((config / "settings.json").read_text()) == {"includeCoAuthoredBy": False}
-    (config / "settings.json").write_text('{"theme": "dark"}')
-    assert write_default_settings(config) is False  # an existing file is the agent's
-    assert json.loads((config / "settings.json").read_text()) == {"theme": "dark"}
+def test_runtime_settings_are_passed_on_the_command_line(tmp_path):
+    """--settings outranks the repository's .claude/settings.json, so a repository cannot
+    turn the co-author line back on; every setting source still loads (CLAUDE.md, .claude/)."""
+    runtime = ClaudeCodeRuntime()
+    base = dict(run_id="r", working_dir=tmp_path, state_dir=tmp_path, prompt="p", connections=[], env={})
+    options = runtime.options(RunSpec(**base))
+    assert json.loads(options.settings) == {"includeCoAuthoredBy": False, "attribution": {"commit": "", "pr": ""}}
+    assert options.setting_sources is None  # user, project and local all load
+    assert not (tmp_path / "claude" / "settings.json").exists()

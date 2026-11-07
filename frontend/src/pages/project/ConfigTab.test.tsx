@@ -96,4 +96,32 @@ describe("config view", () => {
     expect(screen.getByText("Nothing to show until the file reads cleanly.")).toBeInTheDocument();
     expect(screen.getByText("not read")).toBeInTheDocument();
   });
+
+  it("shows declared memory, caches with their size and service commands", () => {
+    const config = HAPPY.config!;
+    const project = {
+      ...HAPPY,
+      cache_bytes: 3 * 1024 * 1024,
+      config: {
+        ...config,
+        resources: { memory: "6g" },
+        workstation: { ...config.workstation, cache: ["~/.local/share/pnpm/store", "~/.cache/uv"] },
+        services: { minio: { image: "minio/minio", command: ["server", "/data"], memory: "512m" } },
+      },
+    };
+    wrap(<ConfigView project={project} catalog={CATALOG} />);
+    const ws = section("Workstation");
+    expect(within(ws).getByText("6g")).toBeInTheDocument();
+    expect(within(ws).getByText("~/.cache/uv")).toBeInTheDocument();
+    expect(ws).toHaveTextContent("on disk");
+    const services = section("Services");
+    expect(within(services).getByText("server /data")).toBeInTheDocument();
+    expect(within(services).getByText("512m")).toBeInTheDocument();
+  });
+
+  it("says when nothing is declared", () => {
+    wrap(<ConfigView project={HAPPY} catalog={CATALOG} />);
+    const ws = section("Workstation");
+    expect(within(ws).getByText("not declared")).toBeInTheDocument();
+  });
 });

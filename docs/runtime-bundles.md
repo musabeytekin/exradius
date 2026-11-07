@@ -94,10 +94,13 @@ and gid (`EXRADIUS_RUN_USER`, default `1000:1000`); only the names and the home 
 other users of the image disappear for the run. With the stock `maven:3-eclipse-temurin-21`
 image, `user.home` is `/home/ubuntu` without the mount and `/home/runner` with it.
 
-Before each session the Claude Code runtime writes `{"includeCoAuthoredBy": false}` to
-`settings.json` in `CLAUDE_CONFIG_DIR` (in the state mount) unless the file already exists,
-so changes the agent makes to it survive resume. The CLI loads user settings from there
-(the SDK's default `setting_sources` load all sources).
+Every session gets the settings Exradius needs (`includeCoAuthoredBy: false` and empty
+`attribution.commit` and `attribution.pr`) as the SDK's `settings` option, which the CLI
+receives as `--settings`: that outranks user, project and local settings key by key, so a
+repository's `.claude/settings.json` cannot turn the co-author line back on. All setting
+sources still load (the SDK's default), so the repository's `CLAUDE.md`, `AGENTS.md` and
+`.claude/` commands, agents and skills are there. `CLAUDE_CONFIG_DIR` (in the state mount)
+is the agent's own user settings; nothing is written there any more.
 
 ### 2.5 The api and worker services
 
