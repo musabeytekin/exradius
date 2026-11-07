@@ -182,7 +182,11 @@ class ContainerManager:
         ``runtime`` mounts that bundle read-only (runs and probes, not setup commands);
         ``service_network`` also joins the run's own network, where its services are.
         With ``paths`` the home and ``/tmp`` are the run's ``home`` and ``tmp`` directories,
-        shared by the run's setup, run and resume containers; without, both are tmpfs."""
+        shared by the run's setup, run and resume containers; without, both are tmpfs.
+
+        The user, read-only root, dropped capabilities, passwd entry and mounts below are
+        mirrored by the developer-side check in the ``exradius-project`` skill
+        (``musabeytekin/exradius-skill``, ``scripts/exradius_check.py``): change both."""
         uid, gid = self.settings.run_uid_gid
         if paths:
             prepare.ensure_user_dirs(paths, uid, gid)
