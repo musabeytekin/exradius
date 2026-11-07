@@ -131,7 +131,9 @@ two things:
 - **Reservation.** The Exradius worker admits a run only when its reservation (the
   workstation's `memory` plus every service's `memory`) fits the server's memory budget
   next to the runs and verifications in progress; until then the task waits, shown as
-  `waiting for memory` in the panel.
+  `waiting for memory` in the panel. The budget is the server's Docker memory minus 1 GiB
+  unless the admin sets another; a reservation larger than the whole budget can never
+  start, and Verify fails at its "Reserve memory" step.
 - **Limit.** It is the container's cgroup limit, swap included (`--memory` and
   `--memory-swap` equal). A container that exceeds it is killed by its own limit, not by
   the host killing a neighbour; the run fails with "exceeded its declared memory (6g)".
@@ -161,8 +163,8 @@ container with `exec`; exit 0 means ready) or `tcp` (a port that must be listeni
 the container). Without `ready`: the image's HEALTHCHECK when it has one (must report
 healthy), else ready once the container has been running for a second. Each service has
 120 seconds to become ready; one that exits or times out fails the run with its log tail.
-`command` (a list of strings, at least one; numbers become strings as in `env`, an empty
-argument is `""`) is the container's command, as compose's `command:` and `docker run
+`command` (a list of strings, at least one; quote numbers, `"6380"`, and write an empty
+argument as `""`) is the container's command, as compose's `command:` and `docker run
 <image> <args>`: it replaces the image's `CMD` and keeps its `ENTRYPOINT`. There is no
 `entrypoint` key; an image whose entrypoint must change needs a service Dockerfile.
 Secrets are not allowed in `command`; put them in the service's `env` and refer to them as
@@ -225,8 +227,8 @@ the task.
 3. Per store: create the secret store the file names and fill every required key. The
    panel accepts a pasted `.env` block for several keys at once.
 
-Then Verify runs (after waiting for memory when the file declares some): "Read config"
-(commit, errors, warnings, missing keys), "Build
+Then Verify runs: "Read config" (commit, errors, warnings, missing keys), "Reserve
+memory" (when the file declares some), "Build
 workstation" and "Build service <name>", clone each repository, "Start service <name>",
 "Setup: <command>" for each setup command, then stop the services and remove the
 directory.

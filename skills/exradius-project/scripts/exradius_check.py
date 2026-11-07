@@ -639,7 +639,7 @@ def cache_target(text):
         return None, "must start with ~/ or /"
     if ".." in path.split("/"):
         return None, "must not contain '..'"
-    path = posixpath.normpath(path)
+    path = posixpath.normpath(path.rstrip("/") or "/")
     if path.startswith("//"):
         path = "/" + path.lstrip("/")
     for base in CACHE_FORBIDDEN_UNDER:
@@ -651,10 +651,13 @@ def cache_target(text):
     return path, None
 
 
-def cache_folder(index, target):
-    """The host folder name of cache entry ``index``: ``<n>-<sanitised path>``."""
-    rel = target[len("/home/runner/"):] if target.startswith("/home/runner/") else target
-    return "%d-%s" % (index, re.sub(r"[^A-Za-z0-9._]+", "-", rel).strip("-") or "root")
+def cache_folder(index, entry):
+    """The folder of cache entry ``index`` as the worker names it under
+    ``<data_dir>/caches/<slug>/`` (``worker/caches.py`` ``sanitise``):
+    ``~/.local/share/pnpm/store`` -> ``0-local_share_pnpm_store``."""
+    text = entry[1:] if entry.startswith("~") else entry
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-")
+    return "%d-%s" % (index, name[:80] or "cache")
 
 
 def fmt_path(path):
@@ -1012,9 +1015,9 @@ def validate(raw, config_dir="", lookup=None):
             item["memory"] = memory(p + ("memory",), service["memory"]) if service.get("memory") is not None else None
             item["command"] = None
             if service.get("command") is not None:
-                # list[str] (docs/run-environment.md §6): numbers become strings as in env;
-                # empty arguments are real ones (--save "").
-                item["command"] = v.str_list(p + ("command",), service["command"], numbers=True, min_len=1)
+                # Strict list[str] (docs/run-environment.md §6): numbers are refused, empty
+                # arguments are real ones (--save "").
+                item["command"] = v.str_list(p + ("command",), service["command"], min_len=1)
             item["ready"] = None
             ready = service.get("ready")
             if ready is not None:
@@ -1147,6 +1150,8 @@ STATE_DIR = "/exradius/state"
 GIT_ENV = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*"}
 SERVICE_CAPS = ("CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE", "NET_BIND_SERVICE")
 SERVICE_READY_TIMEOUT = 120
+KILLED = 137
+"""The exit code of a container killed by its memory limit (or any SIGKILL)."""
 SERVICE_POLL_INTERVAL = 1.0
 SERVICE_RUNNING_GRACE = 1.0
 PASSWD = "root:x:0:0:root:/root:/bin/sh\nrunner:x:%d:%d::%s:/bin/bash\n" % (RUN_UID, RUN_GID, HOME_DIR)
@@ -1392,6 +1397,7 @@ class Check(object):
             self.failure = ("Docker", "the Docker daemon is not reachable", out)
             return
         self.say("      docker %s" % out.strip())
+        self.check_budget()
         self.images = {}
         self.prepare_images()
         self.step("Check workstation image", self.check_image)
@@ -1400,6 +1406,24 @@ class Check(object):
             self.step("Start service %s" % name, lambda n=name: self.start_service(n))
         for command in self.config.workstation["setup"]:
             self.step("Setup: %s" % command, lambda c=command: self.setup(c))
+
+    def check_budget(self):
+        """Exradius's default memory budget is the Docker host's memory minus 1 GiB; a run
+        that declares more fails Verify's "Reserve memory" step there."""
+        cfg = self.config
+        declared = [cfg.memory] + [s["memory"] for s in cfg.services.values()]
+        reservation = sum(memory_bytes(m) for m in declared if m)
+        if not reservation:
+            return
+        code, out = run(["docker", "info", "--format", "{{.MemTotal}}"])
+        try:
+            budget = int(out.strip()) - 1024 ** 3
+        except ValueError:
+            return
+        if reservation > budget:
+            self.say("      warning: the declared memory (%.1f GiB in all) is more than this Docker host's memory "
+                     "minus 1 GiB (%.1f GiB), Exradius's default budget: on a server this size Verify fails at "
+                     "\"Reserve memory\"" % (reservation / 1024 ** 3, budget / 1024 ** 3))
 
     def report(self):
         self.say("")
@@ -1582,11 +1606,21 @@ class Check(object):
         shared by every check of this config (on the server: <data_dir>/caches/<slug>/)."""
         mounts = []
         for index, entry in enumerate(self.config.workstation["cache"]):
-            source = os.path.join(self.cache_dir, cache_folder(index, entry["target"]))
+            source = os.path.join(self.cache_dir, cache_folder(index, entry["path"]))
             if not os.path.isdir(source):
                 os.makedirs(source)
                 os.chmod(source, 0o777)
-            mounts.append((source, entry["target"], False))
+            target = entry["target"]
+            if target.startswith(HOME_DIR + "/"):
+                # Mount points inside the home are made for the run user first, as the
+                # worker does (caches.ensure): Docker would make ~/.cache root's for ~/.cache/uv.
+                current = self.home
+                for part in target[len(HOME_DIR) + 1:].split("/"):
+                    current = os.path.join(current, part)
+                    if not os.path.exists(current):
+                        os.mkdir(current)
+                        os.chmod(current, 0o777)
+            mounts.append((source, target, False))
         return mounts
 
     def check_image(self):
@@ -1779,8 +1813,10 @@ class Check(object):
             except ValueError:
                 state = {}
             if state.get("Status") in ("exited", "dead") or (state and not state.get("Running", True)):
-                if state.get("OOMKilled") and service["memory"]:
-                    raise StepFailed("service %s exceeded its declared memory (%s)" % (name, service["memory"]),
+                if state.get("ExitCode") == KILLED and service["memory"]:
+                    # As the worker (containers.py _wait_ready): exit 137 under a declared limit.
+                    raise StepFailed("service %s (%s) exceeded its declared memory (%s): exited with code 137 "
+                                     "before it was ready" % (name, image, service["memory"]),
                                      self.service_logs(container))
                 raise StepFailed("service %s (%s) exited with code %s before it was ready"
                                  % (name, image, state.get("ExitCode")), self.service_logs(container))
@@ -1830,13 +1866,14 @@ class Check(object):
         started = time.time()
         code, out = stream(cmd, self.log, self.verbose)
         seconds = time.time() - started
-        _, oom = run(["docker", "inspect", "--format", "{{.State.OOMKilled}}", container])
         run(["docker", "rm", "-f", container])
+        if code == KILLED and self.config.memory:
+            # Verify's wording (worker/verify.py): exit 137 under a declared limit.
+            raise StepFailed("exited with 137: exceeded its declared memory (%s); raise resources.memory or "
+                             "lower the step's parallelism" % self.config.memory, out)
         if code != 0:
             hint = ""
-            if oom.strip() == "true" and self.config.memory:
-                hint = " (exceeded its declared memory (%s): raise resources.memory)" % self.config.memory
-            elif code == 137:
+            if code == KILLED:
                 hint = " (killed: usually out of memory; Docker has %s)" % docker_memory()
             elif code == 127:
                 hint = " (command not found: the workstation image lacks a tool this command runs)"
@@ -1892,7 +1929,7 @@ def cache_summary(cache_dir, entries):
     """The size of each ``workstation.cache`` folder: ``~/.cache/uv 236 MB, ...``."""
     parts = []
     for index, entry in enumerate(entries):
-        folder = os.path.join(cache_dir, cache_folder(index, entry["target"]))
+        folder = os.path.join(cache_dir, cache_folder(index, entry["path"]))
         size = 0
         if os.path.isdir(folder):
             code, out = run(["du", "-sk", folder])

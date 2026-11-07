@@ -129,10 +129,13 @@ them means what it meant before):
 - `resources.memory` and a service's `memory`: a Docker size (`6g`, `512m`) that Exradius
   reserves before starting a run and enforces as the container's limit. The skill
   estimates the workstation's peak and writes it; the check applies it as `--memory` and
-  `--memory-swap` and reports a step that went over it.
+  `--memory-swap`, reports a step that went over it with Verify's wording, and warns
+  when the total is more than the Docker host's memory minus 1 GiB (Exradius's default
+  budget).
 - `workstation.cache`: download stores kept per project across runs (pnpm, Yarn, npm, uv,
   pip, Maven, Gradle, Go, Cargo; the paths are in `references/pitfalls.md`). The skill adds
-  one per package manager it finds; the check mounts them from `.exradius-cache/`.
+  one per package manager it finds; the check mounts them from `.exradius-cache/`, in
+  folders named as on the server (`0-local_share_pnpm_store`).
 - A service's `command`: the container command, the image's entrypoint kept. The skill
   prefers it to a service Dockerfile; Plane's MinIO bucket bootstrap is now a stock image
   with a `command`.
