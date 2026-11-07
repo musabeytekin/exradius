@@ -65,6 +65,19 @@ class RequiredKeyOut(BaseModel):
     """Whether the project's store holds it."""
 
 
+Freshness = Literal["current", "stale", "failed", "running", "never"]
+
+
+class VerificationSummary(_Out):
+    """The latest verification, for the project's header and lists (setup-and-verify.md §1.2)."""
+
+    id: uuid.UUID
+    state: Literal["pending", "running", "passed", "failed"]
+    commit: str | None
+    ended_at: datetime | None
+    diagnosis: str | None
+
+
 class ProjectOut(BaseModel):
     id: uuid.UUID
     slug: str
@@ -99,6 +112,10 @@ class ProjectOut(BaseModel):
     raw: str | None
     """The file's text."""
     created_at: datetime
+    verification: VerificationSummary | None = None
+    freshness: Freshness = "never"
+    """Advice, never a gate: ``current`` passed at ``commit``, ``stale`` passed at an older
+    commit, ``failed``, ``running`` (pending or running) or ``never``."""
 
 
 class ResolvedConnection(BaseModel):
@@ -248,6 +265,8 @@ class VerificationOut(_Out):
     ended_at: datetime | None
     error: str | None
     steps: list[VerificationStep]
+    commit: str | None = None
+    diagnosis: str | None = None
 
 
 class VerificationCreated(BaseModel):

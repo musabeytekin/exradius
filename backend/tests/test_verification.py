@@ -74,8 +74,11 @@ async def test_verification_passes(verifier, sessions, containers, project, sett
     await verifier.run(vid)
 
     verification = await get(sessions, vid)
-    assert verification.state == "passed" and verification.error is None
+    assert verification.state == "passed" and verification.error is None and verification.diagnosis is None
     assert verification.started_at and verification.ended_at
+    async with sessions() as session:
+        head = (await session.get(type(project), project.id)).snapshot_commit
+    assert verification.commit == head and len(head) == 40  # recorded by "Read config"
     assert names_and_states(verification) == [
         ("Read config", "passed"),
         ("Create directory", "passed"),
@@ -110,8 +113,24 @@ async def test_failing_setup_skips_the_rest_and_cleans_up(verifier, sessions, co
         ("Remove directory", "passed"),
     ]
     assert "boom" in verification.steps[-3]["log"]
+    assert verification.diagnosis is None  # nothing recognised: the panel shows the step and its tail
+    assert verification.commit
     assert containers.setup_commands == ["npm ci"]
     assert not (settings.data_dir / "runs" / f"verify-{vid}").exists()
+
+
+async def test_failure_is_diagnosed(verifier, sessions, containers, project):
+    from exradius.worker.containers import ContainerExit
+
+    async def setup(**_):
+        return ContainerExit(127, "/bin/sh: 1: corepack: not found\n")
+
+    containers.run_setup_command = setup
+    vid = await new_verification(sessions, project.id)
+    await verifier.run(vid)
+    verification = await get(sessions, vid)
+    assert verification.state == "failed"
+    assert verification.diagnosis.startswith("The workstation image has no `corepack`")
 
 
 async def test_bad_repository_fails_at_the_mirror(verifier, sessions, containers, configured, tmp_path):
@@ -121,6 +140,7 @@ async def test_bad_repository_fails_at_the_mirror(verifier, sessions, containers
     verification = await get(sessions, vid)
     assert verification.state == "failed" and verification.error.startswith("Fetch mirror app: git clone")
     assert names_and_states(verification)[2:4] == [("Fetch mirror app", "failed"), ("Clone app (default branch)", "skipped")]
+    assert verification.diagnosis.startswith("Repository app was not found: check its `url`")
 
 
 async def test_read_config_fails_with_errors_and_missing_keys(verifier, sessions, containers, configured):
@@ -130,6 +150,8 @@ async def test_read_config_fails_with_errors_and_missing_keys(verifier, sessions
     verification = await get(sessions, vid)
     assert verification.state == "failed" and verification.error == "Read config: config error: notez: unknown key"
     assert names_and_states(verification) == [("Read config", "failed")]
+    assert verification.commit  # the file was read, with errors
+    assert verification.diagnosis == "The config has errors: notez: unknown key."
 
     commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + "secret_store: s\nenv: {A: '${secret:A}'}\n"})
     vid = await new_verification(sessions, configured["project"].id)

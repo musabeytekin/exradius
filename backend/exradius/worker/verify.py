@@ -24,6 +24,7 @@ from exradius.schemas.project_config import ProjectConfig, ServiceDef
 from exradius.worker import prepare
 from exradius.worker.builds import BuildFailed, BuildJob, build_jobs
 from exradius.worker.containers import ServiceFailed, ServiceSpec
+from exradius.worker.diagnose import diagnose_steps
 from exradius.worker.runs import VERIFY_PREFIX, RunManager
 
 log = logging.getLogger(__name__)
@@ -91,6 +92,9 @@ class ProjectVerifier:
                 remember(row, snapshot)
                 health = await assess(session, row, snapshot)
                 secrets = await store_values(session, self.runs.box, snapshot.store)
+                verification = await session.get(ProjectVerification, verification_id)
+                if verification is not None:
+                    verification.commit = snapshot.commit  # also when the file has errors
                 await session.commit()
             lines = [
                 f"commit {snapshot.commit[:12]} ({snapshot.path} on {snapshot.branch})" if snapshot.commit
@@ -168,6 +172,7 @@ class ProjectVerifier:
             state="failed" if error else "passed",
             ended_at=utcnow(),
             error=error,
+            diagnosis=diagnose_steps(steps) if error else None,
         )
         log.info("verification %s of project %s: %s", verification_id, slug, "failed" if error else "passed")
 

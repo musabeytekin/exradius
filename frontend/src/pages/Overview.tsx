@@ -8,6 +8,7 @@ import { Tooltip } from "@/components/ui/overlays";
 import { Button, Card, CardHeader, Dot, EmptyState, Mono, PageHeader, Skeleton, type Tone } from "@/components/ui/primitives";
 import { api } from "@/lib/api";
 import { buttonClass } from "@/lib/buttonStyles";
+import { FreshnessChip } from "@/components/FreshnessChip";
 import { HealthChip } from "@/components/HealthChip";
 import { projectHealth, projectName, storeNameOf } from "@/lib/projectConfig";
 import { useStoreKeyIndex } from "@/lib/useStoreKeyIndex";
@@ -193,6 +194,7 @@ function ProjectsHealth() {
               >
                 <Mono className="w-40 truncate font-medium">{p.slug}</Mono>
                 <span className="min-w-0 flex-1 truncate text-xs text-muted">{projectName(p)}</span>
+                <FreshnessChip project={p} />
                 <HealthChip info={projectHealth(p, storeKeys(storeNameOf(p)))} />
               </Link>
             </li>

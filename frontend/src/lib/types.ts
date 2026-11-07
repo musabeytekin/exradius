@@ -93,6 +93,13 @@ export interface Project {
   snapshot?: ProjectConfigSnapshot | null;
   snapshot_commit?: string | null; snapshot_read_at?: string | null;
   read_error?: string | null;
+  /** The latest verification and what it says about the commit read (setup-and-verify.md §1.2). */
+  verification?: VerificationSummary | null;
+  freshness?: Freshness | null;
+}
+export type Freshness = "current" | "stale" | "failed" | "running" | "never";
+export interface VerificationSummary {
+  id: Uuid; state: Verification["state"]; commit: string | null; ended_at: string | null; diagnosis: string | null;
 }
 export interface ProjectIn { config_url: string; config_branch?: string | null; config_path?: string | null }
 
@@ -175,6 +182,8 @@ export interface Verification {
   id: Uuid; project_id: Uuid; state: "pending" | "running" | "passed" | "failed";
   created_at: string; started_at: string | null; ended_at: string | null;
   error: string | null; steps: VerificationStep[];
+  /** The config commit "Read config" read; the diagnosis of a failure, when one was recognised. */
+  commit?: string | null; diagnosis?: string | null;
 }
 
 export type TaskState =

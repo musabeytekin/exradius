@@ -37,13 +37,35 @@ from exradius.schemas.project_config import NAME_PATTERN, SECRET_REF
 router = APIRouter(prefix="/api")
 NO_CONTENT = status.HTTP_204_NO_CONTENT
 SECRET_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,255}$")
+OPEN_VERIFICATION = ("pending", "running")
 
 
 # Projects ----------------------------------------------------------------------------
 
 
+def freshness(latest: ProjectVerification | None, commit: str | None) -> str:
+    """setup-and-verify.md §1.2."""
+    if latest is None:
+        return "never"
+    if latest.state in OPEN_VERIFICATION:
+        return "running"
+    if latest.state == "failed":
+        return "failed"
+    return "current" if commit is not None and latest.commit == commit else "stale"
+
+
+async def _latest_verification(session, project_id: uuid.UUID) -> ProjectVerification | None:
+    return await session.scalar(
+        select(ProjectVerification)
+        .where(ProjectVerification.project_id == project_id)
+        .order_by(ProjectVerification.created_at.desc())
+        .limit(1)
+    )
+
+
 async def _project_out(session, project: Project) -> s.ProjectOut:
     snapshot = cached(project) or ProjectConfigSnapshot.unreadable("the config has not been read yet")
+    latest = await _latest_verification(session, project.id)
     health = await assess(session, project, snapshot)
     config = snapshot.config
     keys = await store_keys(session, snapshot.store) or set()
@@ -77,6 +99,8 @@ async def _project_out(session, project: Project) -> s.ProjectOut:
         config=config.model_dump(mode="json") if config else None,
         raw=snapshot.raw,
         created_at=project.created_at,
+        verification=s.VerificationSummary.model_validate(latest) if latest else None,
+        freshness=freshness(latest, project.snapshot_commit),
     )
 
 
@@ -140,6 +164,7 @@ async def create_project(body: s.ProjectIn, session: DB, state: State, _: Admin)
     remember(project, snapshot)
     session.add(project)
     await session.commit()
+    await _request_verification(session, state, project.id, strict=False)
     return await _project_out(session, project)
 
 
@@ -151,9 +176,17 @@ async def get_project(project_id: uuid.UUID, session: DB, _: Admin):
 @router.post("/projects/{project_id}/reread", response_model=s.ProjectOut)
 async def reread_project(project_id: uuid.UUID, session: DB, state: State, _: Admin):
     project = await get_or_404(session, Project, project_id)
+    await _reread(session, state, project)
+    return await _project_out(session, project)
+
+
+async def _reread(session, state, project: Project) -> None:
+    """Read the config again; a new commit asks for a verification (§1.1)."""
+    before = project.snapshot_commit
     remember(project, await read_config(session, state.box, state.settings.data_dir, project))
     await session.commit()
-    return await _project_out(session, project)
+    if project.snapshot_commit is not None and project.snapshot_commit != before:
+        await _request_verification(session, state, project.id, strict=False)
 
 
 @router.patch("/projects/{project_id}", response_model=s.ProjectOut)
@@ -165,8 +198,7 @@ async def update_project(project_id: uuid.UUID, body: s.ProjectUpdate, session: 
         project.config_branch = data["config_branch"]
     if "config_path" in data:
         project.config_path = data["config_path"]
-    remember(project, await read_config(session, state.box, state.settings.data_dir, project))
-    await session.commit()
+    await _reread(session, state, project)
     return await _project_out(session, project)
 
 
@@ -384,8 +416,27 @@ async def delete_store_key(store_id: uuid.UUID, key: str, session: DB, _: Admin)
 
 @router.post("/projects/{project_id}/verify", response_model=s.VerificationCreated, status_code=202)
 async def verify_project(project_id: uuid.UUID, session: DB, state: State, _: Admin):
-    """Ask a worker to prepare the project as a run would, in a throwaway directory."""
+    """Ask a worker to prepare the project as a run would, in a throwaway directory. While
+    a verification is pending or running, that one is the answer."""
     await get_or_404(session, Project, project_id)
+    verification = await _request_verification(session, state, project_id, strict=True)
+    return s.VerificationCreated(verification_id=verification.id)
+
+
+async def _request_verification(session, state, project_id: uuid.UUID, *, strict: bool) -> ProjectVerification:
+    """The open verification of the project, or a new one handed to a worker. Without the
+    broker the new one fails at once; ``strict`` then answers 503 (the manual Verify),
+    otherwise the caller's own work stands (adding or re-reading a project)."""
+    await session.get(Project, project_id, with_for_update=True, populate_existing=True)  # one at a time
+    open_one = await session.scalar(
+        select(ProjectVerification)
+        .where(ProjectVerification.project_id == project_id, ProjectVerification.state.in_(OPEN_VERIFICATION))
+        .order_by(ProjectVerification.created_at.desc())
+        .limit(1)
+    )
+    if open_one is not None:
+        await session.commit()
+        return open_one
     verification = ProjectVerification(project_id=project_id, state="pending", steps=[])
     session.add(verification)
     await session.commit()
@@ -394,8 +445,9 @@ async def verify_project(project_id: uuid.UUID, session: DB, state: State, _: Ad
     except Exception as exc:
         verification.state, verification.error, verification.ended_at = "failed", f"broker: {exc}", utcnow()
         await session.commit()
-        raise HTTPException(503, f"could not reach the broker: {exc}") from exc
-    return s.VerificationCreated(verification_id=verification.id)
+        if strict:
+            raise HTTPException(503, f"could not reach the broker: {exc}") from exc
+    return verification
 
 
 @router.get("/projects/{project_id}/verifications", response_model=list[s.VerificationOut])

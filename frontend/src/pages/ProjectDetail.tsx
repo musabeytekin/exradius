@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
+import { FreshnessChip } from "@/components/FreshnessChip";
 import { HealthChip } from "@/components/HealthChip";
 import { Tabs, Table } from "@/components/ui/controls";
 import { StateChip } from "@/components/ui/data";
@@ -62,7 +63,7 @@ export function ProjectDetailPage() {
   }
   const health = p ? projectHealth(p, storeKeys) : null;
   const agents = agentSlugsOf(p);
-  const verifyState = latest.data?.[0]?.state;
+  const verifyState = latest.data?.[0]?.state ?? p?.verification?.state;
   const commit = p ? commitOf(p) : null;
 
   return (
@@ -81,6 +82,7 @@ export function ProjectDetailPage() {
             <>
               <Mono className="rounded bg-surface-2 px-1.5 py-0.5 text-xs text-muted">{p.slug}</Mono>
               {health && <HealthChip info={health} />}
+              <FreshnessChip project={p} />
               {p.config_url && <span className="flex min-w-0 items-center gap-1 text-xs text-subtle">
                 <Icon name="branch" size={12} />
                 <Mono className="max-w-[420px] truncate text-xs text-subtle" title={p.config_url}>{p.config_url}</Mono>

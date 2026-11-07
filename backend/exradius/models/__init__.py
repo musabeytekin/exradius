@@ -333,6 +333,10 @@ class ProjectVerification(Base):
     error: Mapped[str | None] = mapped_column(Text)
     steps: Mapped[list[Any]] = mapped_column(default=list)
     worker_id: Mapped[str | None] = mapped_column(String(64))
+    commit: Mapped[str | None] = mapped_column(String(64))
+    """The config commit "Read config" read (setup-and-verify.md §1.2)."""
+    diagnosis: Mapped[str | None] = mapped_column(Text)
+    """What went wrong, from ``worker/diagnose.py``; ``None`` when passed or unrecognised."""
 
 
 class AdminUser(Base):

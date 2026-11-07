@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
+import { FreshnessChip } from "@/components/FreshnessChip";
 import { HealthChip } from "@/components/HealthChip";
 import { Table } from "@/components/ui/controls";
 import { Dialog } from "@/components/ui/overlays";
@@ -44,6 +45,7 @@ export function ProjectsPage() {
                 <Table.Th>Project</Table.Th>
                 <Table.Th>Config repository</Table.Th>
                 <Table.Th>Commit</Table.Th>
+                <Table.Th>Verified</Table.Th>
                 <Table.Th className="text-right">Health</Table.Th>
               </tr>
             </Table.Head>
@@ -61,6 +63,7 @@ export function ProjectsPage() {
                       <span className="text-xs text-subtle">{p.config_branch ?? "remote default"}{p.config_path ? ` · ${p.config_path}` : ""}</span>
                     </Table.Td>
                     <Table.Td>{commit ? <Mono className="text-xs" title={commit}>{shortCommit(commit)}</Mono> : <span className="text-xs text-subtle">—</span>}</Table.Td>
+                    <Table.Td><FreshnessChip project={p} /></Table.Td>
                     <Table.Td className="text-right"><HealthChip info={projectHealth(p, storeKeys(storeNameOf(p)))} /></Table.Td>
                   </Table.Row>
                 );

@@ -8,11 +8,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, delete, update
 from sqlalchemy.orm import Session
 
 from exradius.api import task_routes
-from exradius.models import Event, TranscriptChunk, Worker
+from exradius.models import Event, ProjectVerification, TranscriptChunk, Worker
+from tests.conftest import commit_config, make_config_repo
 from tests.test_api import API_CONFIG, admin, client, control, make_run, setup_configuration, sync_db  # noqa: F401
 
 NOW = datetime.now(UTC)
@@ -101,27 +102,104 @@ def test_system_integration_never_returns_the_password(admin, settings):
 # Verification (API side; the worker side is in test_verification.py) ---------------------------
 
 
-def test_verify_publishes_and_tracks(admin, control, tmp_path):
+def finish(sync_db, vid: str, state: str = "passed", commit: str | None = None) -> None:
+    """What the worker does at the end of a verification."""
+    sync_db.execute(
+        update(ProjectVerification).where(ProjectVerification.id == uuid.UUID(vid))
+        .values(state=state, commit=commit, ended_at=datetime.now(UTC))
+    )
+    sync_db.commit()
+
+
+def test_adding_a_project_verifies_it(admin, control, tmp_path):
     project = setup_configuration(admin, tmp_path)["project"]
+    [vid] = control.verified
+    assert project["verification"] == {"id": vid, "state": "pending", "commit": None, "ended_at": None,
+                                       "diagnosis": None}
+    assert project["freshness"] == "running"
+
+    with_errors = setup_configuration(admin, tmp_path / "errors", API_CONFIG.replace(
+        "billing-platform", "with-errors").replace("\nenv:", "\nenvs:"))["project"]
+    assert with_errors["health"] == "config_errors" and with_errors["freshness"] == "running"
+    assert len(control.verified) == 2
+
+    remote = make_config_repo(tmp_path / "unreadable", {"README.md": "nothing here\n"})
+    assert admin.post("/api/projects", json={"config_url": str(remote)}).status_code == 422
+    assert len(control.verified) == 2
+
+
+def test_one_open_verification_per_project(admin, control, sync_db, tmp_path):
+    project = setup_configuration(admin, tmp_path)["project"]
+    [auto] = control.verified
     response = admin.post(f"/api/projects/{project['id']}/verify")
-    assert response.status_code == 202
-    vid = response.json()["verification_id"]
-    assert control.verified == [vid]
-    detail = admin.get(f"/api/projects/{project['id']}/verifications/{vid}").json()
-    assert detail["state"] == "pending" and detail["steps"] == []
-    admin.post(f"/api/projects/{project['id']}/verify")
+    assert response.status_code == 202 and response.json()["verification_id"] == auto  # the open one
+    assert control.verified == [auto]
+    detail = admin.get(f"/api/projects/{project['id']}/verifications/{auto}").json()
+    assert detail["state"] == "pending" and detail["steps"] == [] and detail["commit"] is None
+    assert detail["diagnosis"] is None
+
+    finish(sync_db, auto, "running")
+    assert admin.post(f"/api/projects/{project['id']}/verify").json()["verification_id"] == auto
+    finish(sync_db, auto, "passed", project["commit"])
+    vid = admin.post(f"/api/projects/{project['id']}/verify").json()["verification_id"]
+    assert vid != auto and control.verified == [auto, vid]
     listed = admin.get(f"/api/projects/{project['id']}/verifications", params={"limit": 1}).json()
-    assert len(listed) == 1 and listed[0]["id"] != vid  # newest first
+    assert [v["id"] for v in listed] == [vid]  # newest first
     other = setup_configuration(admin, tmp_path / "other", API_CONFIG.replace("billing-platform", "other"))["project"]
     assert admin.get(f"/api/projects/{other['id']}/verifications/{vid}").status_code == 404
 
 
-def test_verify_with_broker_down(admin, control, tmp_path):
-    project = setup_configuration(admin, tmp_path)["project"]
+def test_reread_verifies_a_new_commit_only(admin, control, sync_db, tmp_path):
+    cfg = setup_configuration(admin, tmp_path)
+    pid, first = cfg["project"]["id"], cfg["project"]["commit"]
+    [auto] = control.verified
+    finish(sync_db, auto, "passed", first)
+    assert admin.get(f"/api/projects/{pid}").json()["freshness"] == "current"
+
+    unchanged = admin.post(f"/api/projects/{pid}/reread").json()
+    assert unchanged["commit"] == first and control.verified == [auto]
+    assert unchanged["freshness"] == "current" and unchanged["verification"]["id"] == auto
+
+    second = commit_config(cfg["remote"], {"exradius.yaml": API_CONFIG + "notes: new\n"})
+    reread = admin.post(f"/api/projects/{pid}/reread").json()
+    assert reread["commit"] == second and len(control.verified) == 2
+    assert reread["freshness"] == "running" and reread["verification"]["id"] == control.verified[1]
+
+
+def test_freshness(admin, control, sync_db, tmp_path):
+    cfg = setup_configuration(admin, tmp_path)
+    pid, first = cfg["project"]["id"], cfg["project"]["commit"]
+    [auto] = control.verified
+
+    def fresh():
+        return admin.get(f"/api/projects/{pid}").json()
+
+    finish(sync_db, auto, "failed", first)
+    assert fresh()["freshness"] == "failed"
+    finish(sync_db, auto, "passed", first)
+    assert fresh()["freshness"] == "current" and fresh()["verification"]["commit"] == first
+    commit_config(cfg["remote"], {"exradius.yaml": API_CONFIG + "notes: new\n"})
+    control.healthy = False  # the new commit's verification cannot be handed over
+    reread = admin.post(f"/api/projects/{pid}/reread")
+    assert reread.status_code == 200 and reread.json()["freshness"] == "failed"
+    sync_db.execute(delete(ProjectVerification).where(ProjectVerification.state == "failed"))
+    sync_db.commit()
+    assert fresh()["freshness"] == "stale"  # passed, at an older commit
+    sync_db.execute(delete(ProjectVerification))
+    sync_db.commit()
+    assert fresh()["freshness"] == "never" and fresh()["verification"] is None
+    assert [p["freshness"] for p in admin.get("/api/projects").json()] == ["never"]
+
+
+def test_verify_with_broker_down(admin, control, sync_db, tmp_path):
     control.healthy = False
+    project = setup_configuration(admin, tmp_path)["project"]  # adding still works
+    [auto] = admin.get(f"/api/projects/{project['id']}/verifications").json()
+    assert auto["state"] == "failed" and "broker" in auto["error"]
+    assert project["freshness"] == "failed"
     assert admin.post(f"/api/projects/{project['id']}/verify").status_code == 503
-    [verification] = admin.get(f"/api/projects/{project['id']}/verifications").json()
-    assert verification["state"] == "failed" and "broker" in verification["error"]
+    latest = admin.get(f"/api/projects/{project['id']}/verifications").json()
+    assert len(latest) == 2 and latest[0]["state"] == "failed" and "broker" in latest[0]["error"]
 
 
 # The resolved agent --------------------------------------------------------------------------------

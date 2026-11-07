@@ -40,8 +40,16 @@ export function makeQueryClient() {
 export const useStatus = () => useQuery({ queryKey: qk.status, queryFn: api.system.status, refetchInterval: 15_000 });
 export const useRuntimes = () => useQuery({ queryKey: qk.runtimes, queryFn: api.system.runtimes, staleTime: Infinity });
 export const useIntegration = () => useQuery({ queryKey: qk.integration, queryFn: api.system.integration, staleTime: 60_000 });
-export const useProjects = () => useQuery({ queryKey: qk.projects, queryFn: api.projects.list });
-export const useProject = (id: string) => useQuery({ queryKey: qk.project(id), queryFn: () => api.projects.get(id), enabled: !!id });
+// A verification in progress (one starts by itself when a project is added or a new commit is read).
+const VERIFYING_POLL = 3000;
+export const useProjects = () => useQuery({
+  queryKey: qk.projects, queryFn: api.projects.list,
+  refetchInterval: (q) => (q.state.data?.some((p) => p.freshness === "running") ? VERIFYING_POLL : false),
+});
+export const useProject = (id: string) => useQuery({
+  queryKey: qk.project(id), queryFn: () => api.projects.get(id), enabled: !!id,
+  refetchInterval: (q) => (q.state.data?.freshness === "running" ? VERIFYING_POLL : false),
+});
 export const useCatalog = () => useQuery({ queryKey: qk.catalog, queryFn: api.catalog.list, staleTime: 5 * 60_000 });
 export const useStores = () => useQuery({ queryKey: qk.stores, queryFn: api.stores.list });
 export const useStoreKeys = (id: string | null | undefined) =>
