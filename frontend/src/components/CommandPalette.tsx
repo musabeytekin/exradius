@@ -4,7 +4,8 @@ import { useNavigate } from "@tanstack/react-router";
 import { Command } from "cmdk";
 import { useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
-import { qk, useAgents, useConnections, useProjects } from "@/lib/queries";
+import { projectName } from "@/lib/projectConfig";
+import { qk, useProjects, useStores } from "@/lib/queries";
 import { setTheme, useTheme } from "@/lib/theme";
 import { NAV } from "@/lib/nav";
 import { Icon, type IconName } from "./ui/icons";
@@ -34,8 +35,7 @@ function PaletteBody({ close }: { close: () => void }) {
   const { pref } = useTheme();
   const [search, setSearch] = useState("");
   const projects = useProjects();
-  const agents = useAgents();
-  const connections = useConnections();
+  const stores = useStores();
   const tasks = useQuery({ queryKey: qk.tasks({ limit: 8 }), queryFn: () => api.tasks.list({ limit: 8 }) });
 
   const go = (fn: () => void) => {
@@ -51,7 +51,7 @@ function PaletteBody({ close }: { close: () => void }) {
                 value={search}
                 onValueChange={setSearch}
                 autoFocus
-                placeholder="Jump to a page, project, agent or task…"
+                placeholder="Jump to a page, project, store or task…"
                 className="h-12 flex-1 bg-transparent text-[14px] text-fg placeholder:text-subtle focus:outline-none"
               />
               <Kbd>esc</Kbd>
@@ -60,11 +60,9 @@ function PaletteBody({ close }: { close: () => void }) {
               <Command.Empty className="px-3 py-8 text-center text-sm text-muted">Nothing matches “{search}”.</Command.Empty>
               <Command.Group heading="Actions">
                 <Item icon="send" onSelect={() => go(() => navigate({ to: "/tasks", search: { send: "1" } }))} keywords={["task", "run", "publish"]}>Send a task</Item>
-                <Item icon="plus" onSelect={() => go(() => navigate({ to: "/projects", search: { create: "1" } }))} keywords={["new"]}>Create a project</Item>
-                <Item icon="plus" onSelect={() => go(() => navigate({ to: "/agents", search: { create: "1" } }))} keywords={["new"]}>Create an agent</Item>
-                <Item icon="plus" onSelect={() => go(() => navigate({ to: "/connections", search: { create: "1" } }))} keywords={["new", "mcp"]}>Add a connection</Item>
+                <Item icon="plus" onSelect={() => go(() => navigate({ to: "/projects", search: { create: "1" } }))} keywords={["new", "config", "repository"]}>Add a project</Item>
+                <Item icon="key" onSelect={() => go(() => navigate({ to: "/stores", search: { create: "1" } }))} keywords={["new", "secret"]}>Create a store</Item>
                 <Item icon="brain" onSelect={() => go(() => navigate({ to: "/providers", search: { create: "1" } }))} keywords={["new", "model", "anthropic", "credential"]}>Add a provider</Item>
-                <Item icon="key" onSelect={() => go(() => navigate({ to: "/secrets", search: { create: "1" } }))} keywords={["new"]}>Add a global secret</Item>
                 <Item icon={pref === "dark" ? "sun" : "moon"} onSelect={() => go(() => setTheme(pref === "dark" ? "light" : "dark"))} keywords={["theme", "dark", "light"]}>
                   Switch to {pref === "dark" ? "light" : "dark"} theme
                 </Item>
@@ -88,26 +86,17 @@ function PaletteBody({ close }: { close: () => void }) {
               {!!projects.data?.length && (
                 <Command.Group heading="Projects">
                   {projects.data.map((p) => (
-                    <Item key={p.id} icon="projects" value={`project ${p.slug} ${p.name}`} hint={p.slug} onSelect={() => go(() => navigate({ to: "/projects/$projectId", params: { projectId: p.id }, search: {} }))}>
-                      {p.name}
+                    <Item key={p.id} icon="projects" value={`project ${p.slug} ${projectName(p)}`} hint={p.slug} onSelect={() => go(() => navigate({ to: "/projects/$projectId", params: { projectId: p.id }, search: {} }))}>
+                      {projectName(p)}
                     </Item>
                   ))}
                 </Command.Group>
               )}
-              {!!agents.data?.length && (
-                <Command.Group heading="Agents">
-                  {agents.data.map((a) => (
-                    <Item key={a.id} icon="agents" value={`agent ${a.slug} ${a.name}`} hint={a.slug} onSelect={() => go(() => navigate({ to: "/agents", search: { edit: a.id } }))}>
-                      {a.name}
-                    </Item>
-                  ))}
-                </Command.Group>
-              )}
-              {!!connections.data?.length && (
-                <Command.Group heading="Connections">
-                  {connections.data.map((c) => (
-                    <Item key={c.id} icon="connections" value={`connection ${c.slug} ${c.name}`} hint={c.slug} onSelect={() => go(() => navigate({ to: "/connections", search: { edit: c.id } }))}>
-                      {c.name}
+              {!!stores.data?.length && (
+                <Command.Group heading="Stores">
+                  {stores.data.map((st) => (
+                    <Item key={st.id} icon="key" value={`store ${st.name}`} onSelect={() => go(() => navigate({ to: "/stores/$storeId", params: { storeId: st.id } }))}>
+                      <span className="font-mono text-[12.5px]">{st.name}</span>
                     </Item>
                   ))}
                 </Command.Group>

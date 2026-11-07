@@ -22,25 +22,16 @@ from exradius import downloads
 from exradius.config import Settings
 from exradius.crypto import SecretBox, hash_token, new_run_token
 from exradius.db import SessionFactory
-from exradius.models import (
-    Artifact,
-    InfoRequest,
-    Project,
-    ProjectService,
-    ProjectVerification,
-    Repository,
-    Run,
-    Secret,
-    Task,
-    TranscriptChunk,
-    utcnow,
-)
-from exradius.providers import NO_PROVIDER, resolve_provider, runtime_environment, strip_credentials
-from exradius.resolve import SecretValues, load_secrets, project_environment, substitute
+from exradius.models import Artifact, InfoRequest, Project, ProjectVerification, Run, TranscriptChunk, utcnow
+from exradius.project_state import assess, read_config, remember, store_values
+from exradius.providers import provider_problem, resolve_provider, runtime_environment, strip_credentials
+from exradius.resolve import StoreValues, repo_specs, service_environment, workstation_environment
+from exradius.schemas.project_config import ProjectConfig
 from exradius.schemas.messages import ArtifactRef, InfoRequestPayload, ResultPayload
 from exradius.states import ACTIVE, TERMINAL, State, can_transition, is_terminal
 from exradius.storage import ObjectStore
 from exradius.worker import git_identity, prepare
+from exradius.worker.builds import BuildFailed, ImageBuilder, Images
 from exradius.worker.containers import ContainerExit, ContainerManager, ServiceFailed, ServiceSpec
 from exradius.worker.delivery import delivery_warnings
 from exradius.worker.lifecycle import PendingEvent, run_event, transition
@@ -55,6 +46,21 @@ VERIFY_PREFIX = "verify-"
 
 class RunCancelled(Exception):
     pass
+
+
+def agent_snapshot(config: ProjectConfig, agent: str) -> dict:
+    """What the transcript page shows about the agent a run used (``runs.agent_snapshot``)."""
+    definition = config.agents[agent]
+    name, email = config.identity(agent)
+    return {
+        "slug": agent,
+        "name": config.agent_name(agent),
+        "model": definition.model,
+        "provider": definition.provider,
+        "runtime": definition.runtime,
+        "identity": {"name": name, "email": email},
+        "connections": list(definition.connections),
+    }
 
 
 class RunManager:
@@ -72,6 +78,7 @@ class RunManager:
         self.containers = containers
         self.emit = emit
         self.box = SecretBox(settings.secret_key)
+        self.builder = ImageBuilder(settings, sessions, containers)
         self.worker_id: str | None = None
         """Stamped on runs this worker drives through preparing/running/resuming, so a
         restarting worker can tell its own dead runs from a live worker's."""
@@ -128,14 +135,17 @@ class RunManager:
 
     async def _prepare(self, run: Run) -> None:
         task = run.task
+        config, commit = await self.read_run_config(run)
+        images = await self._images(task.project, commit, config)
         async with self.sessions() as session:
-            repo_specs = await self.repo_specs(session, task.project_id)
-            env = await self._project_env(session, task.project_id)
-            services = await self.service_specs(session, task.project_id)
+            secrets = await store_values(session, self.box, config.secret_store)
+        repos = repo_specs(config, secrets)
+        env = workstation_environment(config, secrets)
+        services = self.service_specs(config, images, secrets)
 
         paths = await asyncio.to_thread(prepare.create_run_directory, self.settings.data_dir, str(run.id))
         await asyncio.to_thread(
-            prepare.checkout_repositories, self.settings.data_dir, task.project.slug, paths, repo_specs
+            prepare.checkout_repositories, self.settings.data_dir, task.project.slug, paths, repos
         )
         files = [(a.name, await self._fetch(a.object_key, a.source_url)) for a in task.attachments]
         await asyncio.to_thread(prepare.write_attachments, paths.attachments, files)
@@ -143,12 +153,12 @@ class RunManager:
 
         network = await self.start_services(str(run.id), services) if services else None
 
-        image = task.project.image or self.settings.project_default_image
-        for command in task.project.setup_commands or []:
+        for command in config.workstation.setup:
             if await self._state(run.id) != State.PREPARING:
                 raise RunCancelled("cancelled during setup")
             result = await self.containers.run_setup_command(
-                image=image, run_id=str(run.id), paths=paths, env=env, command=command, service_network=network
+                image=images.workstation, run_id=str(run.id), paths=paths, env=env, command=command,
+                service_network=network,
             )
             if result.exit_code != 0:
                 tail = result.logs[-2000:].strip()
@@ -156,28 +166,56 @@ class RunManager:
                     f"setup command {command!r} exited with {result.exit_code}:\n{tail}"
                 )
 
-    async def service_specs(
-        self, session, project_id: uuid.UUID, secrets: SecretValues | None = None
-    ) -> list[ServiceSpec]:
-        """The project's services with secret references in their env resolved now."""
-        rows = (
-            await session.scalars(
-                select(ProjectService)
-                .where(ProjectService.project_id == project_id)
-                .order_by(ProjectService.position, ProjectService.name)
-            )
-        ).all()
-        if not rows:
-            return []
-        secrets = secrets or await load_secrets(session, self.box, project_id)
+    async def read_run_config(self, run: Run) -> tuple[ProjectConfig, str]:
+        """Read the project's config afresh (config-repo.md §9) and record what the run
+        uses: the commit, the parsed config and the agent. A config that cannot run, or
+        that no longer defines the task's agent, fails the run with the reason."""
+        task = run.task
+        async with self.sessions() as session:
+            project = await session.get(Project, task.project_id)
+            assert project is not None
+            snapshot = await read_config(session, self.box, self.settings.data_dir, project)
+            remember(project, snapshot)
+            health = await assess(session, project, snapshot)
+            await session.commit()
+        if health.reason is not None:
+            raise prepare.PreparationError(health.reason)
+        config = snapshot.config
+        assert config is not None and snapshot.commit is not None
+        if task.agent not in config.agents:
+            raise prepare.PreparationError(f"agent {task.agent!r} is no longer defined in project {project.slug!r}")
+        async with self.sessions() as session:
+            row = await self._lock(session, run.id)
+            assert row is not None
+            row.config_commit = snapshot.commit
+            row.config = config.model_dump(mode="json")
+            row.agent_snapshot = agent_snapshot(config, task.agent)
+            await session.commit()
+        return config, snapshot.commit
+
+    async def _images(self, project: Project, commit: str, config: ProjectConfig) -> Images:
+        try:
+            return await self.builder.images(project.id, project.slug, commit, config)
+        except BuildFailed as exc:
+            raise prepare.PreparationError(str(exc)) from exc
+
+    async def _run_config(self, run_id: uuid.UUID) -> tuple[Run, ProjectConfig]:
+        async with self.sessions() as session:
+            run = await session.get(Run, run_id)
+            assert run is not None and run.config is not None
+            return run, ProjectConfig.model_validate(run.config, strict=False)
+
+    @staticmethod
+    def service_specs(config: ProjectConfig, images: Images, secrets: StoreValues) -> list[ServiceSpec]:
+        """The config's services with their images and secrets resolved now."""
         return [
             ServiceSpec(
-                name=row.name,
-                image=row.image,
-                env={k: str(substitute(str(v), secrets)) for k, v in (row.env or {}).items()},
-                ready=row.ready,
+                name=name,
+                image=images.services[name],
+                env=service_environment(service, secrets),
+                ready=service.ready.model_dump(exclude_none=True) if service.ready else None,
             )
-            for row in rows
+            for name, service in config.services.items()
         ]
 
     async def start_services(self, label: str, services: list[ServiceSpec]) -> str:
@@ -190,21 +228,6 @@ class RunManager:
             except ServiceFailed as exc:
                 raise prepare.PreparationError(str(exc)) from exc
         return network
-
-    async def repo_specs(self, session, project_id: uuid.UUID) -> list[prepare.RepoSpec]:
-        repos = (
-            await session.scalars(
-                select(Repository).where(Repository.project_id == project_id).order_by(Repository.name)
-            )
-        ).all()
-        specs = []
-        for repo in repos:
-            auth = None
-            if repo.auth_secret_id:
-                secret = await session.get(Secret, repo.auth_secret_id)
-                auth = self.box.decrypt(secret.value_encrypted) if secret else None
-            specs.append(prepare.RepoSpec(repo.name, repo.url, repo.branch, auth, repo.push_allowed))
-        return specs
 
     async def _hand_over(self, paths: prepare.RunPaths) -> None:
         uid, gid = self.settings.run_uid_gid
@@ -221,37 +244,32 @@ class RunManager:
             response.raise_for_status()
             return response.content
 
-    async def _project_env(self, session, project_id: uuid.UUID) -> dict[str, str]:
-        secrets = await load_secrets(session, self.box, project_id)
-        return await project_environment(session, project_id, secrets)
-
     # -- running ------------------------------------------------------------------------
 
     async def _start_container(self, run_id: uuid.UUID, from_state: State) -> None:
         token = new_run_token()
+        run, config = await self._run_config(run_id)
+        task = run.task
+        agent = config.agents[task.agent]
+        images = await self._images(task.project, run.config_commit, config)
         async with self.sessions() as session:
             run = await self._lock(session, run_id)
             if run is None or run.state != from_state:
                 raise RunCancelled(f"run is {run.state if run else 'gone'}")
-            task = run.task
-            provider = await resolve_provider(session, task.agent)
+            provider = await resolve_provider(session, agent.provider)
             if provider is None:
-                raise prepare.PreparationError(NO_PROVIDER)
-            runtime = task.agent.runtime
+                raise prepare.PreparationError(provider_problem(agent.provider))
+            secrets = await store_values(session, self.box, config.secret_store)
             # Only this provider's variables reach the container, decrypted now.
-            env = strip_credentials(runtime, await self._project_env(session, task.project_id))
-            env.update(runtime_environment(runtime, self.box, provider))
-            identity = git_identity.Identity(
-                name=task.agent.identity_name or task.agent.name,
-                email=task.agent.identity_email,
-                agent=task.agent.slug,
-                task_id=task.id,
-            )
-            repos = await self.repo_specs(session, task.project_id)
-            services = await self.service_specs(session, task.project_id) if from_state == State.RESUMING else []
+            env = strip_credentials(agent.runtime, workstation_environment(config, secrets))
+            env.update(runtime_environment(agent.runtime, self.box, provider))
+            name, email = config.identity(task.agent)
+            identity = git_identity.Identity(name=name, email=email, agent=task.agent, task_id=task.id)
+            repos = repo_specs(config, secrets)
+            services = self.service_specs(config, images, secrets) if from_state == State.RESUMING else []
             run.token_hash = hash_token(token)
-            image = task.project.image or self.settings.project_default_image
             await session.commit()
+        runtime = agent.runtime
 
         # Services stay up while a run waits; a resume restarts any that are gone.
         if services:
@@ -277,7 +295,7 @@ class RunManager:
         )
         runtime_mount = await self.containers.ensure_runtime(runtime)
         container_id = await self.containers.start_runner(
-            image=image,
+            image=images.workstation,
             run_id=str(run_id),
             paths=self.paths(run_id),
             env=env,
@@ -507,24 +525,17 @@ class RunManager:
         paths = self.paths(run_id)
         try:
             async with self.sessions() as session:
-                row = (
-                    await session.execute(
-                        select(Run.ended_at, Project.image)
-                        .join(Task, Task.id == Run.task_id)
-                        .join(Project, Project.id == Task.project_id)
-                        .where(Run.id == run_id)
-                    )
-                ).first()
-            if row is None or row.ended_at is not None:
+                run = await session.get(Run, run_id)
+            if run is None or run.ended_at is not None or run.config is None:
                 return []
             has_clones = await asyncio.to_thread(
                 lambda: paths.project.is_dir() and any((p / ".git").exists() for p in paths.project.iterdir())
             )
             if not has_clones:
                 return []
-            result = await self.containers.inspect_clones(
-                image=row.image or self.settings.project_default_image, run_id=str(run_id), paths=paths
-            )
+            config = ProjectConfig.model_validate(run.config, strict=False)
+            images = await self._images(run.task.project, run.config_commit, config)
+            result = await self.containers.inspect_clones(image=images.workstation, run_id=str(run_id), paths=paths)
             warnings = delivery_warnings(result.logs)
             if result.exit_code != 0 and not warnings:
                 log.warning("delivery check of run %s exited with %s: %s", run_id, result.exit_code, result.logs[-500:])

@@ -1,123 +1,106 @@
-"""Resolve configuration into what a run needs: connections, secrets and environment.
+"""Resolve a project's config into what a run needs (docs/config-repo.md §5, §7).
 
-Connection ``env`` and ``headers`` values may reference secrets by name with
-``${secret:NAME}``. A reference resolves to the project's secret ``NAME`` if one exists,
-otherwise to the global secret ``NAME``. ``project_agents.secret_overrides`` maps a
-referenced name to another secret name for that agent on that project, and
-``project_agents.connection_overrides`` maps a connection slug to fields that replace
-(``command``, ``args``, ``url``) or extend (``env``, ``headers``) the connection.
+Every ``${secret:NAME}`` in the config resolves from the secret store the file names.
+Values are decrypted only here, at container start (worker) or for the run spec (API);
+the views for the panel show references as ``$NAME`` placeholders instead.
 """
 
 from __future__ import annotations
 
 import re
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from exradius.schemas.project_config import SECRET_REF, ProjectConfig, ServiceDef
+from exradius.worker.prepare import RepoSpec
 
-from exradius.crypto import SecretBox
-from exradius.models import Agent, Connection, EnvVar, ProjectAgent, Secret
-
-SECRET_REF = re.compile(r"\$\{secret:([A-Za-z0-9_.\-]+)\}")
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class MissingSecret(Exception):
-    def __init__(self, name: str):
-        super().__init__(f"secret {name!r} is referenced but not defined")
+    def __init__(self, name: str, store: str | None):
+        where = f"in store {store}" if store else "(the config names no secret store)"
+        super().__init__(f"missing secret {name} {where}")
         self.name = name
+        self.store = store
 
 
 @dataclass
-class SecretValues:
-    project: dict[str, str] = field(default_factory=dict)
-    global_: dict[str, str] = field(default_factory=dict)
-    overrides: dict[str, str] = field(default_factory=dict)
+class StoreValues:
+    store: str | None
+    values: dict[str, str] = field(default_factory=dict)
 
     def lookup(self, name: str) -> str:
-        name = self.overrides.get(name, name)
-        if name in self.project:
-            return self.project[name]
-        if name in self.global_:
-            return self.global_[name]
-        raise MissingSecret(name)
+        if name not in self.values:
+            raise MissingSecret(name, self.store)
+        return self.values[name]
 
 
-def substitute(value: Any, secrets: SecretValues) -> Any:
-    if not isinstance(value, str):
-        return value
+def substitute(value: str, secrets: StoreValues) -> str:
     return SECRET_REF.sub(lambda m: secrets.lookup(m.group(1)), value)
 
 
-async def load_secrets(
-    session: AsyncSession, box: SecretBox, project_id: uuid.UUID | None
-) -> SecretValues:
-    rows = (
-        await session.scalars(
-            select(Secret).where((Secret.project_id == project_id) | (Secret.project_id.is_(None)))
-        )
-    ).all()
-    values = SecretValues()
-    for row in rows:
-        target = values.global_ if row.project_id is None else values.project
-        target[row.key] = box.decrypt(row.value_encrypted)
-    return values
+def placeholder(value: str) -> str:
+    """A value as the panel and the agent may see it: each secret as ``$NAME``."""
+    return SECRET_REF.sub(lambda m: f"${m.group(1)}", value)
 
 
-def merged_connection(connection: Connection, override: dict[str, Any] | None) -> dict[str, Any]:
-    """A connection with a project override applied; secret references left as written."""
-    override = override or {}
+def connection_spec(definition: dict[str, Any], secrets: StoreValues) -> dict[str, Any]:
+    """The runner-facing description of one MCP server, with secrets substituted."""
     return {
-        "name": connection.slug,
-        "transport": connection.transport,
-        "command": override.get("command", connection.command),
-        "args": list(override.get("args", connection.args or [])),
-        "url": override.get("url", connection.url),
-        "env": {k: str(v) for k, v in {**(connection.env or {}), **(override.get("env") or {})}.items()},
-        "headers": {
-            k: str(v) for k, v in {**(connection.headers or {}), **(override.get("headers") or {})}.items()
-        },
+        **definition,
+        "args": [substitute(a, secrets) for a in definition["args"]],
+        "env": {k: substitute(v, secrets) for k, v in definition["env"].items()},
+        "headers": {k: substitute(v, secrets) for k, v in definition["headers"].items()},
     }
 
 
-def secret_references(spec: dict[str, Any]) -> list[str]:
-    """Secret names referenced in a connection's env and header values, in order."""
-    names: list[str] = []
-    for value in [*spec["env"].values(), *spec["headers"].values()]:
-        for name in SECRET_REF.findall(value):
-            if name not in names:
-                names.append(name)
-    return names
+def connection_view(definition: dict[str, Any]) -> dict[str, Any]:
+    """The same with ``$NAME`` placeholders, for the resolved agent view."""
+    return {
+        **definition,
+        "args": [placeholder(a) for a in definition["args"]],
+        "env": {k: placeholder(v) for k, v in definition["env"].items()},
+        "headers": {k: placeholder(v) for k, v in definition["headers"].items()},
+    }
 
 
-def connection_spec(
-    connection: Connection, override: dict[str, Any] | None, secrets: SecretValues
-) -> dict[str, Any]:
-    """The runner-facing description of one MCP server, with secrets substituted."""
-    spec = merged_connection(connection, override)
-    spec["env"] = {k: str(substitute(v, secrets)) for k, v in spec["env"].items()}
-    spec["headers"] = {k: str(substitute(v, secrets)) for k, v in spec["headers"].items()}
-    return spec
+def agent_connection_specs(config: ProjectConfig, agent: str, secrets: StoreValues) -> list[dict[str, Any]]:
+    return [connection_spec(config.connection_definition(name), secrets) for name in config.agents[agent].connections]
 
 
-def agent_connection_specs(
-    agent: Agent, project_agent: ProjectAgent | None, secrets: SecretValues
-) -> list[dict[str, Any]]:
-    overrides = (project_agent.connection_overrides if project_agent else None) or {}
-    secrets.overrides = dict((project_agent.secret_overrides if project_agent else None) or {})
-    return [connection_spec(c, overrides.get(c.slug), secrets) for c in agent.connections]
+def exported_secrets(config: ProjectConfig) -> list[str]:
+    """Secrets the workstation carries under their own names: those its services' settings
+    use, so the environment section can show them as ``$NAME``. Repository credentials
+    and connection values are used only by reference."""
+    names: set[str] = set()
+    for service in config.services.values():
+        for value in service.env.values():
+            names.update(n for n in SECRET_REF.findall(value) if ENV_NAME.match(n))
+    return sorted(names)
 
 
-async def project_environment(
-    session: AsyncSession, project_id: uuid.UUID, secrets: SecretValues
-) -> dict[str, str]:
-    """The project's variables and the project's secrets, for the run container.
-
-    Variable values may reference secrets with ``${secret:NAME}`` (project, then global),
-    like connection values; a missing one raises ``MissingSecret``."""
-    env_vars = (await session.scalars(select(EnvVar).where(EnvVar.project_id == project_id))).all()
-    env = {v.key: str(substitute(v.value, secrets)) for v in env_vars}
-    env.update(secrets.project)
+def workstation_environment(config: ProjectConfig, secrets: StoreValues) -> dict[str, str]:
+    """The project's ``env`` with secrets substituted, plus ``exported_secrets``; for setup
+    commands and the run container alike."""
+    env = {name: secrets.lookup(name) for name in exported_secrets(config)}
+    env.update({k: substitute(v, secrets) for k, v in config.env.items()})
     return env
+
+
+def service_environment(service: ServiceDef, secrets: StoreValues) -> dict[str, str]:
+    return {k: substitute(v, secrets) for k, v in service.env.items()}
+
+
+def repo_specs(config: ProjectConfig, secrets: StoreValues | None) -> list[RepoSpec]:
+    """The repositories with their credentials (``secrets=None`` leaves them out)."""
+    return [
+        RepoSpec(
+            name=repo.name,
+            url=repo.url,
+            branch=repo.branch,
+            auth=substitute(repo.credential, secrets) if repo.credential and secrets is not None else None,
+            push_allowed=repo.push,
+        )
+        for repo in config.repositories
+    ]

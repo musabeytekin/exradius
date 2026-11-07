@@ -11,15 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 from exradius.schemas.messages import AttachmentIn
 
 Slug = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9._-]*$", max_length=100)]
-EnvKey = Annotated[str, StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$", max_length=255)]
-IdentityName = Annotated[str, StringConstraints(pattern=r"^[^<>\x00-\x1f]+$", min_length=1, max_length=255, strip_whitespace=True)]
-"""A git author name: no angle brackets or control characters (git rejects them)."""
-IdentityEmail = Annotated[str, StringConstraints(pattern=r"^[^@<>\s]+@[^@<>\s]+$", max_length=255, strip_whitespace=True)]
-FolderName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$", max_length=255)]
-ServiceName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]*$", max_length=63)]
-"""Host name of a service on the run network."""
 ModelId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]*$", max_length=255, strip_whitespace=True)]
-Port = Annotated[int, Field(ge=1, le=65535)]
 
 
 class _Out(BaseModel):
@@ -41,282 +33,198 @@ class PasswordChange(BaseModel):
     new_password: str = Field(min_length=8)
 
 
-# Projects ----------------------------------------------------------------------------
+# Projects (docs/config-repo.md §11) ------------------------------------------------------
+
+
+def _optional_text(value):
+    """Blank strings mean "not set" (the remote's default branch, the default file)."""
+    return value.strip() or None if isinstance(value, str) else value
 
 
 class ProjectIn(BaseModel):
-    slug: Slug
-    name: str
-    image: str | None = None
-    setup_commands: list[str] = Field(default_factory=list)
-    notes: str = ""
-    """What a new engineer would be told on the first day; shown to agents verbatim."""
+    config_url: str = Field(min_length=1)
+    config_branch: str | None = None
+    """``null``: the remote's default branch."""
+    config_path: str | None = None
+    """``null``: ``exradius.yaml``, then ``.exradius/exradius.yaml``."""
+
+    _blank = field_validator("config_branch", "config_path", mode="before")(_optional_text)
 
 
 class ProjectUpdate(BaseModel):
-    slug: Slug | None = None
-    name: str | None = None
-    image: str | None = None
-    setup_commands: list[str] | None = None
-    notes: str | None = None
-    """``null`` clears the notes."""
+    config_branch: str | None = None
+    config_path: str | None = None
+    """Either set to ``null`` returns to the default."""
+
+    _blank = field_validator("config_branch", "config_path", mode="before")(_optional_text)
 
 
-class ProjectOut(_Out):
+class RequiredKeyOut(BaseModel):
+    name: str
+    present: bool
+    """Whether the project's store holds it."""
+
+
+class ProjectOut(BaseModel):
     id: uuid.UUID
     slug: str
     name: str
-    image: str | None
-    setup_commands: list[str]
-    notes: str
+    """``project.name`` of the file (the slug when unreadable)."""
+    description: str = ""
+    config_url: str
+    config_branch: str | None
+    config_path: str | None
+    commit: str | None
+    """The commit of the latest read; ``null`` when it could not be read."""
+    read_at: datetime | None
+    branch: str | None
+    """The branch read (``config_branch`` or the remote's default)."""
+    path: str | None
+    """The file read."""
+    health: Literal["ok", "config_errors", "missing_secrets"]
+    runnable: bool
+    reason: str | None
+    """Why tasks are refused, as the rejection says it."""
+    errors: list[str]
+    warnings: list[str]
+    store: str | None
+    store_id: uuid.UUID | None
+    store_exists: bool
+    required_keys: list[RequiredKeyOut]
+    missing_keys: list[str]
+    agents: list[str]
+    """Agent slugs of the config, for the send form."""
+    config: dict[str, Any] | None
+    """The parsed file (secret references as written), for read-only rendering."""
+    raw: str | None
+    """The file's text."""
     created_at: datetime
 
 
-class TcpReady(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    tcp: Port
-    """Ready once something listens on this port inside the service container."""
-
-
-class CommandReady(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    command: list[Annotated[str, StringConstraints(min_length=1)]] = Field(min_length=1)
-    """Ready once this command, run in the service container, exits with 0."""
-
-
-ServiceReady = TcpReady | CommandReady
-"""``null`` waits for the image's HEALTHCHECK when it has one, else for "running"."""
-
-
-def _unique_ports(ports: list[int] | None) -> list[int] | None:
-    if ports is not None and len(set(ports)) != len(ports):
-        raise ValueError("ports must be unique")
-    return ports
-
-
-class ProjectServiceIn(BaseModel):
-    name: ServiceName
-    image: str = Field(min_length=1, max_length=255)
-    env: dict[EnvKey, str] = Field(default_factory=dict)
-    """Values may reference secrets with ``${secret:NAME}``."""
-    ports: list[Port] = Field(default_factory=list)
-    ready: ServiceReady | None = None
-    position: int | None = None
-    """Defaults to after the last service."""
-
-    @model_validator(mode="after")
-    def _check(self) -> ProjectServiceIn:
-        _unique_ports(self.ports)
-        return self
-
-
-class ProjectServiceUpdate(BaseModel):
-    name: ServiceName | None = None
-    image: str | None = Field(default=None, min_length=1, max_length=255)
-    env: dict[EnvKey, str] | None = None
-    ports: list[Port] | None = None
-    ready: ServiceReady | None = None
-    """Sending ``null`` resets to the image's HEALTHCHECK / running."""
-    position: int | None = None
-
-    @model_validator(mode="after")
-    def _check(self) -> ProjectServiceUpdate:
-        _unique_ports(self.ports)
-        return self
-
-
-class ProjectServiceOut(_Out):
-    id: uuid.UUID
-    project_id: uuid.UUID
-    name: str
-    image: str
-    env: dict[str, str]
-    ports: list[int]
-    ready: dict[str, Any] | None
-    position: int
-
-
-class ServiceOrder(BaseModel):
-    ids: list[uuid.UUID]
-    """Every service id of the project, in the new order."""
-
-
-class RepositoryIn(BaseModel):
-    name: FolderName
-    url: str
-    branch: str = "main"
-    auth_secret_id: uuid.UUID | None = None
-    push_allowed: bool = False
-    """Runs may push with the auth secret; needs ``auth_secret_id``."""
-
-
-class RepositoryUpdate(BaseModel):
-    name: FolderName | None = None
-    url: str | None = None
-    branch: str | None = None
-    auth_secret_id: uuid.UUID | None = None
-    push_allowed: bool | None = None
-
-
-class RepositoryCheckOut(BaseModel):
-    ok: bool
-    branches: list[str] = Field(default_factory=list)
-    default_branch: str | None = None
-    error: str | None = None
-    checked_at: datetime | None = None
-
-
-class RepositoryOut(_Out):
-    id: uuid.UUID
-    project_id: uuid.UUID
-    name: str
-    url: str
-    branch: str
-    auth_secret_id: uuid.UUID | None
-    push_allowed: bool
-    last_check: RepositoryCheckOut | None = None
-
-
-class EnvVarIn(BaseModel):
-    key: EnvKey
-    value: str
-
-
-class EnvVarUpdate(BaseModel):
-    key: EnvKey | None = None
-    value: str | None = None
-
-
-class EnvVarOut(_Out):
-    id: uuid.UUID
-    project_id: uuid.UUID
-    key: str
-    value: str
-
-
-# Secrets are write-only: the value is accepted but never returned.
-
-
-class SecretIn(BaseModel):
-    key: EnvKey
-    value: str
-
-
-class SecretUpdate(BaseModel):
-    value: str
-
-
-class SecretOut(_Out):
-    id: uuid.UUID
-    project_id: uuid.UUID | None
-    key: str
-
-
-# Connections and agents ----------------------------------------------------------------
-
-
-class ConnectionIn(BaseModel):
-    slug: Slug
-    name: str
-    transport: Literal["stdio", "http"]
-    command: str | None = None
-    args: list[str] = Field(default_factory=list)
-    url: str | None = None
-    env: dict[str, str] = Field(default_factory=dict)
-    headers: dict[str, str] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def _transport_fields(self) -> ConnectionIn:
-        if self.transport == "stdio" and not self.command:
-            raise ValueError("a stdio connection needs a command")
-        if self.transport == "http" and not self.url:
-            raise ValueError("an http connection needs a url")
-        if self.slug == "exradius":
-            raise ValueError("'exradius' is reserved for the built-in connection")
-        return self
-
-
-class ConnectionUpdate(BaseModel):
-    slug: Slug | None = None
-    name: str | None = None
-    transport: Literal["stdio", "http"] | None = None
-    command: str | None = None
-    args: list[str] | None = None
-    url: str | None = None
-    env: dict[str, str] | None = None
-    headers: dict[str, str] | None = None
-
-
-class ToolInfo(BaseModel):
-    name: str
-    description: str = ""
-
-
-class ConnectionLastTest(BaseModel):
-    ok: bool
-    tested_at: datetime
-    tools: list[ToolInfo] = Field(default_factory=list)
-    error: str | None = None
-
-
-class ConnectionOut(_Out):
-    id: uuid.UUID
-    slug: str
-    name: str
-    transport: str
-    command: str | None
-    args: list[str]
-    url: str | None
-    env: dict[str, str]
-    headers: dict[str, str]
-    last_test: ConnectionLastTest | None = None
-    notice: str = (
-        "Connections that reach production systems should use read-only credentials."
-    )
-
-
-class ConnectionTestOut(BaseModel):
-    ok: bool
-    tools: list[dict[str, Any]] = Field(default_factory=list)
-    error: str | None = None
-
-
-class SecretReference(BaseModel):
-    name: str
-    """As written in ``${secret:NAME}``."""
-    resolves_to: str
-    """The secret name looked up after the attachment's secret overrides."""
-    scope: Literal["project", "global"] | None
-    """Where it was found; ``None`` when it is unresolved."""
-
-
 class ResolvedConnection(BaseModel):
-    slug: str
     name: str
-    transport: str
+    catalog: str | None
+    transport: Literal["stdio", "http"]
     command: str | None
     args: list[str]
     url: str | None
     env: dict[str, str]
     headers: dict[str, str]
-    overridden: bool
-    references: list[SecretReference]
-    unresolved: list[str]
+    """Values with each secret as ``$NAME``."""
+    secrets: list[str]
+    """Secret names the connection uses."""
+
+
+class ResolvedProvider(BaseModel):
+    id: uuid.UUID
+    slug: str
+    name: str
+    kind: str
+    auth_method: str
+
+
+class IdentityOut(BaseModel):
+    name: str
+    email: str
 
 
 class ResolvedAgentOut(BaseModel):
     project_id: uuid.UUID
-    agent_id: uuid.UUID
-    secret_overrides: dict[str, Any]
+    commit: str | None
+    agent: str
+    name: str
+    role: str
+    model: str | None
+    """``null``: the runtime's default."""
+    runtime: str
+    provider: str | None
+    """As the config names it; ``null`` is the default provider."""
+    resolved_provider: ResolvedProvider | None
+    """The provider runs would use now; ``null`` with ``provider_error``."""
+    provider_error: str | None
+    identity: IdentityOut
     connections: list[ResolvedConnection]
-    model: str | None = None
-    """The agent's model; ``null`` is the runtime's default."""
-    environment_text: str = ""
-    """The "# Your environment" section as the worker would build it now."""
-    image: str = ""
-    """The image runs start from (the project's, or the default)."""
+    image: str
+    """The workstation: its image name or ``built from <dockerfile>``."""
+    environment_text: str
+    """The "# Your environment" section as a run of this config gets it."""
+
+
+class CatalogConfigKeyOut(BaseModel):
+    key: str
+    label: str
+    required: bool
+    target: Literal["env", "header", "arg"]
+    name: str | None
+    """The environment variable or header it sets."""
+    format: str
+    default: str | None
+
+
+class CatalogEntryOut(BaseModel):
+    key: str
+    name: str
+    description: str
+    transport: Literal["stdio", "http"]
+    command: str | None
+    args: list[str]
+    url: str | None
+    requires: str | None
+    docs: str | None
+    config: list[CatalogConfigKeyOut]
+
+
+# Config repository access (§6) and secret stores (§7); values are write-only ------------
+
+StoreName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]*$", max_length=63)]
+Host = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9.-]+(:[0-9]+)?$", max_length=255, to_lower=True)]
+
+
+class GitCredentialIn(BaseModel):
+    host: Host
+    """``github.com``; config repositories on this host are read with it."""
+    kind: Literal["token", "basic"]
+    value: str = Field(min_length=1)
+    """A token, or ``user:password`` for ``basic``."""
+
+    @model_validator(mode="after")
+    def _basic(self) -> GitCredentialIn:
+        if self.kind == "basic" and ":" not in self.value:
+            raise ValueError("a basic credential is user:password")
+        return self
+
+
+class GitCredentialOut(_Out):
+    id: uuid.UUID
+    host: str
+    kind: str
+    created_at: datetime
+
+
+class StoreIn(BaseModel):
+    name: StoreName
+
+
+class StoreOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    kind: str
+    created_at: datetime
+    keys: list[str]
+    used_by: list[str]
+    """Slugs of the projects whose config names this store."""
+
+
+class StoreKeyOut(BaseModel):
+    key: str
+    updated_at: datetime
+
+
+class StoreValueIn(BaseModel):
+    value: str = Field(min_length=1)
+
+
+# Verification ------------------------------------------------------------------------------
 
 
 class VerificationStep(BaseModel):
@@ -340,55 +248,6 @@ class VerificationOut(_Out):
 
 class VerificationCreated(BaseModel):
     verification_id: uuid.UUID
-
-
-class AgentIn(BaseModel):
-    slug: Slug
-    name: str
-    prompt: str = ""
-    runtime: Literal["claude_code"] = "claude_code"
-    connection_ids: list[uuid.UUID] = Field(default_factory=list)
-    provider_id: uuid.UUID | None = None
-    """``None`` uses the default provider."""
-    identity_name: IdentityName | None = None
-    """Git author/committer name in runs; defaults to ``name``."""
-    identity_email: IdentityEmail
-    model: ModelId | None = None
-    """``None`` uses the runtime's default model."""
-
-    @field_validator("model", mode="before")
-    @classmethod
-    def _blank_model(cls, value):
-        return None if isinstance(value, str) and not value.strip() else value
-
-
-class AgentUpdate(BaseModel):
-    slug: Slug | None = None
-    name: str | None = None
-    prompt: str | None = None
-    runtime: Literal["claude_code"] | None = None
-    connection_ids: list[uuid.UUID] | None = None
-    provider_id: uuid.UUID | None = None
-    identity_name: IdentityName | None = None
-    identity_email: IdentityEmail | None = None
-    model: ModelId | None = None
-    """``null`` returns to the runtime's default model."""
-
-    _blank_model = field_validator("model", mode="before")(AgentIn._blank_model.__func__)
-
-
-class AgentOut(_Out):
-    id: uuid.UUID
-    slug: str
-    name: str
-    prompt: str
-    runtime: str
-    created_at: datetime
-    connection_ids: list[uuid.UUID]
-    provider_id: uuid.UUID | None
-    identity_name: str
-    identity_email: str
-    model: str | None = None
 
 
 # Providers (docs/providers.md) -----------------------------------------------------------
@@ -473,24 +332,6 @@ class ProviderTestOut(_Out):
     model: str | None = None
 
 
-class ProjectAgentIn(BaseModel):
-    agent_id: uuid.UUID
-    connection_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    secret_overrides: dict[str, str] = Field(default_factory=dict)
-
-
-class ProjectAgentUpdate(BaseModel):
-    connection_overrides: dict[str, dict[str, Any]] | None = None
-    secret_overrides: dict[str, str] | None = None
-
-
-class ProjectAgentOut(_Out):
-    project_id: uuid.UUID
-    agent_id: uuid.UUID
-    connection_overrides: dict[str, Any]
-    secret_overrides: dict[str, Any]
-
-
 # Tasks and runs ------------------------------------------------------------------------
 
 
@@ -504,6 +345,10 @@ class RunOut(_Out):
     error: str | None
     summary: str | None
     output: Any = None
+    config_commit: str | None = None
+    """The config repository commit the run used."""
+    agent_snapshot: dict[str, Any] | None = None
+    """name, model, provider, runtime, identity and connections of the agent at run start."""
 
 
 class TaskSummaryOut(BaseModel):

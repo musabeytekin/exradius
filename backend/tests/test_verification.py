@@ -7,10 +7,11 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from exradius.models import Project, ProjectVerification, Repository, Worker
+from exradius.models import ProjectVerification, Worker
 from exradius.worker import prepare
 from exradius.worker.heartbeat import Heartbeat
 from exradius.worker.verify import ProjectVerifier
+from tests.conftest import BASE_CONFIG, commit_config
 from tests.test_run_manager import containers, manager, published  # noqa: F401 - fixtures
 
 
@@ -33,15 +34,19 @@ async def get(sessions, vid) -> ProjectVerification:
         return await session.get(ProjectVerification, vid)
 
 
+VERIFY_CONFIG = BASE_CONFIG + """\
+workstation:
+  image: acme/node:1
+  setup: [npm ci, make check]
+repositories:
+  - {name: app, url: %s, branch: feature}
+"""
+
+
 @pytest.fixture
 async def project(sessions, configured, remote_repo):
-    async with sessions() as session:
-        project = await session.scalar(select(Project))
-        project.setup_commands = ["npm ci", "make check"]
-        project.image = "acme/node:1"
-        session.add(Repository(project_id=project.id, name="app", url=str(remote_repo), branch="feature"))
-        await session.commit()
-        return project
+    commit_config(configured["remote"], {"exradius.yaml": VERIFY_CONFIG % remote_repo})
+    return configured["project"]
 
 
 def names_and_states(verification) -> list[tuple[str, str]]:
@@ -72,6 +77,7 @@ async def test_verification_passes(verifier, sessions, containers, project, sett
     assert verification.state == "passed" and verification.error is None
     assert verification.started_at and verification.ended_at
     assert names_and_states(verification) == [
+        ("Read config", "passed"),
         ("Create directory", "passed"),
         ("Fetch mirror app", "passed"),
         ("Clone app (feature)", "passed"),
@@ -81,6 +87,8 @@ async def test_verification_passes(verifier, sessions, containers, project, sett
         ("Remove directory", "passed"),
     ]
     steps = {s["name"]: s for s in verification.steps}
+    assert steps["Read config"]["log"].startswith("commit ") and "(exradius.yaml on main)" in steps["Read config"]["log"]
+    assert steps["Read config"]["log"].endswith("missing keys: none")
     assert steps["Setup: npm ci"]["log"] == "ran npm ci"
     assert steps["Clone app (feature)"]["log"].startswith("checked out feature at ")
     assert all(s["started_at"] and s["ended_at"] for s in verification.steps)
@@ -107,15 +115,59 @@ async def test_failing_setup_skips_the_rest_and_cleans_up(verifier, sessions, co
 
 
 async def test_bad_repository_fails_at_the_mirror(verifier, sessions, containers, configured, tmp_path):
-    async with sessions() as session:
-        project = await session.scalar(select(Project))
-        session.add(Repository(project_id=project.id, name="app", url=str(tmp_path / "missing.git"), branch="main"))
-        await session.commit()
-    vid = await new_verification(sessions, project.id)
+    commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + f"repositories:\n  - {{name: app, url: {tmp_path / 'missing.git'}}}\n"})
+    vid = await new_verification(sessions, configured["project"].id)
     await verifier.run(vid)
     verification = await get(sessions, vid)
     assert verification.state == "failed" and verification.error.startswith("Fetch mirror app: git clone")
-    assert names_and_states(verification)[1:3] == [("Fetch mirror app", "failed"), ("Clone app (main)", "skipped")]
+    assert names_and_states(verification)[2:4] == [("Fetch mirror app", "failed"), ("Clone app (default branch)", "skipped")]
+
+
+async def test_read_config_fails_with_errors_and_missing_keys(verifier, sessions, containers, configured):
+    commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + "secret_store: s\nenv: {A: '${secret:A}'}\nnotez: x\n"})
+    vid = await new_verification(sessions, configured["project"].id)
+    await verifier.run(vid)
+    verification = await get(sessions, vid)
+    assert verification.state == "failed" and verification.error == "Read config: config error: notez: unknown key"
+    assert names_and_states(verification) == [("Read config", "failed")]
+
+    commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + "secret_store: s\nenv: {A: '${secret:A}'}\n"})
+    vid = await new_verification(sessions, configured["project"].id)
+    await verifier.run(vid)
+    [step] = (await get(sessions, vid)).steps
+    assert step["log"].splitlines()[0] == "secret store s does not exist"
+    assert step["log"].splitlines()[-1] == "missing keys: A (store s, which does not exist)"
+
+
+async def test_builds_come_before_the_directory(verifier, sessions, containers, configured):
+    commit_config(configured["remote"], {
+        "exradius.yaml": BASE_CONFIG + (
+            "workstation:\n  dockerfile: ws/Dockerfile\n  setup: [psql -c 'select 1']\n"
+            "services:\n  db:\n    dockerfile: db.Dockerfile\n    context: db\n"
+        ),
+        "ws/Dockerfile": "FROM ubuntu\n", "db.Dockerfile": "FROM postgres:16\n", "db/init.sql": "select 1;\n",
+    })
+    vid = await new_verification(sessions, configured["project"].id)
+    await verifier.run(vid)
+    verification = await get(sessions, vid)
+    assert verification.state == "passed", verification.error
+    assert [n for n, _ in names_and_states(verification)] == [
+        "Read config", "Build workstation", "Build service db", "Create directory", "Prepare attachments folder",
+        "Start service db", "Setup: psql -c 'select 1'", "Stop services", "Remove directory",
+    ]
+    ws, db = containers.builds
+    assert db["dockerfile"] == ".exradius.Dockerfile" and db["files"] == {"init.sql", ".exradius.Dockerfile"}
+    assert containers.setup_images == [ws["tag"]]
+    assert containers.services == {}  # stopped
+    steps = {s["name"]: s for s in verification.steps}
+    assert steps["Build workstation"]["log"].startswith("Successfully built")
+    assert steps["Build workstation"]["log"].splitlines()[-1].startswith(f"built {ws['tag']} in ")
+
+    vid = await new_verification(sessions, configured["project"].id)
+    await verifier.run(vid)
+    steps = {s["name"]: s for s in (await get(sessions, vid)).steps}
+    assert steps["Build service db"]["log"] == f"{db['tag']} is up to date (context unchanged)"
+    assert len(containers.builds) == 2
 
 
 async def test_only_pending_verifications_run(verifier, sessions, project):

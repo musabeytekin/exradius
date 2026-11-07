@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { FileDrop } from "@/components/FileDrop";
 import { EnvironmentPreview } from "@/components/EnvironmentPreview";
 import { environmentTextOf } from "@/lib/environment";
@@ -16,6 +16,7 @@ import { api, ApiError } from "@/lib/api";
 import { useConfirm } from "@/lib/confirm";
 import { elideBase64, fileToAttachment } from "@/lib/files";
 import { absoluteTime, between, bytes, clockTime, duration, pretty, relativeTime, shortId } from "@/lib/format";
+import { shortCommit } from "@/lib/projectConfig";
 import { qk, useProjects } from "@/lib/queries";
 import { toast } from "@/lib/toast";
 import { TERMINAL_STATES, type Artifact, type InfoRequest, type ResultPayload, type StatusPayload, type TaskDetail, type TaskState } from "@/lib/types";
@@ -106,6 +107,7 @@ function Header({ taskId, task, state, feedStatus }: { taskId: string; task?: Ta
               )}
               <span className="text-xs text-subtle">·</span>
               <Mono className="text-xs text-muted">{task.agent}</Mono>
+              {task.run?.agent_snapshot?.name && task.run.agent_snapshot.name !== task.agent && <span className="text-xs text-muted">{task.run.agent_snapshot.name}</span>}
               <span className="text-xs text-subtle">· received {relativeTime(task.received_at)}</span>
             </>
           )}
@@ -180,7 +182,7 @@ function Body({ task, state, live, feed, result }: { task: TaskDetail; state: Ta
               loading={feed.loading}
               infoRequests={task.info_requests}
               downloadUrl={task.run_id ? api.runTranscriptUrl(task.run_id) : null}
-              emptyHint={state === "queued" ? "Queued: waiting for a free worker slot." : state === "preparing" ? "Preparing: cloning repositories and running setup commands." : undefined}
+              emptyHint={state === "queued" ? "Queued: waiting for a free worker slot." : state === "preparing" ? "Preparing: reading the config, building images, cloning and running setup." : undefined}
             />
           </Tabs.Content>
           <Tabs.Content value="input" className="pt-4"><TaskInput task={task} /></Tabs.Content>
@@ -189,6 +191,7 @@ function Body({ task, state, live, feed, result }: { task: TaskDetail; state: Ta
       </div>
       <aside className="sticky top-6 flex max-h-[calc(100vh-48px)] flex-col gap-4 self-start overflow-y-auto">
         <Timeline events={feed.events.length ? feed.events : task.events.map((e) => ({ id: e.id, type: e.type, envelope: e.payload }))} live={live} />
+        <AgentCard task={task} />
         <RunCard task={task} />
         <Artifacts artifacts={task.artifacts} />
       </aside>
@@ -350,6 +353,30 @@ function RunCard({ task }: { task: TaskDetail }) {
             ["Duration", duration(between(run.started_at, run.ended_at))],
             ["Container", run.container_id ? <Mono className="text-xs" title={run.container_id}>{run.container_id.slice(0, 12)}</Mono> : "—"],
             ["Session", run.runtime_session_id ? <Mono className="text-xs" title={run.runtime_session_id}>{shortId(run.runtime_session_id)}</Mono> : "—"],
+            ...(run.config_commit ? [["Config", <Mono className="text-xs" title={run.config_commit}>{shortCommit(run.config_commit)}</Mono>] as [string, ReactNode]] : []),
+          ]}
+        />
+      </div>
+    </Card>
+  );
+}
+
+function AgentCard({ task }: { task: TaskDetail }) {
+  const a = task.run?.agent_snapshot;
+  if (!a) return null;
+  const identity = [a.identity?.name, a.identity?.email ? `<${a.identity.email}>` : null].filter(Boolean).join(" ");
+  return (
+    <Card>
+      <CardHeader title="Agent" />
+      <div className="p-4">
+        <KeyValue
+          className="text-xs"
+          items={[
+            ["Name", <span>{a.name || a.slug || task.agent} <Mono className="text-xs text-muted">{task.agent}</Mono></span>],
+            ["Model", a.model ? <Mono className="text-xs">{a.model}</Mono> : <span className="text-subtle">runtime default</span>],
+            ...(a.provider ? [["Provider", <Mono className="text-xs">{a.provider}</Mono>] as [string, ReactNode]] : []),
+            ["Identity", identity ? <Mono className="break-all text-xs">{identity}</Mono> : <span className="text-subtle">default</span>],
+            ...(a.connections?.length ? [["Connections", <span className="flex flex-wrap gap-1">{a.connections.map((c) => <Chip key={c} mono>{c}</Chip>)}</span>] as [string, ReactNode]] : []),
           ]}
         />
       </div>

@@ -1,23 +1,20 @@
 """The generated environment section of the system prompt (docs/environment-and-services.md §1).
 
-Built from facts Exradius holds: the project's image and repositories (URLs without
-credentials), the fixed "not available" line, the project's services with their settings
-(secret values never: a secret appears as the variable that carries it) and the
-maintainers' notes. It never names Exradius, and it does not list installed tools: the agent discovers
-those itself.
+Built from the project's config (docs/config-repo.md §9): the workstation (its image, or the
+Dockerfile it is built from), the repositories (URLs without credentials), the fixed "not
+available" line, the services with their settings (secret values never: a secret appears
+as the variable that carries it) and the notes. It never names Exradius, and it does not
+list installed tools: the agent discovers those itself.
 """
 
 from __future__ import annotations
 
 import re
-import uuid
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from exradius.resolve import SECRET_REF
+from exradius.resolve import exported_secrets
+from exradius.schemas.project_config import SECRET_REF, ProjectConfig
 
 HEADING = "# Your environment"
 NOT_AVAILABLE = (
@@ -42,16 +39,17 @@ def public_url(url: str) -> str:
     return urlunsplit((parts.scheme, host, parts.path, "", ""))
 
 
-def can_push(url: str, push_allowed: bool, has_secret: bool) -> bool:
+def can_push(url: str, push: bool, has_credential: bool) -> bool:
     """Whether runs get push credentials for this remote (docs/agent-identity.md §4:
-    ``push_allowed``, an auth secret and an http(s) URL)."""
-    return push_allowed and has_secret and url.split("://", 1)[0].lower() in ("http", "https")
+    ``push``, a credential and an http(s) URL)."""
+    return push and has_credential and url.split("://", 1)[0].lower() in ("http", "https")
 
 
 @dataclass(frozen=True)
 class RepoFact:
     name: str
-    branch: str
+    branch: str | None
+    """``None``: the remote's default branch."""
     url: str
     push: bool
 
@@ -71,8 +69,8 @@ class ServiceFact:
 
 def service_settings(env: dict[str, object], exported: set[str]) -> tuple[str, ...]:
     """A service's env as the agent may see it: plain values as they are, each
-    ``${secret:NAME}`` as ``$NAME`` when the run environment carries ``NAME`` (project
-    secrets are exported under their own names), else as a placeholder. Plain settings
+    ``${secret:NAME}`` as ``$NAME`` when the run environment carries ``NAME`` (see
+    ``exradius.resolve.exported_secrets``), else as a placeholder. Plain settings
     come first, then those built from secrets, each group in stored order."""
     plain: list[str] = []
     secret: list[str] = []
@@ -89,14 +87,15 @@ def service_settings(env: dict[str, object], exported: set[str]) -> tuple[str, .
 def build_environment_text(
     *, image: str, repositories: list[RepoFact], services: list[ServiceFact], notes: str
 ) -> str:
-    """The section exactly as documented."""
-    intro = f"You run unattended in a Linux container built from the image {image}.\n"
+    """The section exactly as documented. ``image`` completes "built from ": ``the image
+    x:1`` or a Dockerfile's path."""
+    intro = f"You run unattended in a Linux container built from {image}.\n"
     parts = [HEADING]
     if repositories:
         parts.append(intro + "Each folder in the working directory is a git clone of one repository:")
         parts.append(
             "\n".join(
-                f"- {r.name}: branch {r.branch}, origin {public_url(r.url)}, "
+                f"- {r.name}: {f'branch {r.branch}' if r.branch else 'the default branch'}, origin {public_url(r.url)}, "
                 + ("pushing allowed" if r.push else "pushing NOT allowed")
                 for r in repositories
             )
@@ -126,32 +125,30 @@ def build_environment_text(
     return "\n\n".join(parts)
 
 
-async def project_environment_text(session: AsyncSession, project_id: uuid.UUID, default_image: str) -> str:
-    """The section for a project as the worker would build it now."""
-    from exradius.models import Project, ProjectService, Repository, Secret
+def workstation_label(config: ProjectConfig, default_image: str) -> str:
+    """The workstation as the panel shows it: its image name or ``built from <dockerfile>``."""
+    station = config.workstation
+    return f"built from {station.dockerfile}" if station.dockerfile else (station.image or default_image)
 
-    project = await session.get(Project, project_id)
-    assert project is not None
-    repos = (
-        await session.scalars(select(Repository).where(Repository.project_id == project_id).order_by(Repository.name))
-    ).all()
-    services = (
-        await session.scalars(
-            select(ProjectService)
-            .where(ProjectService.project_id == project_id)
-            .order_by(ProjectService.position, ProjectService.name)
-        )
-    ).all()
-    exported = set(await session.scalars(select(Secret.key).where(Secret.project_id == project_id)))
+
+def config_environment_text(config: ProjectConfig, default_image: str) -> str:
+    """The section for a config, as the worker gives it to the run."""
+    exported = set(exported_secrets(config))
+    station = config.workstation
     return build_environment_text(
-        image=project.image or default_image,
+        image=station.dockerfile if station.dockerfile else f"the image {station.image or default_image}",
         repositories=[
-            RepoFact(r.name, r.branch, r.url, can_push(r.url, r.push_allowed, r.auth_secret_id is not None))
-            for r in repos
+            RepoFact(r.name, r.branch, r.url, can_push(r.url, r.push, bool(r.credential)))
+            for r in config.repositories
         ],
         services=[
-            ServiceFact(s.name, s.image, tuple(int(p) for p in s.ports or []), service_settings(s.env or {}, exported))
-            for s in services
+            ServiceFact(
+                name,
+                service.image or f"built from {service.dockerfile}",
+                tuple(service.ports),
+                service_settings(service.env, exported),
+            )
+            for name, service in config.services.items()
         ],
-        notes=project.notes or "",
+        notes=config.notes,
     )

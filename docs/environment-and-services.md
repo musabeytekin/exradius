@@ -1,5 +1,14 @@
 # Environment section, services, model choice
 
+> **Since the config-repo change (`docs/config-repo.md`, 2026-11-07)** the project's file provides
+> what this document puts in tables and panel tabs: `services` (with `image` or a `dockerfile`
+> built from the config repository), `env`, `notes`, `workstation` (image or Dockerfile, and
+> `setup`), and each agent's `model`. The environment section, the services' lifecycle, the
+> networks, the delivery warning and the passwd fix below are unchanged; the `project_services`
+> table, the Services API and tab, `projects.notes` and `agents.model` columns are gone. A
+> `${secret:NAME}` now resolves from the config's secret store, and the workstation carries every
+> secret its services' settings use under its own name, which is what `$NAME` in the section means.
+
 Agreed 2026-11-07 after the Bank of Anthos live tests. Four problems and the decisions:
 
 | problem seen | decision |

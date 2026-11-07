@@ -1,8 +1,10 @@
 """initial schema
 
+Replaces the chain 0001-0007 (docs/config-repo.md §8: the data was wiped).
+
 Revision ID: 0001
 Revises: 
-Create Date: 2026-11-05 19:42:42.177715
+Create Date: 2026-11-07 12:50:58.501964
 """
 
 from collections.abc import Sequence
@@ -26,29 +28,6 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id', name=op.f('pk_admin_user')),
     sa.UniqueConstraint('username', name=op.f('uq_admin_user_username'))
     )
-    op.create_table('agents',
-    sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('slug', sa.String(length=100), nullable=False),
-    sa.Column('name', sa.String(length=255), nullable=False),
-    sa.Column('prompt', sa.Text(), nullable=False),
-    sa.Column('runtime', sa.String(length=50), nullable=False),
-    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_agents')),
-    sa.UniqueConstraint('slug', name=op.f('uq_agents_slug'))
-    )
-    op.create_table('connections',
-    sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('slug', sa.String(length=100), nullable=False),
-    sa.Column('name', sa.String(length=255), nullable=False),
-    sa.Column('transport', sa.String(length=20), nullable=False),
-    sa.Column('command', sa.Text(), nullable=True),
-    sa.Column('args', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
-    sa.Column('url', sa.Text(), nullable=True),
-    sa.Column('env', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
-    sa.Column('headers', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_connections')),
-    sa.UniqueConstraint('slug', name=op.f('uq_connections_slug'))
-    )
     op.create_table('events',
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('task_id', sa.String(length=255), nullable=False),
@@ -61,63 +40,134 @@ def upgrade() -> None:
     )
     op.create_index(op.f('ix_events_run_id'), 'events', ['run_id'], unique=False)
     op.create_index(op.f('ix_events_task_id'), 'events', ['task_id'], unique=False)
+    op.create_table('git_credentials',
+    sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('host', sa.String(length=255), nullable=False),
+    sa.Column('kind', sa.String(length=20), nullable=False),
+    sa.Column('value_encrypted', sa.Text(), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_git_credentials')),
+    sa.UniqueConstraint('host', name=op.f('uq_git_credentials_host'))
+    )
     op.create_table('projects',
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('slug', sa.String(length=100), nullable=False),
-    sa.Column('name', sa.String(length=255), nullable=False),
-    sa.Column('image', sa.String(length=255), nullable=True),
-    sa.Column('setup_commands', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
+    sa.Column('config_url', sa.Text(), nullable=False),
+    sa.Column('config_branch', sa.String(length=255), nullable=True),
+    sa.Column('config_path', sa.Text(), nullable=True),
+    sa.Column('snapshot', sa.JSON(), nullable=True),
+    sa.Column('snapshot_commit', sa.String(length=64), nullable=True),
+    sa.Column('snapshot_read_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_projects')),
     sa.UniqueConstraint('slug', name=op.f('uq_projects_slug'))
     )
-    op.create_table('agent_connections',
-    sa.Column('agent_id', sa.Uuid(), nullable=False),
-    sa.Column('connection_id', sa.Uuid(), nullable=False),
-    sa.ForeignKeyConstraint(['agent_id'], ['agents.id'], name=op.f('fk_agent_connections_agent_id_agents'), ondelete='CASCADE'),
-    sa.ForeignKeyConstraint(['connection_id'], ['connections.id'], name=op.f('fk_agent_connections_connection_id_connections'), ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('agent_id', 'connection_id', name=op.f('pk_agent_connections'))
+    op.create_table('providers',
+    sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('slug', sa.String(length=100), nullable=False),
+    sa.Column('name', sa.String(length=255), nullable=False),
+    sa.Column('kind', sa.String(length=50), nullable=False),
+    sa.Column('auth_method', sa.String(length=50), nullable=False),
+    sa.Column('credential_encrypted', sa.Text(), nullable=False),
+    sa.Column('settings', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
+    sa.Column('is_default', sa.Boolean(), nullable=False),
+    sa.Column('last_test', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=True),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_providers')),
+    sa.UniqueConstraint('slug', name=op.f('uq_providers_slug'))
     )
-    op.create_table('env_vars',
+    op.create_index('uq_providers_default', 'providers', ['is_default'], unique=True, postgresql_where=sa.text('is_default'), sqlite_where=sa.text('is_default'))
+    op.create_table('secret_stores',
+    sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('name', sa.String(length=63), nullable=False),
+    sa.Column('kind', sa.String(length=20), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_secret_stores')),
+    sa.UniqueConstraint('name', name=op.f('uq_secret_stores_name'))
+    )
+    op.create_table('workers',
+    sa.Column('id', sa.String(length=64), nullable=False),
+    sa.Column('hostname', sa.String(length=255), nullable=False),
+    sa.Column('started_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('last_seen_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('concurrency', sa.Integer(), nullable=False),
+    sa.Column('docker_ok', sa.Boolean(), nullable=False),
+    sa.Column('docker_detail', sa.Text(), nullable=True),
+    sa.Column('images', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
+    sa.Column('runtimes', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
+    sa.Column('version', sa.String(length=50), nullable=True),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_workers'))
+    )
+    op.create_index(op.f('ix_workers_last_seen_at'), 'workers', ['last_seen_at'], unique=False)
+    op.create_table('image_builds',
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('project_id', sa.Uuid(), nullable=False),
-    sa.Column('key', sa.String(length=255), nullable=False),
-    sa.Column('value', sa.Text(), nullable=False),
-    sa.ForeignKeyConstraint(['project_id'], ['projects.id'], name=op.f('fk_env_vars_project_id_projects'), ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_env_vars')),
-    sa.UniqueConstraint('project_id', 'key', name=op.f('uq_env_vars_project_id'))
+    sa.Column('name', sa.String(length=63), nullable=False),
+    sa.Column('tree_hash', sa.String(length=64), nullable=False),
+    sa.Column('image', sa.String(length=255), nullable=False),
+    sa.Column('state', sa.String(length=20), nullable=False),
+    sa.Column('started_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('ended_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('log_tail', sa.Text(), nullable=False),
+    sa.ForeignKeyConstraint(['project_id'], ['projects.id'], name=op.f('fk_image_builds_project_id_projects'), ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_image_builds'))
     )
-    op.create_table('project_agents',
-    sa.Column('project_id', sa.Uuid(), nullable=False),
-    sa.Column('agent_id', sa.Uuid(), nullable=False),
-    sa.Column('connection_overrides', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
-    sa.Column('secret_overrides', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
-    sa.ForeignKeyConstraint(['agent_id'], ['agents.id'], name=op.f('fk_project_agents_agent_id_agents'), ondelete='CASCADE'),
-    sa.ForeignKeyConstraint(['project_id'], ['projects.id'], name=op.f('fk_project_agents_project_id_projects'), ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('project_id', 'agent_id', name=op.f('pk_project_agents'))
-    )
-    op.create_table('secrets',
+    op.create_index(op.f('ix_image_builds_project_id'), 'image_builds', ['project_id'], unique=False)
+    op.create_table('project_verifications',
     sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('project_id', sa.Uuid(), nullable=True),
+    sa.Column('project_id', sa.Uuid(), nullable=False),
+    sa.Column('state', sa.String(length=20), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('started_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('ended_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('error', sa.Text(), nullable=True),
+    sa.Column('steps', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=False),
+    sa.Column('worker_id', sa.String(length=64), nullable=True),
+    sa.ForeignKeyConstraint(['project_id'], ['projects.id'], name=op.f('fk_project_verifications_project_id_projects'), ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_project_verifications'))
+    )
+    op.create_index(op.f('ix_project_verifications_project_id'), 'project_verifications', ['project_id'], unique=False)
+    op.create_table('provider_tests',
+    sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('provider_id', sa.Uuid(), nullable=False),
+    sa.Column('state', sa.String(length=20), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+    sa.Column('started_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('ended_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('detail', sa.Text(), nullable=True),
+    sa.Column('error', sa.Text(), nullable=True),
+    sa.Column('model', sa.Text(), nullable=True),
+    sa.Column('fingerprint', sa.String(length=64), nullable=False),
+    sa.Column('worker_id', sa.String(length=64), nullable=True),
+    sa.ForeignKeyConstraint(['provider_id'], ['providers.id'], name=op.f('fk_provider_tests_provider_id_providers'), ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_provider_tests'))
+    )
+    op.create_index(op.f('ix_provider_tests_provider_id'), 'provider_tests', ['provider_id'], unique=False)
+    op.create_table('secret_store_entries',
+    sa.Column('id', sa.Uuid(), nullable=False),
+    sa.Column('store_id', sa.Uuid(), nullable=False),
     sa.Column('key', sa.String(length=255), nullable=False),
     sa.Column('value_encrypted', sa.Text(), nullable=False),
-    sa.ForeignKeyConstraint(['project_id'], ['projects.id'], name=op.f('fk_secrets_project_id_projects'), ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_secrets')),
-    sa.UniqueConstraint('project_id', 'key', name=op.f('uq_secrets_project_id'))
+    sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+    sa.ForeignKeyConstraint(['store_id'], ['secret_stores.id'], name=op.f('fk_secret_store_entries_store_id_secret_stores'), ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_secret_store_entries')),
+    sa.UniqueConstraint('store_id', 'key', name=op.f('uq_secret_store_entries_store_id'))
     )
+    op.create_index(op.f('ix_secret_store_entries_store_id'), 'secret_store_entries', ['store_id'], unique=False)
     op.create_table('tasks',
     sa.Column('id', sa.String(length=255), nullable=False),
     sa.Column('project_id', sa.Uuid(), nullable=False),
-    sa.Column('agent_id', sa.Uuid(), nullable=False),
+    sa.Column('agent', sa.String(length=63), nullable=False),
     sa.Column('instructions', sa.Text(), nullable=False),
     sa.Column('context', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=True),
     sa.Column('correlation', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=True),
     sa.Column('state', sa.String(length=30), nullable=False),
     sa.Column('received_at', sa.DateTime(timezone=True), nullable=False),
-    sa.ForeignKeyConstraint(['agent_id'], ['agents.id'], name=op.f('fk_tasks_agent_id_agents'), ondelete='RESTRICT'),
     sa.ForeignKeyConstraint(['project_id'], ['projects.id'], name=op.f('fk_tasks_project_id_projects'), ondelete='RESTRICT'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_tasks'))
     )
+    op.create_index(op.f('ix_tasks_agent'), 'tasks', ['agent'], unique=False)
     op.create_index(op.f('ix_tasks_received_at'), 'tasks', ['received_at'], unique=False)
     op.create_index(op.f('ix_tasks_state'), 'tasks', ['state'], unique=False)
     op.create_table('attachments',
@@ -131,18 +181,6 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id', name=op.f('pk_attachments'))
     )
     op.create_index(op.f('ix_attachments_task_id'), 'attachments', ['task_id'], unique=False)
-    op.create_table('repositories',
-    sa.Column('id', sa.Uuid(), nullable=False),
-    sa.Column('project_id', sa.Uuid(), nullable=False),
-    sa.Column('name', sa.String(length=255), nullable=False),
-    sa.Column('url', sa.Text(), nullable=False),
-    sa.Column('branch', sa.String(length=255), nullable=False),
-    sa.Column('auth_secret_id', sa.Uuid(), nullable=True),
-    sa.ForeignKeyConstraint(['auth_secret_id'], ['secrets.id'], name=op.f('fk_repositories_auth_secret_id_secrets'), ondelete='SET NULL'),
-    sa.ForeignKeyConstraint(['project_id'], ['projects.id'], name=op.f('fk_repositories_project_id_projects'), ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_repositories')),
-    sa.UniqueConstraint('project_id', 'name', name=op.f('uq_repositories_project_id'))
-    )
     op.create_table('runs',
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('task_id', sa.String(length=255), nullable=False),
@@ -158,6 +196,10 @@ def upgrade() -> None:
     sa.Column('summary', sa.Text(), nullable=True),
     sa.Column('output', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=True),
     sa.Column('resume_request_ids', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=True),
+    sa.Column('worker_id', sa.String(length=64), nullable=True),
+    sa.Column('config_commit', sa.String(length=64), nullable=True),
+    sa.Column('config', sa.JSON(), nullable=True),
+    sa.Column('agent_snapshot', sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), 'postgresql'), nullable=True),
     sa.ForeignKeyConstraint(['task_id'], ['tasks.id'], name=op.f('fk_runs_task_id_tasks'), ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_runs'))
     )
@@ -215,21 +257,29 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_runs_task_id'), table_name='runs')
     op.drop_index(op.f('ix_runs_state'), table_name='runs')
     op.drop_table('runs')
-    op.drop_table('repositories')
     op.drop_index(op.f('ix_attachments_task_id'), table_name='attachments')
     op.drop_table('attachments')
     op.drop_index(op.f('ix_tasks_state'), table_name='tasks')
     op.drop_index(op.f('ix_tasks_received_at'), table_name='tasks')
+    op.drop_index(op.f('ix_tasks_agent'), table_name='tasks')
     op.drop_table('tasks')
-    op.drop_table('secrets')
-    op.drop_table('project_agents')
-    op.drop_table('env_vars')
-    op.drop_table('agent_connections')
+    op.drop_index(op.f('ix_secret_store_entries_store_id'), table_name='secret_store_entries')
+    op.drop_table('secret_store_entries')
+    op.drop_index(op.f('ix_provider_tests_provider_id'), table_name='provider_tests')
+    op.drop_table('provider_tests')
+    op.drop_index(op.f('ix_project_verifications_project_id'), table_name='project_verifications')
+    op.drop_table('project_verifications')
+    op.drop_index(op.f('ix_image_builds_project_id'), table_name='image_builds')
+    op.drop_table('image_builds')
+    op.drop_index(op.f('ix_workers_last_seen_at'), table_name='workers')
+    op.drop_table('workers')
+    op.drop_table('secret_stores')
+    op.drop_index('uq_providers_default', table_name='providers', postgresql_where=sa.text('is_default'), sqlite_where=sa.text('is_default'))
+    op.drop_table('providers')
     op.drop_table('projects')
+    op.drop_table('git_credentials')
     op.drop_index(op.f('ix_events_task_id'), table_name='events')
     op.drop_index(op.f('ix_events_run_id'), table_name='events')
     op.drop_table('events')
-    op.drop_table('connections')
-    op.drop_table('agents')
     op.drop_table('admin_user')
     # ### end Alembic commands ###

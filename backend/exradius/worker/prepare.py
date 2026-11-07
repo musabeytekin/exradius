@@ -47,7 +47,8 @@ class RunPaths:
 class RepoSpec:
     name: str
     url: str
-    branch: str
+    branch: str | None
+    """``None``: the remote's default branch."""
     auth: str | None = None
     """Secret value for HTTPS auth: ``user:password`` or a bare token."""
     push_allowed: bool = False
@@ -144,9 +145,9 @@ class RemoteRefs:
     default_branch: str | None
 
 
-def ls_remote(url: str, auth: str | None = None, timeout: float = 30) -> RemoteRefs:
+def ls_remote(url: str, auth: str | None = None, timeout: float = 30, cwd: Path | None = None) -> RemoteRefs:
     """Branches and default branch (HEAD) of a remote, without cloning it."""
-    output = git("ls-remote", "--symref", url, "HEAD", "refs/heads/*", auth=auth, timeout=timeout)
+    output = git("ls-remote", "--symref", url, "HEAD", "refs/heads/*", auth=auth, timeout=timeout, cwd=cwd)
     branches, default = [], None
     for line in output.splitlines():
         if line.startswith("ref: ") and line.endswith("\tHEAD"):
@@ -169,22 +170,39 @@ def _locked(path: Path) -> Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def refresh_mirror(data_dir: Path, project_slug: str, repo: RepoSpec) -> Path:
-    mirror = mirror_path(data_dir, project_slug, repo.name)
+def sync_mirror(mirror: Path, url: str, auth: str | None, timeout: float | None = None) -> Path:
+    """Create or fetch a bare mirror of ``url``, serialised by a file lock next to it."""
     with _locked(mirror):
         if (mirror / "HEAD").exists():
-            git("remote", "set-url", "origin", repo.url, cwd=mirror)
-            git("fetch", "--prune", "--force", "origin", cwd=mirror, auth=repo.auth)
+            git("remote", "set-url", "origin", url, cwd=mirror)
+            git("fetch", "--prune", "--force", "origin", cwd=mirror, auth=auth, timeout=timeout)
         else:
             if mirror.exists():
                 shutil.rmtree(mirror)
-            git("clone", "--mirror", repo.url, str(mirror), auth=repo.auth)
+            git("clone", "--mirror", url, str(mirror), auth=auth, timeout=timeout)
+        _follow_remote_head(mirror, auth, timeout)
     return mirror
 
 
+def _follow_remote_head(mirror: Path, auth: str | None, timeout: float | None) -> None:
+    """Point the mirror's HEAD at the remote's current default branch (a fetch leaves it
+    where the first clone put it); repositories without a branch check it out."""
+    try:
+        refs = ls_remote("origin", auth, timeout or 30, cwd=mirror)
+    except PreparationError:
+        return
+    if refs.default_branch and refs.default_branch in refs.branches:
+        git("symbolic-ref", "HEAD", f"refs/heads/{refs.default_branch}", cwd=mirror)
+
+
+def refresh_mirror(data_dir: Path, project_slug: str, repo: RepoSpec) -> Path:
+    return sync_mirror(mirror_path(data_dir, project_slug, repo.name), repo.url, repo.auth)
+
+
 def clone_from_mirror(mirror: Path, dest: Path, repo: RepoSpec) -> None:
-    """``git clone --local`` (hardlinked objects) and point ``origin`` at the real remote."""
-    git("clone", "--local", "--branch", repo.branch, str(mirror), str(dest))
+    """``git clone --local`` (hardlinked objects) and point ``origin`` at the real remote.
+    Without a branch the mirror's HEAD (the remote's default branch) is checked out."""
+    git("clone", "--local", *(["--branch", repo.branch] if repo.branch else []), str(mirror), str(dest))
     git("remote", "set-url", "origin", repo.url, cwd=dest)
 
 

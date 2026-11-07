@@ -7,15 +7,18 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from exradius.crypto import SecretBox
 from exradius.db import SessionFactory
-from exradius.models import Agent, Attachment, InfoRequest, Project, ProjectAgent, Run, Task, utcnow
-from exradius.providers import NO_PROVIDER, resolve_provider
+from exradius.models import Attachment, InfoRequest, Project, Run, Task, utcnow
+from exradius.project_state import assess, read_config, remember
+from exradius.providers import provider_problem, resolve_provider
 from exradius.schemas.messages import AnswerMessage, AttachmentIn, TaskMessage, status_payload
 from exradius.states import State
 from exradius.storage import ObjectStore
@@ -50,7 +53,11 @@ async def _store_attachment(store: ObjectStore, prefix: str, attachment: Attachm
     return record
 
 
-async def accept_task(sessions: SessionFactory, store: ObjectStore, body: bytes) -> TaskIntake:
+async def accept_task(
+    sessions: SessionFactory, store: ObjectStore, body: bytes, *, box: SecretBox, data_dir: Path
+) -> TaskIntake:
+    """Persist a valid task for a runnable project, or record its rejection. The project's
+    config is read afresh (and cached on the project) to check the agent."""
     try:
         raw = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -93,18 +100,24 @@ async def accept_task(sessions: SessionFactory, store: ObjectStore, body: bytes)
         project = await session.scalar(select(Project).where(Project.slug == message.project))
         if project is None:
             return await rejected(f"unknown project {message.project!r}")
-        agent = await session.scalar(select(Agent).where(Agent.slug == message.agent))
+        # The agent must exist in the project's current config (config-repo.md §1, §3).
+        snapshot = await read_config(session, box, data_dir, project)
+        remember(project, snapshot)
+        health = await assess(session, project, snapshot)
+        if health.reason is not None:
+            return await rejected(health.reason)
+        assert snapshot.config is not None
+        agent = snapshot.config.agents.get(message.agent)
         if agent is None:
-            return await rejected(f"unknown agent {message.agent!r}")
-        if await session.get(ProjectAgent, (project.id, agent.id)) is None:
-            return await rejected(f"agent {agent.slug!r} is not attached to project {project.slug!r}")
-        if await resolve_provider(session, agent) is None:
-            return await rejected(NO_PROVIDER)
+            known = ", ".join(snapshot.config.agents)
+            return await rejected(f"unknown agent {message.agent!r} in project {project.slug!r} (it defines {known})")
+        if await resolve_provider(session, agent.provider) is None:
+            return await rejected(provider_problem(agent.provider))
 
         task = Task(
             id=message.task_id,
             project=project,
-            agent=agent,
+            agent=message.agent,
             instructions=message.instructions,
             context=message.context,
             correlation=message.correlation,

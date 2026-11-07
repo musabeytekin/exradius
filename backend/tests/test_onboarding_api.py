@@ -11,10 +11,9 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from exradius.api import config_routes, task_routes
+from exradius.api import task_routes
 from exradius.models import Event, TranscriptChunk, Worker
-from exradius.schemas.api import ConnectionTestOut
-from tests.test_api import admin, client, control, make_run, setup_configuration, sync_db  # noqa: F401
+from tests.test_api import API_CONFIG, admin, client, control, make_run, setup_configuration, sync_db  # noqa: F401
 
 NOW = datetime.now(UTC)
 
@@ -99,55 +98,11 @@ def test_system_integration_never_returns_the_password(admin, settings):
 # Repository check ------------------------------------------------------------------------------
 
 
-def make_repo(admin, url, branch="main", auth_secret_id=None):
-    project = admin.post("/api/projects", json={"slug": f"p-{uuid.uuid4().hex[:6]}", "name": "P"}).json()
-    body = {"name": "app", "url": url, "branch": branch, "auth_secret_id": auth_secret_id}
-    repo = admin.post(f"/api/projects/{project['id']}/repositories", json=body).json()
-    return project["id"], repo["id"]
-
-
-def test_repository_check_lists_branches(admin, remote_repo):
-    pid, rid = make_repo(admin, str(remote_repo))
-    result = admin.post(f"/api/projects/{pid}/repositories/{rid}/check").json()
-    assert result["ok"] is True and result["error"] is None
-    assert result["branches"] == ["feature", "main"] and result["default_branch"] == "main"
-    stored = admin.get(f"/api/projects/{pid}/repositories").json()[0]["last_check"]
-    assert stored["ok"] is True and stored["branches"] == ["feature", "main"] and stored["checked_at"]
-
-    # Changing the URL invalidates the stored check; renaming does not.
-    admin.patch(f"/api/projects/{pid}/repositories/{rid}", json={"name": "renamed"})
-    assert admin.get(f"/api/projects/{pid}/repositories").json()[0]["last_check"] is not None
-    admin.patch(f"/api/projects/{pid}/repositories/{rid}", json={"url": str(remote_repo) + "/"})
-    assert admin.get(f"/api/projects/{pid}/repositories").json()[0]["last_check"] is None
-
-
-def test_repository_check_reports_a_missing_branch(admin, remote_repo):
-    pid, rid = make_repo(admin, str(remote_repo), branch="develop")
-    result = admin.post(f"/api/projects/{pid}/repositories/{rid}/check").json()
-    assert result["ok"] is False and "develop" in result["error"]
-    assert result["branches"] == ["feature", "main"]  # so the form can offer them
-
-
-def test_repository_check_redacts_credentials(admin):
-    project = admin.post("/api/projects", json={"slug": "private", "name": "P"}).json()
-    secret = admin.post(f"/api/projects/{project['id']}/secrets", json={"key": "GIT_TOKEN", "value": "ghp_t0ps3cret"}).json()
-    url = "https://bob:url-pa55word@127.0.0.1:9/acme/app.git"
-    repo = admin.post(
-        f"/api/projects/{project['id']}/repositories",
-        json={"name": "app", "url": url, "branch": "main", "auth_secret_id": secret["id"]},
-    ).json()
-    response = admin.post(f"/api/projects/{project['id']}/repositories/{repo['id']}/check")
-    result = response.json()
-    assert result["ok"] is False and result["error"]
-    assert "ghp_t0ps3cret" not in response.text and "url-pa55word" not in response.text
-    assert "***@127.0.0.1" in result["error"]
-
-
 # Verification (API side; the worker side is in test_verification.py) ---------------------------
 
 
-def test_verify_publishes_and_tracks(admin, control):
-    project = admin.post("/api/projects", json={"slug": "v", "name": "V"}).json()
+def test_verify_publishes_and_tracks(admin, control, tmp_path):
+    project = setup_configuration(admin, tmp_path)["project"]
     response = admin.post(f"/api/projects/{project['id']}/verify")
     assert response.status_code == 202
     vid = response.json()["verification_id"]
@@ -157,90 +112,71 @@ def test_verify_publishes_and_tracks(admin, control):
     admin.post(f"/api/projects/{project['id']}/verify")
     listed = admin.get(f"/api/projects/{project['id']}/verifications", params={"limit": 1}).json()
     assert len(listed) == 1 and listed[0]["id"] != vid  # newest first
-    other = admin.post("/api/projects", json={"slug": "w", "name": "W"}).json()
+    other = setup_configuration(admin, tmp_path / "other", API_CONFIG.replace("billing-platform", "other"))["project"]
     assert admin.get(f"/api/projects/{other['id']}/verifications/{vid}").status_code == 404
 
 
-def test_verify_with_broker_down(admin, control):
-    project = admin.post("/api/projects", json={"slug": "v", "name": "V"}).json()
+def test_verify_with_broker_down(admin, control, tmp_path):
+    project = setup_configuration(admin, tmp_path)["project"]
     control.healthy = False
     assert admin.post(f"/api/projects/{project['id']}/verify").status_code == 503
     [verification] = admin.get(f"/api/projects/{project['id']}/verifications").json()
     assert verification["state"] == "failed" and "broker" in verification["error"]
 
 
-# Resolved attachment -----------------------------------------------------------------------------
+# The resolved agent --------------------------------------------------------------------------------
 
 
-def test_resolved_attachment_shows_references_not_values(admin):
-    cfg = setup_configuration(admin)
-    pid, aid = cfg["project"]["id"], cfg["agent"]["id"]
-    broken = admin.post(
-        "/api/connections",
-        json={"slug": "jira", "name": "Jira", "transport": "http", "url": "https://jira.example/mcp",
-              "headers": {"Authorization": "Basic ${secret:JIRA_AUTH}", "X-Org": "acme"}},
-    ).json()
-    admin.patch(f"/api/agents/{aid}", json={"connection_ids": [cfg["docs"]["id"], cfg["sentry"]["id"], broken["id"]]})
+RESOLVED_CONFIG = API_CONFIG.replace(
+    "connections: [docs, sentry]",
+    "connections: [docs, sentry, github, files]\n    model: claude-sonnet-5-5\n    provider: main",
+).replace(
+    "connections:\n  docs:",
+    "connections:\n  github:\n    catalog: github\n    config:\n      token: ${secret:GITHUB_TOKEN}\n"
+    "  files:\n    catalog: filesystem\n  docs:",
+) + "  scout: {}\n"
 
-    response = admin.get(f"/api/projects/{pid}/agents/{aid}/resolved")
+
+def test_resolved_agent_shows_placeholders_not_values(admin, tmp_path):
+    cfg = setup_configuration(admin, tmp_path, RESOLVED_CONFIG, values={"GITHUB_TOKEN": "ghp_live", "DOCS_KEY": "docs-key"})
+    pid = cfg["project"]["id"]
+    response = admin.get(f"/api/projects/{pid}/agents/bug-fixer/resolved")
     assert response.status_code == 200
-    for value in ("project-docs-key", "alt-docs-key", "global-sentry", "ghp_secret"):
+    for value in ("ghp_live", "docs-key"):
         assert value not in response.text
-    resolved = {c["slug"]: c for c in response.json()["connections"]}
+    resolved = response.json()
+    assert (resolved["name"], resolved["role"], resolved["model"], resolved["runtime"]) == (
+        "Bug fixer", "You fix bugs.", "claude-sonnet-5-5", "claude_code")
+    assert resolved["provider"] == "main" and resolved["resolved_provider"] is None
+    assert resolved["provider_error"] == "unknown provider 'main'"
+    assert resolved["identity"] == {"name": "Bug fixer", "email": "bug-fixer@agents.example"}
+    assert resolved["commit"] == cfg["project"]["commit"] and resolved["image"] == "exradius-project-default:0.1.0"
+    assert resolved["environment_text"].startswith("# Your environment")
+    connections = {c["name"]: c for c in resolved["connections"]}
+    assert list(connections) == ["docs", "sentry", "github", "files"]
+    assert connections["github"] == {
+        "name": "github", "catalog": "github", "transport": "http", "command": None, "args": [],
+        "url": "https://api.githubcopilot.com/mcp/", "env": {}, "headers": {"Authorization": "Bearer $GITHUB_TOKEN"},
+        "secrets": ["GITHUB_TOKEN"],
+    }
+    assert connections["files"]["args"][-1] == "/work" and connections["files"]["secrets"] == []
+    assert connections["sentry"]["env"] == {"SENTRY_TOKEN": "$SENTRY_TOKEN"}
 
-    docs = resolved["docs"]
-    assert docs["headers"] == {"Authorization": "Bearer ${secret:DOCS_KEY}"}  # as written
-    assert docs["references"] == [{"name": "DOCS_KEY", "resolves_to": "DOCS_KEY_ALT", "scope": "global"}]
-    assert docs["unresolved"] == [] and docs["overridden"] is False
-
-    sentry = resolved["sentry"]
-    assert sentry["args"] == ["-y", "sentry-mcp", "--read-only"] and sentry["overridden"] is True
-    assert sentry["env"] == {"SENTRY_TOKEN": "${secret:SENTRY_TOKEN}"}
-    assert sentry["references"][0]["scope"] == "global"
-
-    jira = resolved["jira"]
-    assert jira["unresolved"] == ["JIRA_AUTH"] and jira["headers"]["X-Org"] == "acme"
-    assert response.json()["secret_overrides"] == {"DOCS_KEY": "DOCS_KEY_ALT"}
-
-
-def test_resolved_requires_attachment(admin):
-    cfg = setup_configuration(admin)
-    loner = admin.post("/api/agents", json={"slug": "loner", "name": "L", "identity_email": "loner@agents.example"}).json()
-    assert admin.get(f"/api/projects/{cfg['project']['id']}/agents/{loner['id']}/resolved").status_code == 404
-
-
-# Connections keep their last test ---------------------------------------------------------------
-
-
-def test_connection_last_test(admin, monkeypatch):
-    connection = admin.post(
-        "/api/connections", json={"slug": "fs", "name": "FS", "transport": "stdio", "command": "npx", "args": ["fs-mcp"]}
-    ).json()
-    assert connection["last_test"] is None
-
-    async def fake_test(spec):
-        return ConnectionTestOut(ok=True, tools=[{"name": "read_file", "description": "Read a file"}, {"name": "ls"}])
-
-    monkeypatch.setattr(config_routes, "test_connection", fake_test)
-    admin.post(f"/api/connections/{connection['id']}/test")
-    last = admin.get(f"/api/connections/{connection['id']}").json()["last_test"]
-    assert last["ok"] is True and last["error"] is None and last["tested_at"]
-    assert last["tools"] == [{"name": "read_file", "description": "Read a file"}, {"name": "ls", "description": ""}]
-    assert admin.get("/api/connections").json()[0]["last_test"]["ok"] is True
-
-    admin.patch(f"/api/connections/{connection['id']}", json={"name": "Files"})  # cosmetic: kept
-    assert admin.get(f"/api/connections/{connection['id']}").json()["last_test"] is not None
-    admin.patch(f"/api/connections/{connection['id']}", json={"args": ["other-mcp"]})  # config change: cleared
-    assert admin.get(f"/api/connections/{connection['id']}").json()["last_test"] is None
+    scout = admin.get(f"/api/projects/{pid}/agents/scout/resolved").json()
+    assert scout["name"] == "Scout" and scout["role"] == "" and scout["connections"] == []
+    assert scout["identity"] == {"name": "Scout", "email": "scout@billing-platform.exradius.local"}
+    assert scout["provider"] is None and scout["provider_error"] == "no provider configured"
+    assert admin.get(f"/api/projects/{pid}/agents/nobody/resolved").status_code == 404
 
 
-def test_failed_test_is_stored(admin):
-    bad = admin.post(
-        "/api/connections", json={"slug": "bad", "name": "Bad", "transport": "stdio", "command": "/nonexistent/mcp"}
-    ).json()
-    admin.post(f"/api/connections/{bad['id']}/test")
-    last = admin.get(f"/api/connections/{bad['id']}").json()["last_test"]
-    assert last["ok"] is False and last["error"] and last["tools"] == []
+def test_resolved_agent_needs_a_valid_config(admin, tmp_path):
+    cfg = setup_configuration(admin, tmp_path, API_CONFIG.replace("\nenv:", "\nenvs:"))
+    assert admin.get(f"/api/projects/{cfg['project']['id']}/agents/bug-fixer/resolved").status_code == 409
+
+
+def test_project_warns_about_unknown_providers(admin, tmp_path):
+    cfg = setup_configuration(admin, tmp_path, RESOLVED_CONFIG)
+    assert "agents.bug-fixer.provider: no provider 'main'; tasks for this agent are refused" in cfg["project"]["warnings"]
 
 
 # Sending tasks and answers ----------------------------------------------------------------------
@@ -350,8 +286,8 @@ def fast_stream(monkeypatch):
     monkeypatch.setattr(task_routes, "STREAM_HEARTBEAT_SECONDS", 0.2)
 
 
-def test_stream_replays_and_ends_after_result(admin, sync_db, fast_stream):
-    task_id, run_id = make_run(admin, sync_db)
+def test_stream_replays_and_ends_after_result(admin, sync_db, fast_stream, tmp_path):
+    task_id, run_id = make_run(admin, sync_db, tmp_path)
     rid = uuid.UUID(run_id)
     add_event(sync_db, task_id, "status", "queued", seconds=1, run_id=rid)
     sync_db.add_all([TranscriptChunk(run_id=rid, seq=i, payload={"n": i}) for i in (1, 2)])
@@ -367,8 +303,8 @@ def test_stream_replays_and_ends_after_result(admin, sync_db, fast_stream):
     assert all(m.get("id") for m in messages)
 
 
-def test_stream_follows_live_updates(admin, sync_db, db_path, fast_stream):
-    task_id, run_id = make_run(admin, sync_db)
+def test_stream_follows_live_updates(admin, sync_db, db_path, fast_stream, tmp_path):
+    task_id, run_id = make_run(admin, sync_db, tmp_path)
     rid = uuid.UUID(run_id)
     add_event(sync_db, task_id, "status", "running", seconds=1, run_id=rid)
 

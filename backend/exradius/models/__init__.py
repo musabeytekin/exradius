@@ -1,4 +1,4 @@
-"""SQLAlchemy models for the Exradius schema (architecture §6)."""
+"""SQLAlchemy models for the Exradius schema (architecture §6, docs/config-repo.md §8)."""
 
 from __future__ import annotations
 
@@ -25,6 +25,9 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 Json = JSON().with_variant(JSONB(), "postgresql")
+OrderedJson = JSON()
+"""Plain ``json`` on Postgres, which keeps the text as written: JSONB reorders object keys,
+and a config's services, env, connections and agents are ordered by the file."""
 
 
 def utcnow() -> datetime:
@@ -56,105 +59,80 @@ Timestamp = DateTime(timezone=True)
 
 
 class Project(Base):
+    """A config repository holding ``exradius.yaml`` (docs/config-repo.md §1). Everything
+    else about the project is read from that file; ``snapshot`` caches the latest read for
+    the panel. Runs never use the cache: they read the file afresh."""
+
     __tablename__ = "projects"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     slug: Mapped[str] = mapped_column(String(100), unique=True)
-    name: Mapped[str] = mapped_column(String(255))
-    image: Mapped[str | None] = mapped_column(String(255))
-    setup_commands: Mapped[list[Any]] = mapped_column(default=list)
-    notes: Mapped[str] = mapped_column(Text, default="", server_default="")
-    """Free text from the maintainers, shown to agents in the environment section."""
+    """``project.slug`` of the file when the project was added; tasks name it."""
+    config_url: Mapped[str] = mapped_column(Text)
+    config_branch: Mapped[str | None] = mapped_column(String(255))
+    """``None``: the remote's default branch."""
+    config_path: Mapped[str | None] = mapped_column(Text)
+    """``None``: ``exradius.yaml``, then ``.exradius/exradius.yaml``."""
+    snapshot: Mapped[dict[str, Any] | None] = mapped_column(OrderedJson, nullable=True)
+    """``ProjectConfigSnapshot.to_json()`` of the latest read."""
+    snapshot_commit: Mapped[str | None] = mapped_column(String(64))
+    snapshot_read_at: Mapped[datetime | None] = mapped_column(Timestamp)
     created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
 
-    repositories: Mapped[list[Repository]] = relationship(
-        back_populates="project", cascade="all, delete-orphan", order_by="Repository.name"
-    )
-    env_vars: Mapped[list[EnvVar]] = relationship(
-        cascade="all, delete-orphan", order_by="EnvVar.key"
-    )
-    services: Mapped[list[ProjectService]] = relationship(
-        cascade="all, delete-orphan", order_by="ProjectService.position"
+
+class GitCredential(Base):
+    """How Exradius reads config repositories on one git host (§6)."""
+
+    __tablename__ = "git_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    host: Mapped[str] = mapped_column(String(255), unique=True)
+    kind: Mapped[str] = mapped_column(String(20))  # token | basic
+    value_encrypted: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+
+
+class SecretStore(Base):
+    """A named set of secrets a project's config refers to with ``secret_store`` (§7)."""
+
+    __tablename__ = "secret_stores"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(63), unique=True)
+    kind: Mapped[str] = mapped_column(String(20), default="internal")
+    created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+
+    entries: Mapped[list[SecretStoreEntry]] = relationship(
+        cascade="all, delete-orphan", order_by="SecretStoreEntry.key"
     )
 
 
-class ProjectService(Base):
-    """A dependency started next to every run, like GitHub Actions ``services:``
-    (docs/environment-and-services.md §2)."""
+class SecretStoreEntry(Base):
+    __tablename__ = "secret_store_entries"
+    __table_args__ = (UniqueConstraint("store_id", "key"),)
 
-    __tablename__ = "project_services"
-    __table_args__ = (UniqueConstraint("project_id", "name"),)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    store_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("secret_stores.id", ondelete="CASCADE"), index=True)
+    key: Mapped[str] = mapped_column(String(255))
+    value_encrypted: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow, onupdate=utcnow)
+
+
+class ImageBuild(Base):
+    """An image built from a Dockerfile in a config repository (§4)."""
+
+    __tablename__ = "image_builds"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(63))
-    """Host name on the run network."""
+    """``workstation`` or the service's name."""
+    tree_hash: Mapped[str] = mapped_column(String(64))
     image: Mapped[str] = mapped_column(String(255))
-    env: Mapped[dict[str, Any]] = mapped_column(default=dict)
-    """Values may reference secrets with ``${secret:NAME}``."""
-    ports: Mapped[list[Any]] = mapped_column(default=list)
-    """Documentation for the agent; nothing is published."""
-    ready: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
-    """``None`` (HEALTHCHECK or running), ``{"tcp": port}`` or ``{"command": [...]}``."""
-    position: Mapped[int] = mapped_column(Integer, default=0)
-
-
-class Repository(Base):
-    __tablename__ = "repositories"
-    __table_args__ = (UniqueConstraint("project_id", "name"),)
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
-    name: Mapped[str] = mapped_column(String(255))
-    url: Mapped[str] = mapped_column(Text)
-    branch: Mapped[str] = mapped_column(String(255), default="main")
-    auth_secret_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("secrets.id", ondelete="SET NULL")
-    )
-    last_check: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
-    """Result of the last ``git ls-remote`` check: ok, checked_at, branches, default_branch, error."""
-    push_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
-    """Runs may push to this remote with the auth secret (docs/agent-identity.md §4)."""
-
-    project: Mapped[Project] = relationship(back_populates="repositories")
-
-
-class EnvVar(Base):
-    __tablename__ = "env_vars"
-    __table_args__ = (UniqueConstraint("project_id", "key"),)
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
-    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
-    key: Mapped[str] = mapped_column(String(255))
-    value: Mapped[str] = mapped_column(Text)
-
-
-class Secret(Base):
-    __tablename__ = "secrets"
-    __table_args__ = (UniqueConstraint("project_id", "key"),)
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
-    project_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE")
-    )
-    key: Mapped[str] = mapped_column(String(255))
-    value_encrypted: Mapped[str] = mapped_column(Text)
-
-
-class Connection(Base):
-    __tablename__ = "connections"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
-    slug: Mapped[str] = mapped_column(String(100), unique=True)
-    name: Mapped[str] = mapped_column(String(255))
-    transport: Mapped[str] = mapped_column(String(20))  # stdio | http
-    command: Mapped[str | None] = mapped_column(Text)
-    args: Mapped[list[Any]] = mapped_column(default=list)
-    url: Mapped[str | None] = mapped_column(Text)
-    env: Mapped[dict[str, Any]] = mapped_column(default=dict)
-    headers: Mapped[dict[str, Any]] = mapped_column(default=dict)
-    last_test: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
-    """Result of the last "test connection": ok, tested_at, tools, error."""
+    state: Mapped[str] = mapped_column(String(20))  # running | succeeded | failed
+    started_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+    ended_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    log_tail: Mapped[str] = mapped_column(Text, default="")
 
 
 class Provider(Base):
@@ -207,54 +185,6 @@ class ProviderTest(Base):
     worker_id: Mapped[str | None] = mapped_column(String(64))
 
 
-class AgentConnection(Base):
-    __tablename__ = "agent_connections"
-
-    agent_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True
-    )
-    connection_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("connections.id", ondelete="CASCADE"), primary_key=True
-    )
-
-
-class Agent(Base):
-    __tablename__ = "agents"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
-    slug: Mapped[str] = mapped_column(String(100), unique=True)
-    name: Mapped[str] = mapped_column(String(255))
-    prompt: Mapped[str] = mapped_column(Text, default="")
-    runtime: Mapped[str] = mapped_column(String(50), default="claude_code")
-    provider_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("providers.id", ondelete="RESTRICT"), nullable=True, index=True
-    )
-    """``None`` uses the default provider."""
-    identity_name: Mapped[str] = mapped_column(String(255))
-    """Git author and committer name in runs (docs/agent-identity.md)."""
-    identity_email: Mapped[str] = mapped_column(String(255))
-    model: Mapped[str | None] = mapped_column(Text, nullable=True)
-    """``None`` uses the runtime's default model."""
-    created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
-
-    connections: Mapped[list[Connection]] = relationship(
-        secondary="agent_connections", order_by="Connection.slug", lazy="selectin"
-    )
-
-
-class ProjectAgent(Base):
-    __tablename__ = "project_agents"
-
-    project_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
-    )
-    agent_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True
-    )
-    connection_overrides: Mapped[dict[str, Any]] = mapped_column(default=dict)
-    secret_overrides: Mapped[dict[str, Any]] = mapped_column(default=dict)
-
-
 # --- Tasks and runs ---------------------------------------------------------------------
 
 
@@ -263,7 +193,8 @@ class Task(Base):
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True)  # the user's task_id
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"))
-    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id", ondelete="RESTRICT"))
+    agent: Mapped[str] = mapped_column(String(63), index=True)
+    """The agent's slug in the project's config."""
     instructions: Mapped[str] = mapped_column(Text)
     context: Mapped[Any] = mapped_column(nullable=True)
     correlation: Mapped[Any] = mapped_column(nullable=True)
@@ -271,7 +202,6 @@ class Task(Base):
     received_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow, index=True)
 
     project: Mapped[Project] = relationship(lazy="joined", innerjoin=True)
-    agent: Mapped[Agent] = relationship(lazy="joined", innerjoin=True)
     attachments: Mapped[list[Attachment]] = relationship(
         cascade="all, delete-orphan", lazy="selectin", order_by="Attachment.name"
     )
@@ -308,6 +238,13 @@ class Run(Base):
     resume_request_ids: Mapped[list[Any] | None] = mapped_column(nullable=True)
     worker_id: Mapped[str | None] = mapped_column(String(64))
     """The worker driving the run through preparing/running/resuming (crash recovery)."""
+    config_commit: Mapped[str | None] = mapped_column(String(64))
+    """The config repository commit the run read in ``preparing``."""
+    config: Mapped[dict[str, Any] | None] = mapped_column(OrderedJson, nullable=True)
+    """The parsed config of that commit (secret references as written), so resumes and
+    the run spec use what the run started with."""
+    agent_snapshot: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
+    """name, model, provider, runtime, identity and connection names of the agent."""
 
     task: Mapped[Task] = relationship(lazy="joined", innerjoin=True)
 
@@ -408,24 +345,20 @@ class AdminUser(Base):
 
 __all__ = [
     "AdminUser",
-    "Agent",
-    "AgentConnection",
     "Artifact",
     "Attachment",
     "Base",
-    "Connection",
-    "EnvVar",
     "Event",
+    "GitCredential",
+    "ImageBuild",
     "InfoRequest",
     "Project",
-    "ProjectAgent",
-    "ProjectService",
     "ProjectVerification",
     "Provider",
     "ProviderTest",
-    "Repository",
     "Run",
-    "Secret",
+    "SecretStore",
+    "SecretStoreEntry",
     "Task",
     "TranscriptChunk",
     "Worker",

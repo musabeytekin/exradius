@@ -59,7 +59,7 @@ def run_event(session: AsyncSession, run: Run, type: EventType, payload: dict[st
         task_id=task.id,
         run_id=run.id,
         project=task.project.slug,
-        agent=task.agent.slug,
+        agent=task.agent,
         correlation=task.correlation,
         type=type,
         payload=payload,

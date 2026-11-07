@@ -1,5 +1,5 @@
 """Model providers (docs/providers.md): resolution, injection and the one-time migration
-of the legacy Anthropic key."""
+of ``EXRADIUS_ANTHROPIC_API_KEY``."""
 
 from __future__ import annotations
 
@@ -16,13 +16,12 @@ from sqlalchemy.exc import IntegrityError
 from exradius.config import Settings
 from exradius.crypto import SecretBox
 from exradius.db import SessionFactory
-from exradius.models import Agent, Provider, Secret, utcnow
+from exradius.models import Provider, utcnow
 from exradius.runtimes import AuthMethod, ProviderCredential, all_runtimes, runtime_class
 
 log = logging.getLogger(__name__)
 
 NO_PROVIDER = "no provider configured"
-LEGACY_SECRET = "ANTHROPIC_API_KEY"
 MIGRATED_SLUG = "anthropic-migrated"
 MIGRATED_NAME = "Anthropic (migrated)"
 
@@ -84,11 +83,16 @@ async def provider_count(session) -> int:
     return await session.scalar(select(func.count()).select_from(Provider)) or 0
 
 
-async def resolve_provider(session, agent: Agent) -> Provider | None:
-    """The agent's provider, or the default one."""
-    if agent.provider_id is not None:
-        return await session.get(Provider, agent.provider_id)
+async def resolve_provider(session, slug: str | None) -> Provider | None:
+    """The provider an agent's config names (by slug), or the default one."""
+    if slug is not None:
+        return await session.scalar(select(Provider).where(Provider.slug == slug))
     return await default_provider(session)
+
+
+def provider_problem(slug: str | None) -> str:
+    """Why ``resolve_provider`` found nothing, as tasks are refused."""
+    return f"unknown provider {slug!r}" if slug else NO_PROVIDER
 
 
 def credential(box: SecretBox, provider: Provider) -> ProviderCredential:
@@ -115,26 +119,19 @@ def strip_credentials(runtime: str, env: dict[str, str]) -> dict[str, str]:
 
 
 async def bootstrap_provider(sessions: SessionFactory, settings: Settings, box: SecretBox) -> uuid.UUID | None:
-    """One-time migration (providers.md §3): with no provider yet, turn the legacy global
-    secret ``ANTHROPIC_API_KEY`` or ``EXRADIUS_ANTHROPIC_API_KEY`` into the default provider."""
+    """With no provider yet, turn ``EXRADIUS_ANTHROPIC_API_KEY`` into the default provider
+    (providers.md §3)."""
+    if not settings.anthropic_api_key:
+        return None
     async with sessions() as session:
         if await provider_count(session):
-            return None
-        secret = await session.scalar(
-            select(Secret).where(Secret.project_id.is_(None), Secret.key == LEGACY_SECRET)
-        )
-        if secret is not None:
-            key, source = box.decrypt(secret.value_encrypted), f"global secret {LEGACY_SECRET}"
-        elif settings.anthropic_api_key:
-            key, source = settings.anthropic_api_key, "EXRADIUS_ANTHROPIC_API_KEY"
-        else:
             return None
         provider = Provider(
             slug=MIGRATED_SLUG,
             name=MIGRATED_NAME,
             kind="anthropic",
             auth_method="api_key",
-            credential_encrypted=box.encrypt(key),
+            credential_encrypted=box.encrypt(settings.anthropic_api_key),
             settings={},
             is_default=True,
         )
@@ -145,9 +142,8 @@ async def bootstrap_provider(sessions: SessionFactory, settings: Settings, box: 
             await session.rollback()
             return None
         log.warning(
-            "created default provider %r from %s; that value is no longer read, manage the "
-            "credential on the Providers page",
+            "created default provider %r from EXRADIUS_ANTHROPIC_API_KEY; that value is no longer "
+            "read, manage the credential on the Providers page",
             MIGRATED_NAME,
-            source,
         )
         return provider.id

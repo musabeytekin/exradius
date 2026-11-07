@@ -1,24 +1,23 @@
-import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
-import { ImageField, SetupCommandsEditor } from "@/components/projectFields";
+import { HealthChip } from "@/components/HealthChip";
 import { Table } from "@/components/ui/controls";
 import { Dialog } from "@/components/ui/overlays";
-import { Button, Card, Chip, EmptyState, Field, Input, Mono, PageHeader, SkeletonRows } from "@/components/ui/primitives";
-import { api } from "@/lib/api";
-import { relativeTime } from "@/lib/format";
+import { Banner, Button, Card, EmptyState, Field, Input, Mono, PageHeader, SkeletonRows } from "@/components/ui/primitives";
+import { api, refusal } from "@/lib/api";
+import { commitOf, projectHealth, projectName, shortCommit, storeNameOf } from "@/lib/projectConfig";
 import { qk, useProjects } from "@/lib/queries";
-import { SLUG_RE, slugify } from "@/lib/slug";
 import { toast } from "@/lib/toast";
+import { useStoreKeyIndex } from "@/lib/useStoreKeyIndex";
 
 export function ProjectsPage() {
   const projects = useProjects();
+  const storeKeys = useStoreKeyIndex();
   const { create } = useSearch({ from: "/app/projects" });
   const navigate = useNavigate();
   const [open, setOpen] = useState(!!create);
   const list = projects.data ?? [];
-  const repos = useQueries({ queries: list.map((p) => ({ queryKey: qk.repositories(p.id), queryFn: () => api.repositories.list(p.id) })) });
-  const agents = useQueries({ queries: list.map((p) => ({ queryKey: qk.projectAgents(p.id), queryFn: () => api.projectAgents.list(p.id) })) });
 
   const setDialog = (o: boolean) => {
     setOpen(o);
@@ -29,50 +28,40 @@ export function ProjectsPage() {
     <>
       <PageHeader
         title="Projects"
-        description="A project is the working directory a run starts in: its repositories, environment, secrets and image."
-        actions={<Button variant="primary" icon="plus" onClick={() => setOpen(true)}>New project</Button>}
+        actions={<Button variant="primary" icon="plus" onClick={() => setOpen(true)}>Add project</Button>}
       />
       <Card>
         {projects.isLoading ? (
           <SkeletonRows rows={3} />
+        ) : projects.isError ? (
+          <p className="px-4 py-6 text-center text-sm text-err">Could not load projects: {(projects.error as Error).message}</p>
         ) : list.length === 0 ? (
-          <EmptyState
-            icon="projects"
-            title="No projects yet"
-            action={<Button variant="primary" icon="plus" onClick={() => setOpen(true)}>Create a project</Button>}
-          >
-            Tasks name a project by slug. Create one, add its repositories, then verify it prepares cleanly.
-          </EmptyState>
+          <EmptyState icon="projects" title="No projects" action={<Button variant="primary" icon="plus" onClick={() => setOpen(true)}>Add project</Button>} />
         ) : (
           <Table.Root>
             <Table.Head>
               <tr>
                 <Table.Th>Project</Table.Th>
-                <Table.Th>Image</Table.Th>
-                <Table.Th>Repositories</Table.Th>
-                <Table.Th>Agents</Table.Th>
-                <Table.Th className="text-right">Created</Table.Th>
+                <Table.Th>Config repository</Table.Th>
+                <Table.Th>Commit</Table.Th>
+                <Table.Th className="text-right">Health</Table.Th>
               </tr>
             </Table.Head>
             <tbody>
-              {list.map((p, i) => {
-                const r = repos[i]?.data;
-                const failing = r?.filter((x) => x.last_check && !x.last_check.ok).length ?? 0;
+              {list.map((p) => {
+                const commit = commitOf(p);
                 return (
                   <Table.Row key={p.id} onClick={() => navigate({ to: "/projects/$projectId", params: { projectId: p.id }, search: {} })}>
                     <Table.Td>
-                      <div className="font-medium text-fg">{p.name}</div>
-                      <Mono className="text-xs text-muted">{p.slug}</Mono>
+                      <Mono className="font-medium">{p.slug}</Mono>
+                      <div className="text-xs text-muted">{projectName(p)}</div>
                     </Table.Td>
-                    <Table.Td>{p.image ? <Mono className="text-xs text-muted">{p.image}</Mono> : <span className="text-xs text-subtle">default image</span>}</Table.Td>
-                    <Table.Td>
-                      <div className="flex items-center gap-2">
-                        <span className="tabular">{r?.length ?? "—"}</span>
-                        {failing > 0 && <Chip tone="err" dot>{failing} failing</Chip>}
-                      </div>
+                    <Table.Td className="max-w-[480px]">
+                      <Mono className="block truncate text-xs text-muted" title={p.config_url}>{p.config_url || "—"}</Mono>
+                      <span className="text-xs text-subtle">{p.config_branch ?? "remote default"}{p.config_path ? ` · ${p.config_path}` : ""}</span>
                     </Table.Td>
-                    <Table.Td className="tabular">{agents[i]?.data?.length ?? "—"}</Table.Td>
-                    <Table.Td className="text-right text-xs text-subtle">{relativeTime(p.created_at)}</Table.Td>
+                    <Table.Td>{commit ? <Mono className="text-xs" title={commit}>{shortCommit(commit)}</Mono> : <span className="text-xs text-subtle">—</span>}</Table.Td>
+                    <Table.Td className="text-right"><HealthChip info={projectHealth(p, storeKeys(storeNameOf(p)))} /></Table.Td>
                   </Table.Row>
                 );
               })}
@@ -80,78 +69,61 @@ export function ProjectsPage() {
           </Table.Root>
         )}
       </Card>
-      {open && <CreateProjectDialog onOpenChange={setDialog} />}
+      {open && <AddProjectDialog onOpenChange={setDialog} />}
     </>
   );
 }
 
-function CreateProjectDialog({ onOpenChange }: { onOpenChange: (o: boolean) => void }) {
+function AddProjectDialog({ onOpenChange }: { onOpenChange: (o: boolean) => void }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const projects = useProjects();
-  const [name, setName] = useState("");
-  const [slug, setSlug] = useState("");
-  const [slugTouched, setSlugTouched] = useState(false);
-  const [image, setImage] = useState<string>("");
-  const [setup, setSetup] = useState("");
-  const effectiveSlug = slugTouched ? slug : slugify(name);
-  const taken = projects.data?.some((p) => p.slug === effectiveSlug);
-  const slugError = !effectiveSlug ? null : !SLUG_RE.test(effectiveSlug) ? "Lowercase letters, digits, dot, dash and underscore." : taken ? "Another project uses this slug." : null;
+  const [url, setUrl] = useState("");
+  const [branch, setBranch] = useState("");
+  const [path, setPath] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   const create = useMutation({
-    mutationFn: () =>
-      api.projects.create({
-        name: name.trim(),
-        slug: effectiveSlug,
-        image: image.trim() || null,
-        setup_commands: setup.split("\n").map((l) => l.trim()).filter(Boolean),
-      }),
+    mutationFn: () => api.projects.create({ config_url: url.trim(), config_branch: branch.trim() || null, config_path: path.trim() || null }),
     onSuccess: (p) => {
       qc.invalidateQueries({ queryKey: qk.projects });
-      toast.ok(`Project ${p.slug} created`, "Add its repositories next.");
+      toast.ok(`Project ${p.slug} added`);
       onOpenChange(false);
-      navigate({ to: "/projects/$projectId", params: { projectId: p.id }, search: { tab: "repositories" } });
+      navigate({ to: "/projects/$projectId", params: { projectId: p.id }, search: { tab: "config" } });
     },
-    onError: (e) => toast.err("Could not create the project", e),
+    onError: (e) => {
+      const m = refusal(e);
+      if (m) setError(m);
+      else toast.err("Could not add the project", e);
+    },
   });
 
   return (
     <Dialog
       open
       onOpenChange={onOpenChange}
-      title="New project"
+      title="Add project"
       width={560}
-      onSubmit={() => name.trim() && effectiveSlug && !slugError && create.mutate()}
+      onSubmit={() => url.trim() && create.mutate()}
       footer={
         <>
           <Button variant="secondary" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button type="submit" variant="primary" loading={create.isPending} disabled={!name.trim() || !effectiveSlug || !!slugError}>Create project</Button>
+          <Button type="submit" variant="primary" loading={create.isPending} disabled={!url.trim()}>Add project</Button>
         </>
       }
     >
       <div className="flex flex-col gap-4">
+        <Field label="Config repository URL" htmlFor="p-url">
+          <Input id="p-url" mono autoFocus value={url} onChange={(e) => { setUrl(e.target.value); setError(null); }} placeholder="https://github.com/acme/bank-config.git" spellCheck={false} />
+        </Field>
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Name" htmlFor="p-name">
-            <Input id="p-name" autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Billing platform" />
+          <Field label="Branch" htmlFor="p-branch" optional>
+            <Input id="p-branch" mono value={branch} onChange={(e) => { setBranch(e.target.value); setError(null); }} placeholder="remote default" spellCheck={false} />
           </Field>
-          <Field label="Slug" htmlFor="p-slug" error={slugError} hint={!slugError && "Tasks name the project by this."}>
-            <Input
-              id="p-slug"
-              mono
-              value={effectiveSlug}
-              invalid={!!slugError}
-              onChange={(e) => {
-                setSlugTouched(true);
-                setSlug(e.target.value.toLowerCase());
-              }}
-              placeholder="billing-platform"
-            />
+          <Field label="Path" htmlFor="p-path" optional>
+            <Input id="p-path" mono value={path} onChange={(e) => { setPath(e.target.value); setError(null); }} placeholder="exradius.yaml" spellCheck={false} />
           </Field>
         </div>
-        <ImageField value={image} onChange={setImage} />
-        <Field label="Setup commands" optional hint="Run in order in the project directory before each run. A non-zero exit fails the run.">
-          <SetupCommandsEditor value={setup} onChange={setSetup} />
-        </Field>
+        {error && <Banner tone="err" title="The config could not be read"><span className="whitespace-pre-wrap font-mono text-xs">{error}</span></Banner>}
       </div>
     </Dialog>
   );

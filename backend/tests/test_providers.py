@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 from exradius.api import provider_routes
 from exradius.api.app import create_app
-from exradius.models import Agent, Provider, ProviderTest, Secret
+from exradius.models import Provider, ProviderTest
 from exradius.providers import MIGRATED_NAME, bootstrap_provider, fingerprint
 from exradius.runner import main as runner_main
 from exradius.runner.environment import RunnerEnvironment
@@ -21,9 +21,9 @@ from exradius.runtimes import AuthMethod, ProbeResult, ProviderCredential, Provi
 from exradius.runtimes.base import PROBE_PREFIX
 from exradius.runtimes.claude_code import OAUTH_NOTICE, ClaudeCodeRuntime
 from exradius.worker.containers import ContainerExit
-from exradius.worker.intake import accept_task
 from exradius.worker.provider_test import ProviderTester, parse_probe
 from tests.test_api import admin, client, control, sync_db  # noqa: F401 - fixtures
+from tests.conftest import BASE_CONFIG, commit_config, make_config_repo
 from tests.test_run_manager import containers, manager, published, runner, states, submit_task  # noqa: F401
 
 API_KEY = {"slug": "anthropic", "name": "Anthropic", "kind": "anthropic", "auth_method": "api_key", "credential": "sk-ant-1"}
@@ -131,27 +131,43 @@ def test_exactly_one_default(admin, sync_db):
     assert admin.post(f"/api/providers/{uuid.uuid4()}/default").status_code == 404
 
 
-def test_delete_refusals(admin):
+AGENTS_CONFIG = """\
+version: 1
+project: {slug: p}
+agents:
+  a: {provider: %s}
+  b: {provider: subscription}
+  c: {provider: anthropic}
+"""
+
+
+def add_agents(admin, root, a_provider="subscription"):
+    remote = make_config_repo(root, {"exradius.yaml": AGENTS_CONFIG % a_provider})
+    project = admin.post("/api/projects", json={"config_url": str(remote)}).json()
+    return remote, project
+
+
+def test_delete_refusals(admin, tmp_path):
     default, other = create(admin), create(admin, **OAUTH)
-    agent = admin.post("/api/agents", json={"slug": "a", "name": "A", "identity_email": "a@agents.example", "provider_id": other["id"]}).json()
+    remote, project = add_agents(admin, tmp_path)
 
     refused = admin.delete(f"/api/providers/{other['id']}")
-    assert refused.status_code == 409 and "used by agents a" in refused.json()["detail"]
+    assert refused.status_code == 409 and refused.json()["detail"] == (
+        "used by agents p/a, p/b; move them to another provider first")
+    refused = admin.delete(f"/api/providers/{default['id']}")
+    assert refused.status_code == 409 and refused.json()["detail"].startswith("used by agents p/c;")
+
+    commit_config(remote, {"exradius.yaml": AGENTS_CONFIG.replace("  a: {provider: %s}\n", "").replace("  b: {provider: subscription}\n", "").replace("{provider: anthropic}", "{}")})
+    admin.post(f"/api/projects/{project['id']}/reread")  # usage follows the latest read
     refused = admin.delete(f"/api/providers/{default['id']}")
     assert refused.status_code == 409 and "default" in refused.json()["detail"]
-
-    admin.patch(f"/api/agents/{agent['id']}", json={"provider_id": None})  # back to the default
     assert admin.delete(f"/api/providers/{other['id']}").status_code == 204
-    # The default can go once it is the only provider.
-    assert admin.delete(f"/api/providers/{default['id']}").status_code == 204
-    assert admin.get("/api/providers").json() == []
 
 
-def test_agent_count_includes_agents_on_the_default(admin):
-    default, other = create(admin), create(admin, **OAUTH)
-    admin.post("/api/agents", json={"slug": "a", "name": "A", "identity_email": "a@agents.example"})
-    admin.post("/api/agents", json={"slug": "b", "name": "B", "identity_email": "b@agents.example", "provider_id": other["id"]})
-    admin.post("/api/agents", json={"slug": "c", "name": "C", "identity_email": "c@agents.example", "provider_id": default["id"]})
+def test_agent_count_includes_agents_on_the_default(admin, tmp_path):
+    create(admin), create(admin, **OAUTH)
+    remote = make_config_repo(tmp_path, {"exradius.yaml": AGENTS_CONFIG.replace("{provider: %s}", "{}")})
+    admin.post("/api/projects", json={"config_url": str(remote)})
     counts = {slug: p["agent_count"] for slug, p in providers(admin).items()}
     assert counts == {"anthropic": 2, "subscription": 1}
 
@@ -234,17 +250,6 @@ def test_oauth_test_is_handed_to_a_worker(admin, control, sync_db):
 # Agents and status ----------------------------------------------------------------------------
 
 
-def test_agent_provider_id(admin):
-    provider = create(admin)
-    agent = admin.post("/api/agents", json={"slug": "a", "name": "A", "identity_email": "a@agents.example"}).json()
-    assert agent["provider_id"] is None
-    assert admin.post("/api/agents", json={"slug": "b", "name": "B", "identity_email": "b@agents.example", "provider_id": str(uuid.uuid4())}).status_code == 422
-    updated = admin.patch(f"/api/agents/{agent['id']}", json={"provider_id": provider["id"]}).json()
-    assert updated["provider_id"] == provider["id"]
-    assert admin.get(f"/api/agents/{agent['id']}").json()["provider_id"] == provider["id"]
-    assert admin.patch(f"/api/agents/{agent['id']}", json={"name": "A2"}).json()["provider_id"] == provider["id"]
-
-
 def test_status_shows_the_default_provider(admin, anthropic_api):
     provider = create(admin, credential="sk-good")
     create(admin, **OAUTH)
@@ -261,14 +266,10 @@ def test_status_shows_the_default_provider(admin, anthropic_api):
 # Injection and intake -------------------------------------------------------------------------
 
 
-async def test_api_key_provider_is_injected(manager, sessions, store, containers, published, configured):
-    async with sessions() as session:
-        project_id = configured["project"].id
-        # A project secret with a provider variable's name does not reach the run.
-        session.add(Secret(project_id=project_id, key="ANTHROPIC_API_KEY", value_encrypted=manager.box.encrypt("sk-project")))
-        session.add(Secret(project_id=project_id, key="CLAUDE_CODE_OAUTH_TOKEN", value_encrypted=manager.box.encrypt("oat-project")))
-        await session.commit()
-    run_id = await submit_task(sessions, store, published)
+async def test_api_key_provider_is_injected(manager, sessions, store, containers, published, configured, accept):
+    # Project variables with a provider variable's name do not reach the run.
+    commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + "env:\n  ANTHROPIC_API_KEY: sk-project\n  CLAUDE_CODE_OAUTH_TOKEN: oat\n"})
+    run_id = await submit_task(accept, published)
     containers.behaviours.append(runner(sessions))
     await manager.execute(run_id)
     env = containers.started[0]["env"]
@@ -276,15 +277,13 @@ async def test_api_key_provider_is_injected(manager, sessions, store, containers
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
 
-async def test_agents_own_oauth_provider_is_injected(manager, sessions, store, containers, published, configured, box):
+async def test_agents_own_oauth_provider_is_injected(manager, sessions, store, containers, published, configured, box, accept):
     async with sessions() as session:
-        oauth = Provider(slug="sub", name="Sub", kind="anthropic", auth_method="oauth_token",
-                         credential_encrypted=box.encrypt("oat-secret"), settings={})
-        session.add(oauth)
-        await session.flush()
-        (await session.get(Agent, configured["agent"].id)).provider_id = oauth.id
+        session.add(Provider(slug="sub", name="Sub", kind="anthropic", auth_method="oauth_token",
+                             credential_encrypted=box.encrypt("oat-secret"), settings={}))
         await session.commit()
-    run_id = await submit_task(sessions, store, published)
+    commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG.replace("    role: You fix bugs.\n", "    role: You fix bugs.\n    provider: sub\n")})
+    run_id = await submit_task(accept, published)
     containers.behaviours.append(runner(sessions))
     await manager.execute(run_id)
     env = containers.started[0]["env"]
@@ -293,20 +292,20 @@ async def test_agents_own_oauth_provider_is_injected(manager, sessions, store, c
     assert states(published)[-1] == "completed"
 
 
-async def test_intake_rejects_without_providers(sessions, store, configured):
+async def test_intake_rejects_without_providers(sessions, store, configured, accept):
     async with sessions() as session:
         await session.delete(await session.get(Provider, configured["provider"].id))
         await session.commit()
     body = {"version": 1, "task_id": "T-np", "project": "billing-platform", "agent": "bug-fixer", "instructions": "x"}
-    intake = await accept_task(sessions, store, json.dumps(body).encode())
+    intake = await accept(json.dumps(body).encode())
     assert intake.run_id is None
     [event] = intake.events
     assert event.envelope.payload["state"] == "rejected"
     assert event.envelope.payload["reason"] == "no provider configured"
 
 
-async def test_run_fails_if_the_provider_is_gone_at_container_start(manager, sessions, store, containers, published, configured):
-    run_id = await submit_task(sessions, store, published)
+async def test_run_fails_if_the_provider_is_gone_at_container_start(manager, sessions, store, containers, published, configured, accept):
+    run_id = await submit_task(accept, published)
     async with sessions() as session:
         await session.delete(await session.get(Provider, configured["provider"].id))
         await session.commit()
@@ -444,16 +443,6 @@ async def test_bootstrap_from_the_environment(sessions, settings, box):
         )
         assert box.decrypt(provider.credential_encrypted) == "sk-legacy"
     assert await bootstrap_provider(sessions, settings, box) is None  # only while none exists
-
-
-async def test_bootstrap_prefers_the_global_secret(sessions, settings, box):
-    settings.anthropic_api_key = "sk-env"
-    async with sessions() as session:
-        session.add(Secret(project_id=None, key="ANTHROPIC_API_KEY", value_encrypted=box.encrypt("sk-secret")))
-        await session.commit()
-    provider_id = await bootstrap_provider(sessions, settings, box)
-    async with sessions() as session:
-        assert box.decrypt((await session.get(Provider, provider_id)).credential_encrypted) == "sk-secret"
 
 
 async def test_bootstrap_does_nothing_without_a_legacy_key(sessions, settings, box):

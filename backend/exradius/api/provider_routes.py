@@ -9,10 +9,11 @@ from urllib.parse import quote
 import httpx
 from fastapi import APIRouter, HTTPException, Response, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 
 from exradius.api.deps import DB, Admin, State, get_or_404
-from exradius.models import Agent, Provider, ProviderTest, utcnow
+from exradius.models import Provider, ProviderTest, utcnow
+from exradius.project_state import agent_uses
 from exradius.providers import (
     fingerprint,
     find_auth_method,
@@ -38,19 +39,20 @@ WORKER_TESTED = {("anthropic", "oauth_token")}
 """Kind/auth method pairs with no cheap API check: a worker runs a one-line session."""
 
 
-async def _agent_counts(session) -> dict[uuid.UUID, int]:
-    rows = await session.execute(
-        select(Agent.provider_id, func.count()).where(Agent.provider_id.is_not(None)).group_by(Agent.provider_id)
-    )
-    return {provider_id: count for provider_id, count in rows.all()}
+async def _agent_counts(session) -> dict[str | None, int]:
+    """Agents per provider slug in the projects' configs; ``None`` counts those that use
+    the default."""
+    counts: dict[str | None, int] = {}
+    for use in await agent_uses(session):
+        counts[use.provider] = counts.get(use.provider, 0) + 1
+    return counts
 
 
-async def _out(session, provider: Provider, counts: dict[uuid.UUID, int] | None = None) -> s.ProviderOut:
+async def _out(session, provider: Provider, counts: dict[str | None, int] | None = None) -> s.ProviderOut:
     counts = counts if counts is not None else await _agent_counts(session)
-    count = counts.get(provider.id, 0)
+    count = counts.get(provider.slug, 0)
     if provider.is_default:
-        # Agents without a provider of their own use the default.
-        count += await session.scalar(select(func.count()).select_from(Agent).where(Agent.provider_id.is_(None))) or 0
+        count += counts.get(None, 0)  # agents without a provider of their own use the default
     return s.ProviderOut.model_validate(
         {
             **{c: getattr(provider, c) for c in s.ProviderOut.model_fields if c not in ("agent_count", "models")},
@@ -110,7 +112,7 @@ async def update_provider(provider_id: uuid.UUID, body: s.ProviderUpdate, sessio
     settings = data["settings"] if data.get("settings") is not None else provider.settings or {}
     _validate(kind, auth_method, settings)
     if (kind, auth_method) != (provider.kind, provider.auth_method):
-        await _check_agents_accept(session, provider.id, kind, auth_method)
+        await _check_agents_accept(session, provider.slug, kind, auth_method)
         if not data.get("credential"):
             raise HTTPException(422, "a new credential is required when the kind or auth method changes")
 
@@ -127,11 +129,11 @@ async def update_provider(provider_id: uuid.UUID, body: s.ProviderUpdate, sessio
     return await _out(session, provider)
 
 
-async def _check_agents_accept(session, provider_id: uuid.UUID, kind: str, auth_method: str) -> None:
+async def _check_agents_accept(session, slug: str, kind: str, auth_method: str) -> None:
     from exradius.runtimes import runtime_class
 
-    agents = (await session.scalars(select(Agent).where(Agent.provider_id == provider_id))).all()
-    refused = [a.slug for a in agents if not runtime_class(a.runtime).capabilities.accepts(kind, auth_method)]
+    refused = [u.label for u in await agent_uses(session)
+               if u.provider == slug and not runtime_class(u.runtime).capabilities.accepts(kind, auth_method)]
     if refused:
         raise HTTPException(409, f"agents {', '.join(refused)} use this provider and their runtime cannot use {kind}/{auth_method}")
 
@@ -139,7 +141,7 @@ async def _check_agents_accept(session, provider_id: uuid.UUID, kind: str, auth_
 @router.delete("/{provider_id}", status_code=NO_CONTENT)
 async def delete_provider(provider_id: uuid.UUID, session: DB, _: Admin):
     provider = await get_or_404(session, Provider, provider_id)
-    agents = (await session.scalars(select(Agent.slug).where(Agent.provider_id == provider.id).order_by(Agent.slug))).all()
+    agents = [u.label for u in await agent_uses(session) if u.provider == provider.slug]
     if agents:
         raise HTTPException(409, f"used by agents {', '.join(agents)}; move them to another provider first")
     if provider.is_default and await provider_count(session) > 1:

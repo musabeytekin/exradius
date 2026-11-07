@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 
 import pytest
 
@@ -194,3 +195,40 @@ async def test_project_python_settings_do_not_reach_the_runner(docker_settings):
     assert "EVIL" not in result.logs
     # The runner started on its own Python and got as far as looking for its run token.
     assert "EXRADIUS_RUN_TOKEN is not set" in result.logs, result.logs
+
+
+@needs_docker
+async def test_images_build_from_a_config_repository(docker_settings, tmp_path):
+    """``build_image`` with a context taken from the config repository (config-repo.md §4)."""
+    from exradius.config_repo import build_context
+    from exradius.worker.containers import ContainerManager
+    from tests.conftest import git, make_config_repo
+
+    remote = make_config_repo(tmp_path, {
+        "docker/Dockerfile": f"FROM {PROJECT_IMAGE}\nCOPY hello.txt /hello.txt\n",
+        "docker/hello.txt": "hello\n",
+        "bad.Dockerfile": f"FROM {PROJECT_IMAGE}\nRUN exit 3\n",
+    })
+    commit = git("rev-parse", "HEAD", cwd=tmp_path / "config-work").strip()
+    containers = ContainerManager(docker_settings, docker_client)
+    tag = f"exradius/it/workstation:{uuid.uuid4().hex[:12]}"
+    try:
+        context, dockerfile = build_context(remote, commit, "docker", "docker/Dockerfile")
+        ok, output = await containers.build_image(context, dockerfile=dockerfile, tag=tag)
+        assert ok, output
+        assert await containers.image_exists(tag)
+        container = docker_client.containers.run(tag, entrypoint=["/bin/cat"], command=["/hello.txt"], detach=True)
+        container.wait()
+        assert container.logs() == b"hello\n"
+        container.remove()
+
+        context, dockerfile = build_context(remote, commit, "docker", "bad.Dockerfile")
+        ok, output = await containers.build_image(context, dockerfile=dockerfile, tag=tag + "-bad")
+        assert not ok and "non-zero code: 3" in output, output
+        assert not await containers.image_exists(tag + "-bad")
+    finally:
+        for name in (tag, tag + "-bad"):
+            try:
+                docker_client.images.remove(name, force=True)
+            except Exception:  # noqa: BLE001 - cleanup
+                pass

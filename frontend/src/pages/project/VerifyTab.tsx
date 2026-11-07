@@ -6,7 +6,7 @@ import { Banner, Button, Card, CardHeader, EmptyState, Skeleton, Spinner } from 
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { between, duration, relativeTime } from "@/lib/format";
-import { qk, useRepositories } from "@/lib/queries";
+import { qk } from "@/lib/queries";
 import { toast } from "@/lib/toast";
 import type { Project, Verification, VerificationStep } from "@/lib/types";
 
@@ -14,7 +14,6 @@ const isLive = (v: Verification | undefined) => v?.state === "pending" || v?.sta
 
 export function VerifyTab({ project }: { project: Project }) {
   const qc = useQueryClient();
-  const repos = useRepositories(project.id);
   const history = useQuery({
     queryKey: qk.verifications(project.id),
     queryFn: () => api.projects.verifications(project.id),
@@ -37,7 +36,7 @@ export function VerifyTab({ project }: { project: Project }) {
       <Card>
         <CardHeader
           title="Verify project"
-          description="A dry run: the worker prepares the project exactly as a run would, in a throwaway directory, then deletes it. No agent runs."
+          description="Reads the config, builds images, clones, starts services and runs setup in a throwaway directory. No agent runs."
           actions={
             <Button variant="primary" icon="play" loading={start.isPending} disabled={isLive(history.data?.[0])} onClick={() => start.mutate()}>
               {isLive(history.data?.[0]) ? "Verifying…" : history.data?.length ? "Verify again" : "Verify"}
@@ -52,9 +51,7 @@ export function VerifyTab({ project }: { project: Project }) {
             title="Not verified yet"
             action={<Button variant="secondary" icon="play" onClick={() => start.mutate()} loading={start.isPending}>Run the dry run</Button>}
           >
-            {repos.data?.length
-              ? `Fetches ${repos.data.length} mirror${repos.data.length === 1 ? "" : "s"}, clones the configured branches and runs ${project.setup_commands.length} setup command${project.setup_commands.length === 1 ? "" : "s"}. Errors show up here instead of at the first task.`
-              : "This project has no repositories, so verification only checks the directory and setup commands."}
+            No verification has run for this project.
           </EmptyState>
         ) : (
           <VerificationView v={shown} />

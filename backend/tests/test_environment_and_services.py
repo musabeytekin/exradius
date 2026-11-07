@@ -16,17 +16,22 @@ from sqlalchemy import select
 
 from exradius.api import provider_routes
 from exradius.config import Settings
+from exradius.crypto import hash_token
 from exradius.environment import (
     NOT_AVAILABLE,
     RepoFact,
     ServiceFact,
     build_environment_text,
     can_push,
-    project_environment_text,
+    config_environment_text,
     public_url,
     service_settings,
+    workstation_label,
 )
-from exradius.models import EnvVar, Project, ProjectService, ProjectVerification, Repository, Run, Secret, Task
+from exradius.models import ProjectVerification, Run, SecretStore, SecretStoreEntry, Task
+from exradius.resolve import StoreValues, exported_secrets
+from exradius.schemas.project_config import parse_config
+from exradius.worker.builds import Images
 from exradius.runner.prompt import OPERATING_RULES, build_system_prompt
 from exradius.runtimes import RunSpec
 from exradius.runtimes.claude_code import ClaudeCodeRuntime, write_default_settings
@@ -43,8 +48,8 @@ from exradius.worker.containers import (
 )
 from exradius.worker.delivery import delivery_warnings
 from exradius.worker.verify import ProjectVerifier
-from tests.conftest import git
-from tests.test_api import admin, client, control, make_run, setup_configuration, sync_db  # noqa: F401
+from tests.conftest import BASE_CONFIG, commit_config, git
+from tests.test_api import API_CONFIG, admin, client, control, make_run, setup_configuration, sync_db  # noqa: F401
 from tests.test_run_manager import (  # noqa: F401 - fixtures
     containers,
     manager,
@@ -96,7 +101,7 @@ Ask before touching the ledger schema."""
 
 def test_environment_text_matches_the_documented_layout():
     notes = "\n  Run ./mvnw -o; the Maven cache is warm.\nAsk before touching the ledger schema.\n\n"
-    text = build_environment_text(image="bank-of-anthos-dev:latest", repositories=REPOS, services=SERVICES, notes=notes)
+    text = build_environment_text(image="the image bank-of-anthos-dev:latest", repositories=REPOS, services=SERVICES, notes=notes)
     assert text == EXPECTED.replace("\nRun ./mvnw", "\nRun ./mvnw")  # notes are stripped, else verbatim
     for secret in ("ghp_SECRET", "x-access-token", "QSECRET", "frag"):
         assert secret not in text
@@ -118,13 +123,13 @@ def test_service_settings_show_plain_values_and_name_secrets():
 
 def test_secret_hint_only_when_a_setting_names_a_variable():
     plain = [ServiceFact("redis", "redis:7", (6379,), ("REDIS_ARGS=--save ''",))]
-    text = build_environment_text(image="i", repositories=[], services=plain, notes="")
+    text = build_environment_text(image="the image i", repositories=[], services=plain, notes="")
     assert "- redis (redis:7) on port 6379, REDIS_ARGS=--save ''\n\nThe working" in text
     assert "environment variable NAME" not in text
 
 
 def test_environment_text_without_services_notes_or_repositories():
-    text = build_environment_text(image="python:3.14", repositories=[], services=[], notes="   ")
+    text = build_environment_text(image="the image python:3.14", repositories=[], services=[], notes="   ")
     assert text == (
         "# Your environment\n\n"
         "You run unattended in a Linux container built from the image python:3.14.\n"
@@ -158,32 +163,51 @@ def test_pushing_needs_permission_a_secret_and_https():
     assert not can_push("git@h:a.git", True, True)
 
 
-async def test_project_environment_text_from_the_database(sessions, box, configured):
-    async with sessions() as session:
-        project = await session.scalar(select(Project))
-        project.image, project.notes = "bank-of-anthos-dev:latest", "Use the warm Maven cache."
-        token = Secret(project_id=project.id, key="GH", value_encrypted=box.encrypt("ghp_x"))
-        session.add(token)
-        await session.flush()
-        session.add_all([
-            Repository(project_id=project.id, name="b-repo", url="https://u:ghp_x@github.com/acme/b.git",
-                       auth_secret_id=token.id, push_allowed=True),
-            Repository(project_id=project.id, name="a-repo", url="https://github.com/acme/a.git"),
-            ProjectService(project_id=project.id, name="redis", image="redis:7", ports=[6379], position=1),
-            ProjectService(project_id=project.id, name="postgres", image="postgres:16", ports=[5432], position=0,
-                           env={"POSTGRES_USER": "app", "POSTGRES_PASSWORD": "${secret:DB_PASSWORD}"}),
-            Secret(project_id=project.id, key="DB_PASSWORD", value_encrypted=box.encrypt("s3cret-pw")),
-        ])
-        await session.commit()
-        text = await project_environment_text(session, project.id, "exradius-project-default:0.1.0")
+ENV_CONFIG = """\
+version: 1
+project: {slug: bank}
+secret_store: bank
+workstation: {image: "bank-of-anthos-dev:latest"}
+repositories:
+  - {name: b-repo, url: "https://u:ghp_x@github.com/acme/b.git", credential: "${secret:GH}", push: true}
+  - {name: a-repo, url: "https://github.com/acme/a.git", branch: main}
+services:
+  postgres:
+    image: postgres:16
+    ports: [5432]
+    env: {POSTGRES_USER: app, POSTGRES_PASSWORD: "${secret:DB_PASSWORD}", ODD: "${secret:odd.name}"}
+  redis: {image: "redis:7", ports: [6379]}
+notes: |
+  Use the warm Maven cache.
+agents:
+  dev: {}
+"""
+
+
+def test_environment_text_from_the_config():
+    config = parse_config(ENV_CONFIG).config
+    text = config_environment_text(config, "exradius-project-default:0.1.0")
     assert "built from the image bank-of-anthos-dev:latest." in text
-    assert "- a-repo: branch main, origin https://github.com/acme/a.git, pushing NOT allowed\n" \
-           "- b-repo: branch main, origin https://github.com/acme/b.git, pushing allowed" in text
-    assert "- postgres (postgres:16) on port 5432, POSTGRES_USER=app, POSTGRES_PASSWORD=$DB_PASSWORD\n" \
+    # File order; a repository without a branch is on the default one.
+    assert "- b-repo: the default branch, origin https://github.com/acme/b.git, pushing allowed\n" \
+           "- a-repo: branch main, origin https://github.com/acme/a.git, pushing NOT allowed" in text
+    assert "- postgres (postgres:16) on port 5432, POSTGRES_USER=app, POSTGRES_PASSWORD=$DB_PASSWORD, " \
+           "ODD=<a secret you do not have>\n" \
            "- redis (redis:7) on port 6379\n" \
            "A value written as $NAME is the value of your environment variable NAME." in text
     assert text.endswith("Notes from the project's maintainers:\nUse the warm Maven cache.")
-    assert "ghp_x" not in text and "s3cret-pw" not in text
+    assert "ghp_x" not in text
+    assert exported_secrets(config) == ["DB_PASSWORD"]  # odd.name is not a variable name
+
+
+def test_environment_text_names_dockerfiles():
+    config = parse_config(ENV_CONFIG.replace('workstation: {image: "bank-of-anthos-dev:latest"}', "workstation: {dockerfile: docker/ws.Dockerfile}")
+                          .replace('redis: {image: "redis:7", ports: [6379]}', "redis: {dockerfile: redis/Dockerfile}"),
+                          config_dir=".exradius").config
+    text = config_environment_text(config, "default")
+    assert "You run unattended in a Linux container built from .exradius/docker/ws.Dockerfile.\n" in text
+    assert "- redis (built from .exradius/redis/Dockerfile)\n" in text
+    assert workstation_label(config, "default") == "built from .exradius/docker/ws.Dockerfile"
 
 
 # Prompt layout and the run spec ----------------------------------------------------------------
@@ -200,51 +224,31 @@ def test_system_prompt_is_rules_then_environment_then_role():
     assert build_system_prompt(spec()) == f"{OPERATING_RULES}\n\nYou fix bugs."  # older API: no section
 
 
-def test_internal_spec_carries_environment_and_model(client, admin, sync_db):
-    _, run_id = make_run(admin, sync_db)
-    project = sync_db.scalar(select(Project))
-    agent_id = sync_db.scalar(select(Task.agent_id))
-    assert admin.patch(f"/api/projects/{project.id}", json={"notes": "Be careful."}).status_code == 200
-    assert admin.patch(f"/api/agents/{agent_id}", json={"model": "claude-sonnet-5-5"}).json()["model"] == "claude-sonnet-5-5"
-    body = client.get(f"/internal/runs/{run_id}/spec", headers={"Authorization": "Bearer tok"}).json()
+def test_internal_spec_carries_environment_and_model(client, admin, sync_db, tmp_path):
+    config = API_CONFIG.replace("    role: You fix bugs.\n", "    role: You fix bugs.\n    model: claude-sonnet-5-5\n") + "notes: Be careful.\n"
+    cfg = setup_configuration(admin, tmp_path, config)
+    project = cfg["project"]
+    run = Run(id=uuid.uuid4(), task_id="T-9", state="running", token_hash=hash_token("tok"),
+              config=project["config"], config_commit=project["commit"])
+    sync_db.add_all([Task(id="T-9", project_id=uuid.UUID(project["id"]), agent="bug-fixer", instructions="x",
+                          state="running"), run])
+    sync_db.commit()
+    body = client.get(f"/internal/runs/{run.id}/spec", headers={"Authorization": "Bearer tok"}).json()
     assert body["model"] == "claude-sonnet-5-5"
     assert body["environment_text"].startswith("# Your environment\n\nYou run unattended")
     assert "- api: branch main, origin https://git.example/api.git, pushing NOT allowed" in body["environment_text"]
     assert body["environment_text"].endswith("Notes from the project's maintainers:\nBe careful.")
 
 
-def test_resolved_view_returns_environment_and_model(admin):
-    cfg = setup_configuration(admin)
-    pid, aid = cfg["project"]["id"], cfg["agent"]["id"]
-    admin.post(f"/api/projects/{pid}/services", json={"name": "postgres", "image": "postgres:16", "ports": [5432]})
-    resolved = admin.get(f"/api/projects/{pid}/agents/{aid}/resolved").json()
+def test_resolved_view_returns_environment_and_model(admin, tmp_path):
+    config = API_CONFIG + "services:\n  postgres: {image: 'postgres:16', ports: [5432], env: {POSTGRES_PASSWORD: '${secret:DOCS_KEY}'}}\n"
+    cfg = setup_configuration(admin, tmp_path, config)
+    resolved = admin.get(f"/api/projects/{cfg['project']['id']}/agents/bug-fixer/resolved").json()
     assert resolved["model"] is None
     assert resolved["image"].startswith("exradius-project-default:")
-    assert "- postgres (postgres:16) on port 5432" in resolved["environment_text"]
+    assert "- postgres (postgres:16) on port 5432, POSTGRES_PASSWORD=$DOCS_KEY" in resolved["environment_text"]
+    assert "docs-key" not in json.dumps(resolved)
     assert "Notes from" not in resolved["environment_text"]
-
-
-# Notes and model on the API --------------------------------------------------------------------
-
-
-def test_project_notes(admin):
-    project = admin.post("/api/projects", json={"slug": "p", "name": "P", "notes": "Hello"}).json()
-    assert project["notes"] == "Hello"
-    assert admin.patch(f"/api/projects/{project['id']}", json={"notes": None}).json()["notes"] == ""
-    assert admin.post("/api/projects", json={"slug": "q", "name": "Q"}).json()["notes"] == ""
-
-
-def test_agent_model(admin):
-    body = {"slug": "a", "name": "A", "identity_email": "a@agents.example"}
-    agent = admin.post("/api/agents", json={**body, "model": "claude-opus-5-5"}).json()
-    assert agent["model"] == "claude-opus-5-5"
-    aid = agent["id"]
-    assert admin.patch(f"/api/agents/{aid}", json={"name": "B"}).json()["model"] == "claude-opus-5-5"
-    assert admin.patch(f"/api/agents/{aid}", json={"model": "  "}).json()["model"] is None  # blank = default
-    assert admin.patch(f"/api/agents/{aid}", json={"model": "claude-opus-4-6[1m]"}).json()["model"] == "claude-opus-4-6[1m]"
-    assert admin.patch(f"/api/agents/{aid}", json={"model": None}).json()["model"] is None
-    assert admin.patch(f"/api/agents/{aid}", json={"model": "bad model id"}).status_code == 422
-    assert admin.post("/api/agents", json={**body, "slug": "b"}).json()["model"] is None
 
 
 def test_provider_catalog_lists_models(admin):
@@ -295,55 +299,6 @@ def test_oauth_provider_test_carries_the_model(admin, control, sync_db):
 
 
 # Services: API ---------------------------------------------------------------------------------
-
-
-def test_service_crud_and_validation(admin):
-    pid = admin.post("/api/projects", json={"slug": "p", "name": "P"}).json()["id"]
-    base = f"/api/projects/{pid}/services"
-    pg = admin.post(base, json={"name": "postgres", "image": "postgres:16", "ports": [5432],
-                                "env": {"POSTGRES_PASSWORD": "${secret:DB_PASSWORD}", "POSTGRES_USER": "app"},
-                                "ready": {"command": ["pg_isready", "-U", "app"]}})
-    assert pg.status_code == 201, pg.text
-    pg = pg.json()
-    assert (pg["position"], pg["ready"], pg["env"]["POSTGRES_PASSWORD"]) == (0, {"command": ["pg_isready", "-U", "app"]},
-                                                                             "${secret:DB_PASSWORD}")
-    redis = admin.post(base, json={"name": "redis", "image": "redis:7", "ports": [6379], "ready": {"tcp": 6379}}).json()
-    assert redis["position"] == 1
-    plain = admin.post(base, json={"name": "mail-pit2", "image": "axllent/mailpit"}).json()
-    assert plain["ready"] is None and plain["ports"] == []
-
-    for bad in (
-        {"name": "Postgres", "image": "x"},
-        {"name": "1db", "image": "x"},
-        {"name": "db_1", "image": "x"},
-        {"name": "db", "image": ""},
-        {"name": "db", "image": "x", "ports": [5432, 5432]},
-        {"name": "db", "image": "x", "ports": [70000]},
-        {"name": "db", "image": "x", "ready": {"tcp": 1, "command": ["x"]}},
-        {"name": "db", "image": "x", "ready": {"command": []}},
-        {"name": "db", "image": "x", "ready": {"http": "/"}},
-        {"name": "db", "image": "x", "env": {"BAD KEY": "1"}},
-    ):
-        assert admin.post(base, json=bad).status_code == 422, bad
-    # Names runs already resolve on the run network: the API's, and the stack's exradius-*.
-    for reserved in ("api", "exradius-api", "exradius-api-1", "exradius-postgres-1", "exradius"):
-        assert admin.post(base, json={"name": reserved, "image": "x"}).status_code == 422, reserved
-    assert admin.post(base, json={"name": "postgres", "image": "x"}).status_code == 409
-
-    patched = admin.patch(f"{base}/{redis['id']}", json={"image": "redis:7.4", "ready": None})
-    assert patched.json()["image"] == "redis:7.4" and patched.json()["ready"] is None
-    assert admin.patch(f"{base}/{redis['id']}", json={"name": "postgres"}).status_code == 409
-    assert admin.patch(f"{base}/{redis['id']}", json={"name": "cache"}).json()["name"] == "cache"
-
-    order = admin.put(f"{base}/order", json={"ids": [plain["id"], redis["id"], pg["id"]]})
-    assert [s["name"] for s in order.json()] == ["mail-pit2", "cache", "postgres"]
-    assert [s["name"] for s in admin.get(base).json()] == ["mail-pit2", "cache", "postgres"]
-    assert admin.put(f"{base}/order", json={"ids": [plain["id"]]}).status_code == 422
-
-    other = admin.post("/api/projects", json={"slug": "o", "name": "O"}).json()["id"]
-    assert admin.patch(f"/api/projects/{other}/services/{pg['id']}", json={"image": "x"}).status_code == 404
-    assert admin.delete(f"{base}/{pg['id']}").status_code == 204
-    assert [s["name"] for s in admin.get(base).json()] == ["mail-pit2", "cache"]
 
 
 # Services: Docker, with a fake client ----------------------------------------------------------
@@ -615,31 +570,42 @@ async def _async(value):
 # Services in the run lifecycle ------------------------------------------------------------------
 
 
+SERVICES_CONFIG = BASE_CONFIG + """\
+secret_store: billing
+workstation:
+  setup: [make migrate]
+services:
+  postgres:
+    image: postgres:16
+    ports: [5432]
+    env: {POSTGRES_PASSWORD: "${secret:DB_PASSWORD}", POSTGRES_USER: app}
+    ready: {command: [pg_isready, -U, app]}
+  redis: {image: "redis:7", ports: [6379]}
+env:
+  DATABASE_URL: postgres://app:${secret:DB_PASSWORD}@postgres:5432/app
+"""
+
+
 @pytest.fixture
 async def with_services(sessions, box, configured):
+    commit_config(configured["remote"], {"exradius.yaml": SERVICES_CONFIG})
     async with sessions() as session:
-        project = await session.scalar(select(Project))
-        project.setup_commands = ["make migrate"]
-        session.add(Secret(project_id=project.id, key="DB_PASSWORD", value_encrypted=box.encrypt("s3cret")))
-        session.add_all([
-            ProjectService(project_id=project.id, name="postgres", image="postgres:16", position=0, ports=[5432],
-                           env={"POSTGRES_PASSWORD": "${secret:DB_PASSWORD}", "POSTGRES_USER": "app"},
-                           ready={"command": ["pg_isready", "-U", "app"]}),
-            ProjectService(project_id=project.id, name="redis", image="redis:7", position=1, ports=[6379]),
-            EnvVar(project_id=project.id, key="DATABASE_URL", value="postgres://app:${secret:DB_PASSWORD}@postgres:5432/app"),
-        ])
+        secret_store = SecretStore(name="billing")
+        session.add(secret_store)
+        await session.flush()
+        session.add(SecretStoreEntry(store_id=secret_store.id, key="DB_PASSWORD", value_encrypted=box.encrypt("s3cret")))
         await session.commit()
-        return project
+    return configured["project"]
 
 
-async def test_run_with_services(manager, sessions, store, containers, published, with_services):
+async def test_run_with_services(manager, sessions, store, containers, published, with_services, accept):
     seen = {}
 
     def check(run, env):
         seen["env"] = env
 
     containers.behaviours.append(runner(sessions, check=check))
-    run_id = await submit_task(sessions, store, published)
+    run_id = await submit_task(accept, published)
     await manager.execute(run_id)
 
     assert states(published) == ["queued", "preparing", "running", "completed"]
@@ -649,21 +615,23 @@ async def test_run_with_services(manager, sessions, store, containers, published
     assert containers.setup_networks == [f"exradius-run-{label}"]
     assert containers.started[0]["service_network"] == f"exradius-run-{label}"
     assert seen["env"]["DATABASE_URL"] == "postgres://app:s3cret@postgres:5432/app"  # project env refs resolved
+    assert seen["env"]["DB_PASSWORD"] == "s3cret"  # what the section's $DB_PASSWORD names
     assert containers.services == {} and containers.networks == set()
 
 
-async def test_service_env_resolves_secrets(manager, sessions, with_services):
-    async with sessions() as session:
-        specs = await manager.service_specs(session, with_services.id)
-    assert [(s.name, s.env) for s in specs] == [
-        ("postgres", {"POSTGRES_PASSWORD": "s3cret", "POSTGRES_USER": "app"}),
-        ("redis", {}),
+async def test_service_env_resolves_secrets(manager, with_services):
+    config = parse_config(SERVICES_CONFIG).config
+    specs = manager.service_specs(config, Images("ws", {"postgres": "postgres:16", "redis": "redis:7"}),
+                                  StoreValues("billing", {"DB_PASSWORD": "s3cret"}))
+    assert [(s.name, s.image, s.env, s.ready) for s in specs] == [
+        ("postgres", "postgres:16", {"POSTGRES_PASSWORD": "s3cret", "POSTGRES_USER": "app"}, {"command": ["pg_isready", "-U", "app"]}),
+        ("redis", "redis:7", {}, None),
     ]
 
 
-async def test_service_failure_fails_the_run_in_preparing(manager, sessions, store, containers, published, with_services):
+async def test_service_failure_fails_the_run_in_preparing(manager, sessions, store, containers, published, with_services, accept):
     containers.service_failures["redis"] = "did not become ready within 120s waiting for running"
-    run_id = await submit_task(sessions, store, published)
+    run_id = await submit_task(accept, published)
     await manager.execute(run_id)
     assert states(published) == ["queued", "preparing", "failed"]
     [result] = results(published)
@@ -672,12 +640,12 @@ async def test_service_failure_fails_the_run_in_preparing(manager, sessions, sto
     assert containers.services == {} and containers.networks == set()  # cleaned up at finalize
 
 
-async def test_services_stay_up_while_waiting_and_resume_rejoins(manager, sessions, store, containers, published, with_services):
+async def test_services_stay_up_while_waiting_and_resume_rejoins(manager, sessions, store, containers, published, with_services, accept):
     from exradius.models import InfoRequest
     from exradius.worker.intake import accept_answer
 
     containers.behaviours += [runner(sessions, status="waiting_for_input", question="Which tenant?"), runner(sessions)]
-    run_id = await submit_task(sessions, store, published)
+    run_id = await submit_task(accept, published)
     await manager.execute(run_id)
     assert states(published)[-1] == "waiting_for_input"
     assert set(containers.services[str(run_id)]) == {"postgres", "redis"}  # still up
@@ -693,20 +661,18 @@ async def test_services_stay_up_while_waiting_and_resume_rejoins(manager, sessio
     assert containers.services == {}
 
 
-async def test_missing_service_secret_fails_the_run(manager, sessions, store, containers, published, with_services):
-    async with sessions() as session:
-        service = await session.scalar(select(ProjectService).where(ProjectService.name == "redis"))
-        service.env = {"REDIS_PASSWORD": "${secret:NOPE}"}
-        await session.commit()
-    run_id = await submit_task(sessions, store, published)
+async def test_missing_service_secret_fails_the_run(manager, sessions, store, containers, published, with_services, configured, accept):
+    run_id = await submit_task(accept, published)
+    commit_config(configured["remote"], {"exradius.yaml": SERVICES_CONFIG.replace('redis: {image: "redis:7", ports: [6379]}',
+                                                                                    'redis: {image: "redis:7", env: {P: "${secret:NOPE}"}}')})
     await manager.execute(run_id)
     [result] = results(published)
-    assert result["state"] == "failed" and "secret 'NOPE' is referenced but not defined" in result["error"]
+    assert result["state"] == "failed" and result["error"] == "PreparationError: missing secret NOPE in store billing"
 
 
-async def test_sweep_removes_services_of_finished_and_unknown_runs(manager, sessions, store, containers, published, with_services):
+async def test_sweep_removes_services_of_finished_and_unknown_runs(manager, sessions, store, containers, published, with_services, accept):
     containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?"))
-    waiting = await submit_task(sessions, store, published)
+    waiting = await submit_task(accept, published)
     await manager.execute(waiting)
     finished, unknown = str(uuid.uuid4()), str(uuid.uuid4())
     containers.services[unknown] = {"postgres": object()}
@@ -717,11 +683,11 @@ async def test_sweep_removes_services_of_finished_and_unknown_runs(manager, sess
     assert containers.networks == {f"exradius-run-{waiting}"}
 
 
-async def test_reconcile_keeps_services_of_a_reattached_run(manager, sessions, store, containers, published, with_services):
+async def test_reconcile_keeps_services_of_a_reattached_run(manager, sessions, store, containers, published, with_services, accept):
     from exradius.worker.containers import RunContainer
 
     containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?"))
-    run_id = await submit_task(sessions, store, published)
+    run_id = await submit_task(accept, published)
     async with sessions() as session:
         run = await session.get(Run, run_id)
         run.state, run.worker_id = State.RUNNING, "dead"
@@ -753,6 +719,7 @@ async def test_verification_starts_and_stops_services(manager, sessions, contain
     async with sessions() as session:
         verification = await session.get(ProjectVerification, vid)
     assert [(s["name"], s["state"]) for s in verification.steps] == [
+        ("Read config", "passed"),
         ("Create directory", "passed"),
         ("Prepare attachments folder", "passed"),
         ("Start service postgres", "passed"),
@@ -762,8 +729,8 @@ async def test_verification_starts_and_stops_services(manager, sessions, contain
         ("Remove directory", "passed"),
     ]
     assert verification.state == "passed"
-    assert "postgres:16 is ready after 0.5s (running); host name postgres" in verification.steps[2]["log"]
-    assert verification.steps[5]["log"] == "removed 2 service containers and the run network"
+    assert "postgres:16 is ready after 0.5s (running); host name postgres" in verification.steps[3]["log"]
+    assert verification.steps[6]["log"] == "removed 2 service containers and the run network"
     assert containers.setup_networks == [f"exradius-run-verify-{vid}"]
     assert containers.services == {} and containers.networks == set()
 
@@ -835,14 +802,11 @@ def test_inspect_script_with_real_git(tmp_path, remote_repo):
     ]
 
 
-async def test_finalize_adds_warnings_to_the_result(manager, sessions, store, containers, published, configured, remote_repo):
-    async with sessions() as session:
-        project = await session.scalar(select(Project))
-        session.add(Repository(project_id=project.id, name="app", url=str(remote_repo), branch="main"))
-        await session.commit()
+async def test_finalize_adds_warnings_to_the_result(manager, sessions, store, containers, published, configured, remote_repo, accept):
+    commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + f"repositories:\n  - {{name: app, url: {remote_repo}}}\n"})
     containers.inspect_output = "dirty\tapp\t1\nunpushed\tapp\tT-1-fix\t2\n"
     containers.behaviours.append(runner(sessions))
-    run_id = await submit_task(sessions, store, published)
+    run_id = await submit_task(accept, published)
     await manager.execute(run_id)
     [result] = results(published)
     assert result["state"] == "completed"
@@ -854,9 +818,9 @@ async def test_finalize_adds_warnings_to_the_result(manager, sessions, store, co
     assert not manager.paths(run_id).root.exists()
 
 
-async def test_finalize_without_clones_skips_the_check(manager, sessions, store, containers, published, configured):
+async def test_finalize_without_clones_skips_the_check(manager, sessions, store, containers, published, configured, accept):
     containers.behaviours.append(runner(sessions))
-    run_id = await submit_task(sessions, store, published)
+    run_id = await submit_task(accept, published)
     await manager.execute(run_id)
     assert results(published)[0]["warnings"] == [] and containers.inspected == []
 

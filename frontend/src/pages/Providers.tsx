@@ -1,9 +1,8 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { ProviderDialog } from "@/components/ProviderForm";
 import { Table } from "@/components/ui/controls";
-import { Icon } from "@/components/ui/icons";
 import { Dialog, Menu, Tooltip } from "@/components/ui/overlays";
 import { Banner, Button, Card, Chip, EmptyState, Mono, PageHeader, SkeletonRows, Spinner } from "@/components/ui/primitives";
 import { api, ApiError } from "@/lib/api";
@@ -11,9 +10,9 @@ import { useConfirm } from "@/lib/confirm";
 import { relativeTime } from "@/lib/format";
 import { describeProvider, providerKinds, testDetail } from "@/lib/providers";
 import { runProviderTest, testOk } from "@/lib/providerTest";
-import { qk, useAgents, useProviders, useRuntimes } from "@/lib/queries";
+import { qk, useProviders, useRuntimes } from "@/lib/queries";
 import { toast } from "@/lib/toast";
-import type { Agent, Provider, ProviderIn, ProviderTest } from "@/lib/types";
+import type { Provider, ProviderIn, ProviderTest } from "@/lib/types";
 
 /** `null` while a synchronous test runs, the test id while the worker runs one. */
 type Testing = Record<string, string | null>;
@@ -28,7 +27,6 @@ function without(m: Testing, id: string): Testing {
 export function ProvidersPage() {
   const providers = useProviders();
   const runtimes = useRuntimes();
-  const agents = useAgents();
   const { edit, create } = useSearch({ from: "/app/providers" });
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -47,10 +45,8 @@ export function ProvidersPage() {
     qc.invalidateQueries({ queryKey: qk.providers });
     qc.invalidateQueries({ queryKey: qk.status });
   };
-  /** Agents that name this provider. Only these block a delete. */
-  const usersOf = (p: Provider): Agent[] => (agents.data ?? []).filter((a) => a.provider_id === p.id);
-  /** Agents without a provider of their own, which use the default. */
-  const followers = (p: Provider): Agent[] => (p.is_default ? (agents.data ?? []).filter((a) => !a.provider_id) : []);
+  /** Agents in project configs that name this provider, as the API counts them. */
+  const usersOf = (p: Provider): number => p.agent_count ?? 0;
 
   const finish = (p: Provider, r: ProviderTest) => {
     setTesting((m) => without(m, p.id));
@@ -100,18 +96,17 @@ export function ProvidersPage() {
     const users = usersOf(p);
     const ok = await confirm({
       title: `Delete ${p.name}?`,
-      description: users.length
-        ? `${users.map((a) => a.slug).join(", ")} ${users.length === 1 ? "names" : "name"} it. Move ${users.length === 1 ? "that agent" : "them"} to another provider first.`
+      description: users
+        ? `${users} agent${users === 1 ? "" : "s"} in project configs ${users === 1 ? "names" : "name"} it.`
         : p.is_default && list.length === 1
           ? "It is the only provider. Tasks are rejected until you add another."
-          : "Its credential is deleted. No agent names it.",
+          : "Its credential is deleted.",
       confirmLabel: "Delete provider",
     });
     if (!ok) return;
     try {
       await api.providers.remove(p.id);
       refresh();
-      qc.invalidateQueries({ queryKey: qk.agents });
       toast.ok(`${p.name} deleted`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) setBlocked({ provider: p, detail: e.message });
@@ -160,8 +155,6 @@ export function ProvidersPage() {
                 const t = p.last_test;
                 const busy = p.id in testing;
                 const detail = t ? (t.ok ? testDetail(t.detail) : t.error ?? testDetail(t.detail)) : null;
-                const users = usersOf(p);
-                const byDefault = followers(p);
                 return (
                   <Table.Row key={p.id} onClick={() => open({ edit: p.id })}>
                     <Table.Td>
@@ -195,14 +188,7 @@ export function ProvidersPage() {
                       )}
                     </Table.Td>
                     <Table.Td>
-                      {users.length || byDefault.length ? (
-                        <div className="flex flex-col gap-0.5 text-xs text-muted">
-                          {users.length > 0 && <span>{users.map((a) => a.slug).join(", ")}</span>}
-                          {byDefault.length > 0 && <span className="text-subtle">{byDefault.length} by default</span>}
-                        </div>
-                      ) : (
-                        <span className="text-xs text-subtle">{p.agent_count ? `${p.agent_count} agent${p.agent_count === 1 ? "" : "s"}` : "none"}</span>
-                      )}
+                      <span className="text-xs text-subtle">{p.agent_count ? `${p.agent_count} agent${p.agent_count === 1 ? "" : "s"}` : p.agent_count === 0 ? "none" : "—"}</span>
                     </Table.Td>
                     <Table.Td className="w-[1%] whitespace-nowrap text-right">
                       <span className="inline-flex gap-0.5" onClick={(e) => e.stopPropagation()}>
@@ -256,27 +242,12 @@ export function ProvidersPage() {
 }
 
 function BlockedExplanation({ provider, detail, users, others, onMakeDefault }: {
-  provider: Provider; detail: string; users: Agent[]; others: Provider[]; onMakeDefault: (p: Provider) => void;
+  provider: Provider; detail: string; users: number; others: Provider[]; onMakeDefault: (p: Provider) => void;
 }) {
-  const inUse = users.length > 0;
+  const inUse = users > 0;
   return (
     <div className="flex flex-col gap-3 text-sm">
-      {inUse && (
-        <div>
-          <p className="text-muted">Agents still use it. Pick another provider in each agent, then delete it.</p>
-          {users.length > 0 && (
-            <ul className="mt-2 flex flex-col gap-1">
-              {users.map((a) => (
-                <li key={a.id}>
-                  <Link to="/agents" search={{ edit: a.id }} className="inline-flex items-center gap-1.5 text-accent hover:underline">
-                    <Icon name="agents" size={13} />{a.name} <Mono className="text-xs text-muted">{a.slug}</Mono>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
+      {inUse && <p className="text-muted">Agents in project configs still name it.</p>}
       {provider.is_default && others.length > 0 && (
         <div>
           <p className="text-muted">It is the default. Make another provider the default first.</p>

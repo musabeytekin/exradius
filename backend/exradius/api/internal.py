@@ -16,10 +16,12 @@ from sqlalchemy.exc import IntegrityError
 
 from exradius.api.deps import DB, State
 from exradius.crypto import hash_token
-from exradius.environment import project_environment_text
-from exradius.models import Artifact, InfoRequest, ProjectAgent, Run, TranscriptChunk
-from exradius.resolve import MissingSecret, agent_connection_specs, load_secrets
+from exradius.environment import config_environment_text
+from exradius.models import Artifact, InfoRequest, Run, TranscriptChunk
+from exradius.project_state import store_values
+from exradius.resolve import MissingSecret, agent_connection_specs
 from exradius.schemas import internal as i
+from exradius.schemas.project_config import ProjectConfig
 from exradius.states import is_terminal
 
 router = APIRouter(prefix="/internal/runs/{run_id}")
@@ -55,13 +57,18 @@ def answer_attachment_paths(request: InfoRequest) -> list[i.AttachmentPath]:
 
 @router.get("/spec", response_model=i.RunSpecResponse)
 async def run_spec(run: RunDep, session: DB, state: State):
+    """Built from the config the run read in ``preparing`` (``runs.config``), with secrets
+    from the store that config names, decrypted now."""
     task = run.task
-    link = await session.get(ProjectAgent, (task.project_id, task.agent_id))
-    secrets = await load_secrets(session, state.box, task.project_id)
+    if run.config is None:
+        raise HTTPException(409, "the run has no config yet")
+    config = ProjectConfig.model_validate(run.config, strict=False)
+    secrets = await store_values(session, state.box, config.secret_store)
     try:
-        connections = agent_connection_specs(task.agent, link, secrets)
+        connections = agent_connection_specs(config, task.agent, secrets)
     except MissingSecret as exc:
         raise HTTPException(422, str(exc)) from exc
+    agent = config.agents[task.agent]
 
     answers: list[i.DeliveredAnswer] = []
     if run.resume_request_ids:
@@ -83,13 +90,11 @@ async def run_spec(run: RunDep, session: DB, state: State):
     return i.RunSpecResponse(
         run_id=str(run.id),
         task_id=task.id,
-        runtime=task.agent.runtime,
+        runtime=agent.runtime,
         mode="resume" if run.resume_request_ids else "start",
-        agent_prompt=task.agent.prompt,
-        environment_text=await project_environment_text(
-            session, task.project_id, state.settings.project_default_image
-        ),
-        model=task.agent.model,
+        agent_prompt=agent.role,
+        environment_text=config_environment_text(config, state.settings.project_default_image),
+        model=agent.model,
         instructions=task.instructions,
         context=task.context,
         attachments=[

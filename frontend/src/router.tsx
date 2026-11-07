@@ -4,17 +4,14 @@ import { AppShell } from "@/components/AppShell";
 import { RouteError } from "@/components/ApiStatus";
 import { api, ApiError } from "@/lib/api";
 import { qk } from "@/lib/queries";
-import { AgentsPage } from "@/pages/Agents";
-import { ConnectionsPage } from "@/pages/Connections";
-import { IntegrationPage } from "@/pages/Integration";
 import { LoginPage } from "@/pages/Login";
 import { NotFound } from "@/pages/NotFound";
 import { OverviewPage } from "@/pages/Overview";
 import { ProjectDetailPage } from "@/pages/ProjectDetail";
 import { ProjectsPage } from "@/pages/Projects";
 import { ProvidersPage } from "@/pages/Providers";
-import { SecretsPage } from "@/pages/Secrets";
 import { SettingsPage } from "@/pages/Settings";
+import { StoreDetailPage, StoresPage } from "@/pages/Stores";
 import { TaskDetailPage } from "@/pages/TaskDetail";
 import { TasksPage } from "@/pages/Tasks";
 
@@ -65,7 +62,7 @@ const projectsRoute = createRoute({
   component: ProjectsPage,
 });
 
-export const PROJECT_TABS = ["repositories", "environment", "services", "secrets", "agents", "notes", "verify"] as const;
+export const PROJECT_TABS = ["config", "secrets", "verify", "tasks"] as const;
 export type ProjectTab = (typeof PROJECT_TABS)[number];
 
 const projectRoute = createRoute({
@@ -77,25 +74,11 @@ const projectRoute = createRoute({
   component: ProjectDetailPage,
 });
 
-const connectionsRoute = createRoute({
-  getParentRoute: () => appRoute,
-  path: "/connections",
-  validateSearch: (s: Record<string, unknown>): { edit?: string; create?: string } => ({ edit: str(s.edit), create: str(s.create) }),
-  component: ConnectionsPage,
-});
-
 const providersRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/providers",
   validateSearch: (s: Record<string, unknown>): { edit?: string; create?: string } => ({ edit: str(s.edit), create: str(s.create) }),
   component: ProvidersPage,
-});
-
-const agentsRoute = createRoute({
-  getParentRoute: () => appRoute,
-  path: "/agents",
-  validateSearch: (s: Record<string, unknown>): { edit?: string; create?: string } => ({ edit: str(s.edit), create: str(s.create) }),
-  component: AgentsPage,
 });
 
 const tasksRoute = createRoute({
@@ -114,22 +97,22 @@ const taskRoute = createRoute({
   component: TaskDetailPage,
 });
 
-const integrationRoute = createRoute({ getParentRoute: () => appRoute, path: "/integration", component: IntegrationPage });
-
-const secretsRoute = createRoute({
+const storesRoute = createRoute({
   getParentRoute: () => appRoute,
-  path: "/secrets",
+  path: "/stores",
   validateSearch: (s: Record<string, unknown>): { create?: string } => ({ create: str(s.create) }),
-  component: SecretsPage,
+  component: StoresPage,
 });
+
+const storeRoute = createRoute({ getParentRoute: () => appRoute, path: "/stores/$storeId", component: StoreDetailPage });
 
 const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: "/settings", component: SettingsPage });
 
 const routeTree = rootRoute.addChildren([
   loginRoute,
   appRoute.addChildren([
-    overviewRoute, projectsRoute, projectRoute, connectionsRoute, providersRoute, agentsRoute,
-    tasksRoute, taskRoute, integrationRoute, secretsRoute, settingsRoute,
+    overviewRoute, projectsRoute, projectRoute, storesRoute, storeRoute, providersRoute,
+    tasksRoute, taskRoute, settingsRoute,
   ]),
 ]);
 

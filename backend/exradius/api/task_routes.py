@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from exradius import downloads, messaging
 from exradius.api.deps import DB, Admin, State, get_or_404, require_admin
-from exradius.models import Agent, Artifact, Event, InfoRequest, Project, Run, Task, TranscriptChunk
+from exradius.models import Artifact, Event, InfoRequest, Project, Run, Task, TranscriptChunk
 from exradius.schemas import api as s
 from exradius.schemas.messages import AnswerMessage, TaskMessage
 from exradius.states import is_terminal
@@ -51,7 +51,6 @@ async def list_tasks(
         select(Task, Run.id)
         .join(Run, Run.task_id == Task.id, isouter=True)
         .join(Project, Project.id == Task.project_id)
-        .join(Agent, Agent.id == Task.agent_id)
         .order_by(Task.received_at.desc())
         .limit(limit)
         .offset(offset)
@@ -61,13 +60,13 @@ async def list_tasks(
     if project:
         stmt = stmt.where(Project.slug == project)
     if agent:
-        stmt = stmt.where(Agent.slug == agent)
+        stmt = stmt.where(Task.agent == agent)
     rows = (await session.execute(stmt)).unique().all()
     return [
         s.TaskSummaryOut(
             task_id=task.id,
             project=task.project.slug,
-            agent=task.agent.slug,
+            agent=task.agent,
             state=task.state,
             received_at=task.received_at,
             run_id=run_id,
@@ -94,7 +93,7 @@ async def get_task(task_id: str, session: DB, _: Admin):
     return s.TaskDetailOut(
         task_id=task.id,
         project=task.project.slug,
-        agent=task.agent.slug,
+        agent=task.agent,
         state=task.state,
         received_at=task.received_at,
         run_id=run.id if run else None,

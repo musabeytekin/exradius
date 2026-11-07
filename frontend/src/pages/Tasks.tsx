@@ -10,9 +10,10 @@ import { Button, Card, EmptyState, Field, Input, Mono, PageHeader, SkeletonRows,
 import { api } from "@/lib/api";
 import { elideBase64, fileToAttachment } from "@/lib/files";
 import { absoluteTime, pretty, relativeTime } from "@/lib/format";
-import { qk, useAgents, useProjectAgents, useProjects } from "@/lib/queries";
+import { agentSlugsOf, agentsOf, configOf, projectHealth, projectName } from "@/lib/projectConfig";
+import { qk, useProject, useProjects } from "@/lib/queries";
 import { toast } from "@/lib/toast";
-import { ALL_STATES, type TaskMessage } from "@/lib/types";
+import { ALL_STATES, type ConfigAgent, type TaskMessage } from "@/lib/types";
 import type { TasksSearch } from "@/router";
 
 const PAGE = 50;
@@ -21,7 +22,6 @@ export function TasksPage() {
   const search = useSearch({ from: "/app/tasks" });
   const navigate = useNavigate();
   const projects = useProjects();
-  const agents = useAgents();
   const [query, setQuery] = useState("");
   const page = search.page ?? 1;
   const filters = { state: search.state, project: search.project, agent: search.agent, limit: PAGE + 1, offset: (page - 1) * PAGE };
@@ -29,13 +29,18 @@ export function TasksPage() {
   const rows = (tasks.data ?? []).slice(0, PAGE).filter((t) => !query || t.task_id.toLowerCase().includes(query.toLowerCase()));
   const hasNext = (tasks.data?.length ?? 0) > PAGE;
   const filtered = !!(search.state || search.project || search.agent);
+  // Agent slugs from the projects' snapshots, plus any seen on this page or in the filter.
+  const agentSlugs = [...new Set([
+    ...(projects.data ?? []).filter((p) => !search.project || p.slug === search.project).flatMap((p) => agentSlugsOf(p)),
+    ...(tasks.data ?? []).map((t) => t.agent),
+    ...(search.agent ? [search.agent] : []),
+  ])].sort();
   const setSearch = (patch: Partial<TasksSearch>) => navigate({ to: "/tasks", search: { ...search, page: undefined, ...patch }, replace: true });
 
   return (
     <>
       <PageHeader
         title="Tasks"
-        description="Every task the workers have taken, newest first. Open one to follow its run live."
         actions={<Button variant="primary" icon="send" onClick={() => setSearch({ send: "1" })}>Send a task</Button>}
       />
       <div className="mb-3 flex items-center gap-2">
@@ -47,7 +52,7 @@ export function TasksPage() {
           <PickList size="sm" mono aria-label="Project" value={search.project ?? null} onChange={(v) => setSearch({ project: v ?? undefined })} noneLabel="Any project" options={(projects.data ?? []).map((p) => ({ value: p.slug, label: p.slug }))} />
         </div>
         <div className="w-44">
-          <PickList size="sm" mono aria-label="Agent" value={search.agent ?? null} onChange={(v) => setSearch({ agent: v ?? undefined })} noneLabel="Any agent" options={(agents.data ?? []).map((a) => ({ value: a.slug, label: a.slug }))} />
+          <PickList size="sm" mono aria-label="Agent" value={search.agent ?? null} onChange={(v) => setSearch({ agent: v ?? undefined })} noneLabel="Any agent" options={agentSlugs.map((a) => ({ value: a, label: a }))} />
         </div>
         {filtered && <Button size="sm" variant="ghost" icon="x" onClick={() => navigate({ to: "/tasks", search: {}, replace: true })}>Clear</Button>}
         {tasks.isFetching && !tasks.isLoading && <span className="ml-auto size-1.5 animate-pulse-dot rounded-full bg-info" aria-label="Refreshing" />}
@@ -61,9 +66,7 @@ export function TasksPage() {
               Nothing on this page matches the filters.
             </EmptyState>
           ) : (
-            <EmptyState icon="tasks" title="No tasks yet" action={<Button variant="primary" icon="send" onClick={() => setSearch({ send: "1" })}>Send the first task</Button>}>
-              Integrations publish tasks to <code className="font-mono text-xs">exradius.tasks</code>. You can send one from here the same way, and watch it run.
-            </EmptyState>
+            <EmptyState icon="tasks" title="No tasks" action={<Button variant="primary" icon="send" onClick={() => setSearch({ send: "1" })}>Send a task</Button>} />
           )
         ) : (
           <Table.Root>
@@ -109,13 +112,17 @@ export function TasksPage() {
 function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProject?: string; initialAgent?: string; onClose: () => void }) {
   const navigate = useNavigate();
   const projects = useProjects();
-  const agents = useAgents();
   const [projectSlug, setProjectSlug] = useState<string | null>(initialProject ?? null);
-  const project = projects.data?.find((p) => p.slug === projectSlug) ?? (projectSlug ? undefined : projects.data?.length === 1 ? projects.data[0] : undefined);
-  const attached = useProjectAgents(project?.id);
-  const agentOptions = (agents.data ?? []).filter((a) => attached.data?.some((x) => x.agent_id === a.id));
+  const listed = projects.data?.find((p) => p.slug === projectSlug) ?? (projectSlug ? undefined : projects.data?.length === 1 ? projects.data[0] : undefined);
+  // The detail view carries the snapshot even when the list leaves it out.
+  const detail = useProject(listed?.id ?? "");
+  const project = detail.data ?? listed;
+  const configured = agentsOf(configOf(project));
+  const agentOptions: [string, ConfigAgent][] = configured.length ? configured : (project?.agents ?? []).map((slug) => [slug, {}]);
+  const health = project ? projectHealth(project) : null;
   const [agentSlug, setAgentSlug] = useState<string | null>(initialAgent ?? null);
-  const agent = agentOptions.find((a) => a.slug === agentSlug) ?? (agentOptions.length === 1 ? agentOptions[0] : undefined);
+  const agentEntry = agentOptions.find(([slug]) => slug === agentSlug) ?? (agentOptions.length === 1 ? agentOptions[0] : undefined);
+  const agent = agentEntry ? { slug: agentEntry[0], name: agentEntry[1].name || agentEntry[0] } : undefined;
   // The ticket key: typed by the user, never invented (branch names start from it).
   const [taskId, setTaskId] = useState("");
   const effectiveId = taskId.trim();
@@ -156,7 +163,6 @@ function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProj
       open
       onOpenChange={(o) => !o && onClose()}
       title="Send a task"
-      description="Published to exradius.tasks, exactly as an integration would. The worker answers with status events."
       width={880}
       onSubmit={() => ready && send.mutate()}
       footer={
@@ -187,27 +193,30 @@ function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProj
                   setProjectSlug(v);
                   setAgentSlug(null);
                 }}
-                options={(projects.data ?? []).map((p) => ({ value: p.slug, label: p.slug, description: p.name }))}
+                options={(projects.data ?? []).map((p) => ({ value: p.slug, label: p.slug, description: projectName(p) }))}
               />
             </Field>
-            <Field label="Agent" hint={project && !attached.isLoading && !agentOptions.length ? undefined : "Agents attached to the project."} warning={project && !attached.isLoading && !agentOptions.length ? "No agent is attached to this project." : undefined}>
+            <Field label="Agent" warning={project && !detail.isLoading && !agentOptions.length ? "The project's config defines no agents." : undefined}>
               <PickList
                 mono
                 value={agent?.slug ?? null}
                 placeholder={project ? "Choose an agent" : "Pick a project first"}
                 disabled={!project}
                 onChange={setAgentSlug}
-                options={agentOptions.map((a) => ({ value: a.slug, label: a.slug, description: a.name }))}
+                options={agentOptions.map(([slug, a]) => ({ value: slug, label: slug, description: a.name || undefined }))}
               />
             </Field>
           </div>
-          <Field label="Task id" htmlFor="task-id" hint="The ticket key, used in branch names">
+          {health && health.health !== "ok" && (
+            <p className="-mt-2 flex items-start gap-1 text-xs text-warn"><Icon name="alert" size={13} className="mt-0.5 shrink-0" />Not runnable: {health.detail ?? health.label}. The worker will reject the task.</p>
+          )}
+          <Field label="Task id" htmlFor="task-id">
             <Input id="task-id" mono required autoFocus value={taskId} onChange={(e) => setTaskId(e.target.value)} placeholder="BANK-204" spellCheck={false} />
           </Field>
           <Field label="Instructions">
             <Textarea rows={6} value={instructions} onChange={(e) => setInstructions(e.target.value)} placeholder="Customers report invoices with negative totals since Monday. Find the cause and fix it." />
           </Field>
-          <Field label="Context" optional error={!contextParsed.ok ? contextParsed.error : undefined} hint="JSON the agent sees under # Context. Empty is sent as null.">
+          <Field label="Context" optional error={!contextParsed.ok ? contextParsed.error : undefined} hint="JSON.">
             <Textarea mono rows={4} value={context} onChange={(e) => setContext(e.target.value)} invalid={!contextParsed.ok} placeholder={'{ "ticket": "JIRA-4821", "customer": "acme" }'} spellCheck={false} />
           </Field>
           <Field label="Attachments" optional>

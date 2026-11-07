@@ -81,7 +81,9 @@ class Worker:
     async def on_task(self, message: AbstractIncomingMessage) -> None:
         async with self.slots:
             try:
-                intake = await accept_task(self.sessions, self.store, message.body)
+                intake = await accept_task(
+                    self.sessions, self.store, message.body, box=self.runs.box, data_dir=self.settings.data_dir
+                )
             except Exception:
                 log.exception("task intake failed; message will be redelivered")
                 await message.nack(requeue=True)

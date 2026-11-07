@@ -4,71 +4,128 @@ export type Uuid = string;
 
 export interface Admin { id: Uuid; username: string }
 
+// --- Projects as config repositories (docs/config-repo.md §3, §11) ---
+// The panel renders what the API returns and tolerates missing fields: a project whose
+// snapshot or config is absent still renders, with an explanation.
+
+export interface ConfigRepository {
+  name: string; url: string; branch?: string | null;
+  /** As the API returns it: a `$NAME` placeholder, never a value. */
+  credential?: string | null;
+  push?: boolean | null;
+}
+export interface ConfigWorkstation {
+  image?: string | null; dockerfile?: string | null; context?: string | null; setup?: string[] | null;
+}
+export type ConfigReady = null | { tcp?: number | null; command?: string[] | null };
+export interface ConfigService {
+  name?: string; image?: string | null; dockerfile?: string | null; context?: string | null;
+  env?: Record<string, string> | null; ports?: number[] | null; ready?: ConfigReady;
+}
+export interface ConfigConnection {
+  name?: string; catalog?: string | null; config?: Record<string, string> | null;
+  command?: string | null; args?: string[] | null; env?: Record<string, string> | null;
+  url?: string | null; headers?: Record<string, string> | null; type?: string | null;
+}
+export interface ConfigIdentity { name?: string | null; email?: string | null }
+export interface ConfigAgent {
+  slug?: string; name?: string | null; role?: string | null; model?: string | null;
+  provider?: string | null; runtime?: string | null; identity?: ConfigIdentity | null;
+  connections?: string[] | null;
+}
+/** The parsed `exradius.yaml`. Maps may arrive keyed by name or as lists with a `name`/`slug`. */
+export interface ProjectConfig {
+  version?: number;
+  project?: { slug?: string; name?: string | null; description?: string | null } | null;
+  secret_store?: string | null;
+  repositories?: ConfigRepository[] | null;
+  workstation?: ConfigWorkstation | null;
+  services?: Record<string, ConfigService> | ConfigService[] | null;
+  env?: Record<string, string> | null;
+  notes?: string | null;
+  connections?: Record<string, ConfigConnection> | ConfigConnection[] | null;
+  agents?: Record<string, ConfigAgent> | ConfigAgent[] | null;
+}
+export interface ProjectConfigSnapshot {
+  commit?: string | null; read_at?: string | null;
+  /** null when the file has errors. */
+  config?: ProjectConfig | null;
+  errors?: string[] | null; warnings?: string[] | null;
+  /** Secret names the file references. */
+  required_keys?: (string | RequiredKeyIn)[] | null;
+  store?: string | null;
+  /** The file as read, when the API returns it. */
+  raw?: string | null;
+  /** Set when the last read failed (the repository or the file could not be read). */
+  read_error?: string | null;
+}
+export interface RequiredKey { key: string; present: boolean }
+/** As the API sends it: `name` (current backend) or `key`. */
+export interface RequiredKeyIn { key?: string; name?: string; present?: boolean }
+/**
+ * A project as `GET /api/projects[/{id}]` returns it. The current API puts the snapshot's fields
+ * at the top level (`commit`, `read_at`, `config`, `raw`, `errors` ...); a nested `snapshot` is
+ * read too. `commit` null means the repository or the file could not be read.
+ */
 export interface Project {
-  id: Uuid; slug: string; name: string; image: string | null;
-  setup_commands: string[]; created_at: string;
-  /** What a new engineer would be told (docs/environment-and-services.md §5). Absent on older APIs. */
-  notes?: string;
+  id: Uuid; slug: string;
+  config_url: string; config_branch?: string | null; config_path?: string | null;
+  created_at?: string;
+  /** The file's `project.name` (the slug when unreadable) and description. */
+  name?: string | null; description?: string | null;
+  commit?: string | null; read_at?: string | null;
+  /** The branch and file actually read. */
+  branch?: string | null; path?: string | null;
+  config?: ProjectConfig | null;
+  raw?: string | null;
+  health?: string | null;
+  /** Why tasks are refused, as the rejection says it. */
+  reason?: string | null;
+  runnable?: boolean | null;
+  errors?: string[] | null; warnings?: string[] | null;
+  store?: string | null; store_id?: Uuid | null;
+  /** Whether the store the file names exists. */
+  store_exists?: boolean | null;
+  required_keys?: (string | RequiredKeyIn)[] | null;
+  missing_keys?: string[] | null;
+  /** Agent slugs of the config. */
+  agents?: string[] | null;
+  snapshot?: ProjectConfigSnapshot | null;
+  snapshot_commit?: string | null; snapshot_read_at?: string | null;
+  read_error?: string | null;
 }
-export interface ProjectIn { slug: string; name: string; image?: string | null; setup_commands?: string[]; notes?: string }
+export interface ProjectIn { config_url: string; config_branch?: string | null; config_path?: string | null }
 
-// --- Services (docs/environment-and-services.md §2) ---
+export interface CatalogConfigKey {
+  key?: string; name?: string | null; label?: string | null; required?: boolean;
+  target?: string | null; format?: string | null; default?: string | null;
+}
+export interface CatalogEntry {
+  key: string; name: string; description?: string | null; transport?: string | null;
+  command?: string | null; args?: string[] | null; url?: string | null;
+  requires?: string | null;
+  /** The config keys it accepts. */
+  config?: CatalogConfigKey[] | null;
+}
 
-/** null = the image's HEALTHCHECK, else "container is running". */
-export type ServiceReady = null | { tcp: number } | { command: string[] };
-export interface ProjectService {
-  id: Uuid; project_id: Uuid; name: string; image: string;
-  env: Record<string, string>; ports: number[]; ready: ServiceReady; position: number;
+/** Secret stores (§7). Values are write-only. */
+export interface SecretStore {
+  id: Uuid; name: string; kind?: string; created_at?: string;
+  key_count?: number | null; keys?: (string | SecretStoreKey)[] | null;
+  /** Slugs of the projects whose config names it. */
+  used_by?: string[] | null;
 }
-export interface ProjectServiceIn {
-  name: string; image: string; env: Record<string, string>; ports: number[]; ready: ServiceReady;
-}
+export interface SecretStoreKey { key: string; updated_at?: string | null }
 
-export interface RepositoryCheck {
-  ok: boolean; branches: string[]; default_branch: string | null;
-  error: string | null; checked_at: string | null;
-}
-export interface Repository {
-  id: Uuid; project_id: Uuid; name: string; url: string; branch: string;
-  auth_secret_id: Uuid | null; last_check: RepositoryCheck | null;
-  /** Absent on older APIs. */
-  push_allowed?: boolean;
-}
-export interface RepositoryIn { name: string; url: string; branch: string; auth_secret_id: Uuid | null; push_allowed?: boolean }
+/** Config repository access per git host (§6). */
+export type GitCredentialKind = "token" | "basic";
+export interface GitCredential { id: Uuid; host: string; kind: GitCredentialKind; created_at?: string }
+export interface GitCredentialIn { host: string; kind: GitCredentialKind; value: string }
 
-export interface EnvVar { id: Uuid; project_id: Uuid; key: string; value: string }
-
-/** Secrets are write-only: the API never returns a value. */
-export interface Secret { id: Uuid; project_id: Uuid | null; key: string }
-
-export interface ToolInfo { name: string; description: string }
-export interface ConnectionLastTest { ok: boolean; tested_at: string; tools: ToolInfo[]; error: string | null }
-export type Transport = "stdio" | "http";
-export interface Connection {
-  id: Uuid; slug: string; name: string; transport: Transport;
-  command: string | null; args: string[]; url: string | null;
-  env: Record<string, string>; headers: Record<string, string>;
-  last_test: ConnectionLastTest | null; notice: string;
-}
-export interface ConnectionIn {
-  slug: string; name: string; transport: Transport; command: string | null; args: string[];
-  url: string | null; env: Record<string, string>; headers: Record<string, string>;
-}
-export interface ConnectionTestResult { ok: boolean; tools: { name: string; description?: string }[]; error: string | null }
-
-export interface Agent {
-  id: Uuid; slug: string; name: string; prompt: string; runtime: string;
-  created_at: string; connection_ids: Uuid[];
-  /** null = the default provider. Absent on backends without providers. */
-  provider_id?: Uuid | null;
-  /** Git identity (docs/agent-identity.md). Absent on older APIs. */
-  identity_name?: string | null; identity_email?: string | null;
-  /** null = the runtime's default model. Absent on older APIs. */
-  model?: string | null;
-}
-export interface AgentIn {
-  slug: string; name: string; prompt: string; runtime: string; connection_ids: Uuid[]; provider_id?: Uuid | null;
-  identity_name?: string | null; identity_email?: string; model?: string | null;
+/** What a run recorded of its agent (runs.agent_snapshot, §8). */
+export interface AgentSnapshot {
+  slug?: string | null; name?: string | null; model?: string | null; provider?: string | null;
+  identity?: ConfigIdentity | null; connections?: string[] | null;
 }
 
 // --- Providers (docs/providers.md) ---
@@ -94,7 +151,9 @@ export interface ProviderLastTest { ok: boolean; tested_at: string; detail: unkn
 export interface Provider {
   id: Uuid; slug: string; name: string; kind: string; auth_method: string;
   settings: Record<string, string>; is_default: boolean;
-  last_test: ProviderLastTest | null; agent_count: number;
+  last_test: ProviderLastTest | null;
+  /** Agents (across project configs) that name it. Absent on some APIs. */
+  agent_count?: number;
   created_at?: string; updated_at?: string;
   /** Models the provider offers. Absent on older APIs. */
   models?: (ProviderModel | string)[] | null;
@@ -108,28 +167,6 @@ export interface ProviderIn {
 export type ProviderTestStart = { ok: boolean; detail: unknown; error: string | null } | { test_id: string };
 export interface ProviderTest {
   id?: string; state?: string; ok?: boolean | null; detail?: unknown; error?: string | null; tested_at?: string | null;
-}
-
-export type ConnectionOverride = Partial<Pick<ConnectionIn, "command" | "args" | "url" | "env" | "headers">>;
-export interface ProjectAgent {
-  project_id: Uuid; agent_id: Uuid;
-  connection_overrides: Record<string, ConnectionOverride>;
-  secret_overrides: Record<string, string>;
-}
-
-export interface SecretReference { name: string; resolves_to: string; scope: "project" | "global" | null }
-export interface ResolvedConnection {
-  slug: string; name: string; transport: string; command: string | null; args: string[];
-  url: string | null; env: Record<string, string>; headers: Record<string, string>;
-  overridden: boolean; references: SecretReference[]; unresolved: string[];
-}
-export interface ResolvedAgent {
-  project_id: Uuid; agent_id: Uuid; secret_overrides: Record<string, string>;
-  connections: ResolvedConnection[];
-  /** Absent on older APIs. */
-  model?: string | null;
-  /** The `# Your environment` section as the worker would build it. Absent on older APIs. */
-  environment_text?: string | null;
 }
 
 export type StepState = "pending" | "running" | "passed" | "failed" | "skipped";
@@ -161,6 +198,9 @@ export interface Run {
   /** The environment section the run was given, when the API exposes it. */
   environment_text?: string | null;
   spec?: { environment_text?: string | null } | null;
+  /** The config repository commit the run used. */
+  config_commit?: string | null;
+  agent_snapshot?: AgentSnapshot | null;
 }
 export interface TaskAttachment { id: Uuid; name: string; content_type: string; object_key: string | null; source_url: string | null }
 export interface InfoRequest {
@@ -227,7 +267,6 @@ export interface ProviderStatus {
   configured: boolean; count: number;
   default: { id: Uuid; name: string; kind: string; auth_method: string; last_test: ProviderLastTest | null } | null;
 }
-export interface RunnerImage { tag: string; created_at: string | null; size: number | null }
 export interface Runtime { name: string; label: string; providers?: ProviderKindSpec[] }
 export interface Integration {
   broker: { host: string; port: number; vhost: string; username: string | null; password_set: boolean };

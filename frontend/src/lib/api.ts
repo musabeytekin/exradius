@@ -22,6 +22,8 @@ export class ApiUnreachableError extends ApiError {
 }
 export const UNREACHABLE_MESSAGE = "Exradius API is not reachable.";
 export const isUnreachable = (e: unknown): e is ApiUnreachableError => e instanceof ApiUnreachableError;
+/** The API's own message for a refused request, or null when the API did not answer. */
+export const refusal = (e: unknown): string | null => (e instanceof ApiError && !(e instanceof ApiUnreachableError) ? e.message : null);
 
 // Whether the last request reached the API, for the shell's banner.
 let reachable = true;
@@ -46,12 +48,18 @@ function describeDetail(status: number, detail: unknown): string {
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) {
     return detail
-      .map((d: { loc?: unknown[]; msg?: string }) => {
+      .map((d: string | { loc?: unknown[]; msg?: string }) => {
+        if (typeof d === "string") return d;
         const loc = (d.loc ?? []).filter((p) => p !== "body").join(".");
         const msg = (d.msg ?? "invalid").replace(/^Value error, /, "");
         return loc ? `${loc}: ${msg}` : msg;
       })
       .join("; ");
+  }
+  if (detail && typeof detail === "object") {
+    const o = detail as { message?: unknown; errors?: unknown };
+    const parts = [typeof o.message === "string" ? o.message : null, ...(Array.isArray(o.errors) ? o.errors.map(String) : [])].filter(Boolean);
+    if (parts.length) return parts.join("\n");
   }
   if (status === 503) return "The broker cannot be reached.";
   return `Request failed (${status})`;
@@ -128,7 +136,6 @@ export const api = {
   },
   system: {
     status: () => get<T.SystemStatus>("/system/status"),
-    images: () => get<T.RunnerImage[]>("/system/images"),
     runtimes: () => get<T.Runtime[]>("/system/runtimes"),
     integration: () => get<T.Integration>("/system/integration"),
   },
@@ -136,49 +143,29 @@ export const api = {
     list: () => get<T.Project[]>("/projects"),
     get: (id: string) => get<T.Project>(`/projects/${id}`),
     create: (b: T.ProjectIn) => post<T.Project>("/projects", b),
-    update: (id: string, b: Partial<T.ProjectIn>) => patch<T.Project>(`/projects/${id}`, b),
+    update: (id: string, b: Partial<Pick<T.ProjectIn, "config_branch" | "config_path">>) => patch<T.Project>(`/projects/${id}`, b),
     remove: (id: string) => del(`/projects/${id}`),
+    reread: (id: string) => post<T.Project>(`/projects/${id}/reread`),
     verify: (id: string) => post<{ verification_id: string }>(`/projects/${id}/verify`),
     verifications: (id: string, limit = 5) => get<T.Verification[]>(`/projects/${id}/verifications`, { limit }),
     verification: (id: string, vid: string) => get<T.Verification>(`/projects/${id}/verifications/${vid}`),
   },
-  repositories: {
-    list: (pid: string) => get<T.Repository[]>(`/projects/${pid}/repositories`),
-    create: (pid: string, b: T.RepositoryIn) => post<T.Repository>(`/projects/${pid}/repositories`, b),
-    update: (pid: string, id: string, b: Partial<T.RepositoryIn>) => patch<T.Repository>(`/projects/${pid}/repositories/${id}`, b),
-    remove: (pid: string, id: string) => del(`/projects/${pid}/repositories/${id}`),
-    check: (pid: string, id: string) => post<T.RepositoryCheck>(`/projects/${pid}/repositories/${id}/check`),
+  catalog: {
+    list: () => get<T.CatalogEntry[]>("/catalog"),
   },
-  services: {
-    list: (pid: string) => get<T.ProjectService[]>(`/projects/${pid}/services`),
-    create: (pid: string, b: T.ProjectServiceIn) => post<T.ProjectService>(`/projects/${pid}/services`, b),
-    update: (pid: string, id: string, b: Partial<T.ProjectServiceIn>) => patch<T.ProjectService>(`/projects/${pid}/services/${id}`, b),
-    remove: (pid: string, id: string) => del(`/projects/${pid}/services/${id}`),
-    /** The full list of service ids in their new order. */
-    reorder: (pid: string, ids: string[]) => put<T.ProjectService[] | void>(`/projects/${pid}/services/order`, { ids }),
+  stores: {
+    list: () => get<T.SecretStore[]>("/stores"),
+    create: (name: string) => post<T.SecretStore>("/stores", { name }),
+    remove: (id: string) => del(`/stores/${id}`),
+    keys: (id: string) => get<(string | T.SecretStoreKey)[]>(`/stores/${id}/keys`),
+    /** Write-only: the value is never returned. */
+    setKey: (id: string, key: string, value: string) => put<unknown>(`/stores/${id}/keys/${encodeURIComponent(key)}`, { value }),
+    removeKey: (id: string, key: string) => del(`/stores/${id}/keys/${encodeURIComponent(key)}`),
   },
-  envVars: {
-    list: (pid: string) => get<T.EnvVar[]>(`/projects/${pid}/env-vars`),
-    create: (pid: string, b: { key: string; value: string }) => post<T.EnvVar>(`/projects/${pid}/env-vars`, b),
-    update: (pid: string, id: string, b: { key?: string; value?: string }) => patch<T.EnvVar>(`/projects/${pid}/env-vars/${id}`, b),
-    remove: (pid: string, id: string) => del(`/projects/${pid}/env-vars/${id}`),
-  },
-  secrets: {
-    listGlobal: () => get<T.Secret[]>("/secrets"),
-    listProject: (pid: string) => get<T.Secret[]>(`/projects/${pid}/secrets`),
-    create: (pid: string | null, b: { key: string; value: string }) =>
-      post<T.Secret>(pid ? `/projects/${pid}/secrets` : "/secrets", b),
-    replace: (pid: string | null, id: string, value: string) =>
-      put<T.Secret>(pid ? `/projects/${pid}/secrets/${id}` : `/secrets/${id}`, { value }),
-    remove: (pid: string | null, id: string) => del(pid ? `/projects/${pid}/secrets/${id}` : `/secrets/${id}`),
-  },
-  connections: {
-    list: () => get<T.Connection[]>("/connections"),
-    create: (b: T.ConnectionIn) => post<T.Connection>("/connections", b),
-    update: (id: string, b: Partial<T.ConnectionIn>) => patch<T.Connection>(`/connections/${id}`, b),
-    remove: (id: string) => del(`/connections/${id}`),
-    test: (id: string, opts?: { project_id?: string; agent_id?: string }) =>
-      post<T.ConnectionTestResult>(`/connections/${id}/test`, undefined, opts),
+  gitCredentials: {
+    list: () => get<T.GitCredential[]>("/git-credentials"),
+    create: (b: T.GitCredentialIn) => post<T.GitCredential>("/git-credentials", b),
+    remove: (id: string) => del(`/git-credentials/${id}`),
   },
   providers: {
     list: () => get<T.Provider[]>("/providers"),
@@ -189,21 +176,6 @@ export const api = {
     /** `model` checks that id with the credential; older APIs ignore it. */
     test: (id: string, model?: string | null) => post<T.ProviderTestStart>(`/providers/${id}/test`, model ? { model } : {}),
     testResult: (id: string, tid: string) => get<T.ProviderTest>(`/providers/${id}/tests/${tid}`),
-  },
-  agents: {
-    list: () => get<T.Agent[]>("/agents"),
-    create: (b: T.AgentIn) => post<T.Agent>("/agents", b),
-    update: (id: string, b: Partial<T.AgentIn>) => patch<T.Agent>(`/agents/${id}`, b),
-    remove: (id: string) => del(`/agents/${id}`),
-  },
-  projectAgents: {
-    list: (pid: string) => get<T.ProjectAgent[]>(`/projects/${pid}/agents`),
-    attach: (pid: string, b: { agent_id: string; connection_overrides: T.ProjectAgent["connection_overrides"]; secret_overrides: Record<string, string> }) =>
-      post<T.ProjectAgent>(`/projects/${pid}/agents`, b),
-    update: (pid: string, aid: string, b: Partial<Pick<T.ProjectAgent, "connection_overrides" | "secret_overrides">>) =>
-      patch<T.ProjectAgent>(`/projects/${pid}/agents/${aid}`, b),
-    detach: (pid: string, aid: string) => del(`/projects/${pid}/agents/${aid}`),
-    resolved: (pid: string, aid: string) => get<T.ResolvedAgent>(`/projects/${pid}/agents/${aid}/resolved`),
   },
   tasks: {
     list: (q: { state?: string; project?: string; agent?: string; limit?: number; offset?: number }) =>

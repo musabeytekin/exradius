@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import time
 from dataclasses import dataclass, field
@@ -306,6 +307,45 @@ class ContainerManager:
         except TimeoutError:
             await self.remove_containers([container.id])
             return ContainerExit(exit_code=-1, logs=f"the check did not finish within {INSPECT_TIMEOUT}s")
+
+    # -- image builds (docs/config-repo.md §4) ---------------------------------------------
+
+    async def image_exists(self, tag: str) -> bool:
+        def _get() -> bool:
+            try:
+                self.client.images.get(tag)
+                return True
+            except docker.errors.ImageNotFound:
+                return False
+
+        return await asyncio.to_thread(_get)
+
+    async def build_image(
+        self, context: bytes, *, dockerfile: str, tag: str, labels: dict[str, str] | None = None
+    ) -> tuple[bool, str]:
+        """Build ``tag`` from a tar context; ``(ok, output)`` with the build's log."""
+
+        def _build() -> tuple[bool, str]:
+            lines: list[str] = []
+            ok = True
+            stream = self.client.api.build(
+                fileobj=io.BytesIO(context), custom_context=True, dockerfile=dockerfile, tag=tag,
+                rm=True, forcerm=True, decode=True, labels=labels or {},
+            )
+            for chunk in stream:
+                if "stream" in chunk:
+                    lines.append(chunk["stream"])
+                elif "error" in chunk:
+                    ok = False
+                    lines.append(str(chunk.get("error")) + "\n")
+                elif chunk.get("status") and "progress" not in chunk:
+                    lines.append(" ".join(str(chunk[k]) for k in ("id", "status") if chunk.get(k)) + "\n")
+            return ok, "".join(lines)
+
+        try:
+            return await asyncio.to_thread(_build)
+        except (APIError, docker.errors.BuildError) as exc:
+            return False, _api_error(exc)
 
     # -- services (docs/environment-and-services.md §2) ----------------------------------
 

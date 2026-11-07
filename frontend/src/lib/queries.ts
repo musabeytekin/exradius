@@ -4,21 +4,15 @@ import { api } from "./api";
 export const qk = {
   me: ["me"] as const,
   status: ["system", "status"] as const,
-  images: ["system", "images"] as const,
   runtimes: ["system", "runtimes"] as const,
   integration: ["system", "integration"] as const,
   projects: ["projects"] as const,
   project: (id: string) => ["projects", id] as const,
-  repositories: (pid: string) => ["projects", pid, "repositories"] as const,
-  envVars: (pid: string) => ["projects", pid, "env-vars"] as const,
-  services: (pid: string) => ["projects", pid, "services"] as const,
-  projectSecrets: (pid: string) => ["projects", pid, "secrets"] as const,
-  globalSecrets: ["secrets"] as const,
-  projectAgents: (pid: string) => ["projects", pid, "agents"] as const,
-  resolved: (pid: string, aid: string) => ["projects", pid, "agents", aid, "resolved"] as const,
   verifications: (pid: string) => ["projects", pid, "verifications"] as const,
-  connections: ["connections"] as const,
-  agents: ["agents"] as const,
+  catalog: ["catalog"] as const,
+  stores: ["stores"] as const,
+  storeKeys: (id: string) => ["stores", id, "keys"] as const,
+  gitCredentials: ["git-credentials"] as const,
   providers: ["providers"] as const,
   tasks: (filters: Record<string, unknown>) => ["tasks", filters] as const,
   allTasks: ["tasks"] as const,
@@ -44,24 +38,13 @@ export function makeQueryClient() {
 }
 
 export const useStatus = () => useQuery({ queryKey: qk.status, queryFn: api.system.status, refetchInterval: 15_000 });
-export const useImages = () => useQuery({ queryKey: qk.images, queryFn: api.system.images, staleTime: 60_000 });
 export const useRuntimes = () => useQuery({ queryKey: qk.runtimes, queryFn: api.system.runtimes, staleTime: Infinity });
 export const useIntegration = () => useQuery({ queryKey: qk.integration, queryFn: api.system.integration, staleTime: 60_000 });
 export const useProjects = () => useQuery({ queryKey: qk.projects, queryFn: api.projects.list });
-export const useProject = (id: string) => useQuery({ queryKey: qk.project(id), queryFn: () => api.projects.get(id) });
-export const useRepositories = (pid: string) =>
-  useQuery({ queryKey: qk.repositories(pid), queryFn: () => api.repositories.list(pid) });
-export const useServices = (pid: string) => useQuery({ queryKey: qk.services(pid), queryFn: () => api.services.list(pid) });
-export const useEnvVars = (pid: string) => useQuery({ queryKey: qk.envVars(pid), queryFn: () => api.envVars.list(pid) });
-export const useProjectSecrets = (pid: string | null | undefined) =>
-  useQuery({
-    queryKey: qk.projectSecrets(pid ?? "-"),
-    queryFn: () => api.secrets.listProject(pid!),
-    enabled: !!pid,
-  });
-export const useGlobalSecrets = () => useQuery({ queryKey: qk.globalSecrets, queryFn: api.secrets.listGlobal });
-export const useProjectAgents = (pid: string | null | undefined) =>
-  useQuery({ queryKey: qk.projectAgents(pid ?? "-"), queryFn: () => api.projectAgents.list(pid!), enabled: !!pid });
-export const useConnections = () => useQuery({ queryKey: qk.connections, queryFn: api.connections.list });
-export const useAgents = () => useQuery({ queryKey: qk.agents, queryFn: api.agents.list });
+export const useProject = (id: string) => useQuery({ queryKey: qk.project(id), queryFn: () => api.projects.get(id), enabled: !!id });
+export const useCatalog = () => useQuery({ queryKey: qk.catalog, queryFn: api.catalog.list, staleTime: 5 * 60_000 });
+export const useStores = () => useQuery({ queryKey: qk.stores, queryFn: api.stores.list });
+export const useStoreKeys = (id: string | null | undefined) =>
+  useQuery({ queryKey: qk.storeKeys(id ?? "-"), queryFn: () => api.stores.keys(id!), enabled: !!id });
+export const useGitCredentials = () => useQuery({ queryKey: qk.gitCredentials, queryFn: api.gitCredentials.list });
 export const useProviders = () => useQuery({ queryKey: qk.providers, queryFn: api.providers.list });

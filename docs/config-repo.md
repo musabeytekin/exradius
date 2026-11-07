@@ -74,11 +74,11 @@ notes: |                          # quoted in the environment section; optional
 connections:                      # MCP servers agents may use; optional
   github:                         # catalog item: known transport, declared config keys
     catalog: github
-    config: {token: ${secret:GITHUB_TOKEN}}
+    config: {token: "${secret:GITHUB_TOKEN}"}   # quoted: { } is YAML flow syntax
   internal-docs:                  # custom, mcpServers style (stdio)
     command: npx
     args: ["-y", "@acme/docs-mcp"]
-    env: {DOCS_TOKEN: ${secret:DOCS_TOKEN}}
+    env: {DOCS_TOKEN: "${secret:DOCS_TOKEN}"}
   tracker:                        # custom, mcpServers style (http)
     url: https://mcp.example.com/mcp
     headers: {Authorization: "Bearer ${secret:TRACKER_TOKEN}"}

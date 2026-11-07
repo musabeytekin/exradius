@@ -13,12 +13,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
 
-from exradius.models import Project, Repository, Secret
+from exradius.models import SecretStore, SecretStoreEntry
 from exradius.worker import git_identity, prepare
 from exradius.worker.git_identity import Identity, prepare_git
 from exradius.worker.intake import accept_answer
+from tests.conftest import BASE_CONFIG, commit_config
 from tests.test_run_manager import containers, manager, published, runner, states, submit_task  # noqa: F401
 
 IDENTITY = Identity(name='Bug "Fixer" Bot', email="bug-fixer@agents.example", agent="bug-fixer", task_id="T-42")
@@ -233,14 +233,16 @@ def test_push_through_the_credential_helper(prepared_run, http_remote, tmp_path,
 # Through the run manager --------------------------------------------------------------------------
 
 
-async def test_every_container_start_gets_the_identity(manager, sessions, store, containers, published, configured, box, monkeypatch):
+async def test_every_container_start_gets_the_identity(manager, sessions, store, containers, published, configured, box, monkeypatch, accept):
+    commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + (
+        "secret_store: billing\nrepositories:\n"
+        "  - {name: app, url: 'https://git.example/acme/app.git', branch: main, credential: '${secret:GIT_TOKEN}', push: true}\n"
+    )})
     async with sessions() as session:
-        project = await session.scalar(select(Project))
-        secret = Secret(project_id=project.id, key="GIT_TOKEN", value_encrypted=box.encrypt("ghp_push"))
-        session.add(secret)
+        secret_store = SecretStore(name="billing")
+        session.add(secret_store)
         await session.flush()
-        session.add(Repository(project_id=project.id, name="app", url="https://git.example/acme/app.git",
-                               branch="main", auth_secret_id=secret.id, push_allowed=True))
+        session.add(SecretStoreEntry(store_id=secret_store.id, key="GIT_TOKEN", value_encrypted=box.encrypt("ghp_push")))
         await session.commit()
 
     monkeypatch.setattr(prepare, "checkout_repositories", lambda *a, **k: None)  # no real remote here
@@ -253,7 +255,7 @@ async def test_every_container_start_gets_the_identity(manager, sessions, store,
                      "hook": (state / "git-hooks" / "prepare-commit-msg").exists(),
                      "config": (state / "git" / "exradius.gitconfig").exists()})
 
-    run_id = await submit_task(sessions, store, published)
+    run_id = await submit_task(accept, published)
     containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Which region?", check=check))
     await manager.execute(run_id)
     [info] = [e for e in published if e.type == "info_request"]
@@ -267,33 +269,3 @@ async def test_every_container_start_gets_the_identity(manager, sessions, store,
                 "EXRADIUS_AGENT": "bug-fixer", "EXRADIUS_TASK_ID": "T-1", "EXRADIUS_GIT_CREDENTIAL_0": "ghp_push",
                 "GIT_CONFIG_GLOBAL": "/exradius/state/git/config", "hook": True, "config": True}
     assert seen == [expected, expected]  # first start and the resume
-
-
-# API ----------------------------------------------------------------------------------------------
-
-from tests.test_api import admin, client, control  # noqa: E402,F401 - fixtures
-
-
-def test_agent_identity_fields(admin):
-    assert admin.post("/api/agents", json={"slug": "a", "name": "A"}).status_code == 422  # email required
-    assert admin.post("/api/agents", json={"slug": "a", "name": "A", "identity_email": "not-an-email"}).status_code == 422
-    assert admin.post("/api/agents", json={"slug": "a", "name": "A", "identity_email": "a@x.example",
-                                           "identity_name": "Bad <name>"}).status_code == 422
-    agent = admin.post("/api/agents", json={"slug": "a", "name": "Fixer", "identity_email": "a@x.example"}).json()
-    assert (agent["identity_name"], agent["identity_email"]) == ("Fixer", "a@x.example")  # name defaults
-    updated = admin.patch(f"/api/agents/{agent['id']}", json={"identity_name": "Fixer Bot", "identity_email": None}).json()
-    assert (updated["identity_name"], updated["identity_email"]) == ("Fixer Bot", "a@x.example")
-
-
-def test_repository_push_allowed_needs_an_auth_secret(admin):
-    pid = admin.post("/api/projects", json={"slug": "p", "name": "P"}).json()["id"]
-    base = {"name": "app", "url": "https://git.example/app.git"}
-    refused = admin.post(f"/api/projects/{pid}/repositories", json={**base, "push_allowed": True})
-    assert refused.status_code == 422 and "auth secret" in refused.json()["detail"]
-    secret = admin.post(f"/api/projects/{pid}/secrets", json={"key": "GIT_TOKEN", "value": "t"}).json()
-    repo = admin.post(f"/api/projects/{pid}/repositories", json={**base, "auth_secret_id": secret["id"], "push_allowed": True}).json()
-    assert repo["push_allowed"] is True
-    path = f"/api/projects/{pid}/repositories/{repo['id']}"
-    assert admin.patch(path, json={"auth_secret_id": None}).status_code == 422  # would leave push without a secret
-    assert admin.patch(path, json={"auth_secret_id": None, "push_allowed": False}).json()["push_allowed"] is False
-    assert admin.get(f"/api/projects/{pid}/repositories").json()[0]["push_allowed"] is False

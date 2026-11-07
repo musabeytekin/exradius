@@ -2,10 +2,9 @@ import * as CheckboxPrimitive from "@radix-ui/react-checkbox";
 import * as Select from "@radix-ui/react-select";
 import * as TabsPrimitive from "@radix-ui/react-tabs";
 import * as ToggleGroup from "@radix-ui/react-toggle-group";
-import { useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { cn } from "@/lib/cn";
 import { Icon, type IconName } from "./icons";
-import { Input, type InputProps } from "./primitives";
 
 export interface PickOption {
   value: string;
@@ -138,86 +137,6 @@ function Item({ value, label, description, meta, disabled, mono }: { value: stri
       </div>
       {meta && <span className="shrink-0 text-xs text-subtle">{meta}</span>}
     </Select.Item>
-  );
-}
-
-/** A text field with suggestions: picking one fills it; free text stays allowed. */
-export function SuggestInput({
-  value, onChange, suggestions, ...rest
-}: Omit<InputProps, "onChange" | "value"> & {
-  value: string; onChange: (v: string) => void; suggestions: { value: string; description?: string }[];
-}) {
-  const [open, setOpen] = useState(false);
-  const [active, setActive] = useState(0);
-  const listId = useId();
-  const blurTimer = useRef<number | undefined>(undefined);
-  const filtered = suggestions.filter((s) => !value || s.value.toLowerCase().includes(value.toLowerCase()));
-  const show = open && filtered.length > 0 && !(filtered.length === 1 && filtered[0].value === value);
-
-  return (
-    <div className="relative">
-      <Input
-        {...rest}
-        value={value}
-        role="combobox"
-        aria-expanded={show}
-        aria-controls={listId}
-        aria-autocomplete="list"
-        autoComplete="off"
-        onChange={(e) => {
-          onChange(e.target.value);
-          setOpen(true);
-          setActive(0);
-        }}
-        onFocus={() => setOpen(true)}
-        onBlur={() => {
-          blurTimer.current = window.setTimeout(() => setOpen(false), 120);
-        }}
-        onKeyDown={(e) => {
-          if (!show) return;
-          if (e.key === "ArrowDown") {
-            e.preventDefault();
-            setActive((a) => Math.min(a + 1, filtered.length - 1));
-          } else if (e.key === "ArrowUp") {
-            e.preventDefault();
-            setActive((a) => Math.max(a - 1, 0));
-          } else if (e.key === "Enter" && filtered[active]) {
-            e.preventDefault();
-            onChange(filtered[active].value);
-            setOpen(false);
-          } else if (e.key === "Escape") {
-            e.stopPropagation();
-            setOpen(false);
-          }
-        }}
-      />
-      {show && (
-        <ul
-          id={listId}
-          role="listbox"
-          className="absolute left-0 right-0 top-[calc(100%+4px)] z-[60] max-h-60 overflow-y-auto rounded-lg border border-border bg-surface p-1 shadow-pop animate-pop-in"
-        >
-          {filtered.map((s, i) => (
-            <li
-              key={s.value}
-              role="option"
-              aria-selected={i === active}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                window.clearTimeout(blurTimer.current);
-                onChange(s.value);
-                setOpen(false);
-              }}
-              onMouseEnter={() => setActive(i)}
-              className={cn("flex cursor-default items-center justify-between gap-3 rounded-md px-2 py-1.5 text-sm", i === active && "bg-surface-2")}
-            >
-              <span className="font-mono text-[12.5px] text-fg">{s.value}</span>
-              {s.description && <span className="truncate text-xs text-subtle">{s.description}</span>}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
   );
 }
 

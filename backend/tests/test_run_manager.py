@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import tarfile
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -11,12 +13,13 @@ from sqlalchemy import select
 
 from exradius import downloads
 from exradius.crypto import hash_token
-from exradius.models import Artifact, EnvVar, InfoRequest, Project, Repository, Run, Secret, Task, TranscriptChunk
+from exradius.models import Artifact, ImageBuild, InfoRequest, Run, SecretStore, SecretStoreEntry, Task, TranscriptChunk
 from exradius.states import State
 from exradius.worker.bundles import RuntimeMount
 from exradius.worker.containers import ContainerExit, RunContainer, ServiceFailed, ServiceStarted, run_network_name
-from exradius.worker.intake import accept_answer, accept_task
+from exradius.worker.intake import accept_answer
 from exradius.worker.runs import RunManager
+from tests.conftest import BASE_CONFIG, commit_config
 
 Behaviour = Callable[[uuid.UUID, dict], Awaitable[int]]
 
@@ -39,6 +42,10 @@ class FakeContainers:
         self.setup_networks: list[str | None] = []
         self.inspect_output = ""
         self.inspected: list[str] = []
+        self.images: set[str] = set()
+        self.builds: list[dict] = []
+        self.build_ok = True
+        self.setup_images: list[str] = []
 
     async def ensure_runtime(self, runtime):
         self.runtimes_ensured.append(runtime)
@@ -52,8 +59,21 @@ class FakeContainers:
         self._pending[cid] = (self.behaviours.pop(0), uuid.UUID(run_id), env)
         return cid
 
+    async def image_exists(self, tag):
+        return tag in self.images
+
+    async def build_image(self, context, *, dockerfile, tag, labels=None):
+        with tarfile.open(fileobj=io.BytesIO(context)) as archive:
+            files = {m.name for m in archive.getmembers()}
+        self.builds.append({"dockerfile": dockerfile, "tag": tag, "files": files})
+        if not self.build_ok:
+            return False, "Step 1/1 : FROM nothing\npull access denied for nothing\n"
+        self.images.add(tag)
+        return True, "Successfully built\n"
+
     async def run_setup_command(self, *, image, run_id, paths, env, command, service_network=None):
         self.setup_commands.append(command)
+        self.setup_images.append(image)
         self.setup_networks.append(service_network)
         return ContainerExit(self.setup_exit, "setup output\nboom" if self.setup_exit else "ok")
 
@@ -137,10 +157,10 @@ def results(published):
     return [e.payload for e in published if e.type == "result"]
 
 
-async def submit_task(sessions, store, published, task_id="T-1", **extra) -> uuid.UUID:
+async def submit_task(accept, published, task_id="T-1", **extra) -> uuid.UUID:
     body = {"version": 1, "task_id": task_id, "project": "billing-platform", "agent": "bug-fixer",
             "instructions": "Fix it.", **extra}
-    intake = await accept_task(sessions, store, json.dumps(body).encode())
+    intake = await accept(json.dumps(body).encode())
     published.extend(e.envelope for e in intake.events)
     assert intake.run_id
     return intake.run_id
@@ -179,14 +199,28 @@ def runner(sessions, *, status="completed", summary="All fixed.", question=None,
     return behaviour
 
 
-async def test_completed_run(manager, sessions, store, containers, published, settings, configured):
+async def set_config(configured, extra: str) -> str:
+    return commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + extra})
+
+
+async def add_store(sessions, box, name: str, **values: str) -> None:
     async with sessions() as session:
-        project = await session.scalar(select(Project))
-        session.add(EnvVar(project_id=project.id, key="LOG_LEVEL", value="debug"))
-        session.add(Secret(project_id=project.id, key="DB_PASSWORD", value_encrypted=manager.box.encrypt("hunter2")))
+        secret_store = SecretStore(name=name)
+        session.add(secret_store)
+        await session.flush()
+        for key, value in values.items():
+            session.add(SecretStoreEntry(store_id=secret_store.id, key=key, value_encrypted=box.encrypt(value)))
         await session.commit()
 
-    run_id = await submit_task(sessions, store, published)
+
+async def test_completed_run(manager, sessions, store, containers, published, settings, configured, box, accept):
+    commit = await set_config(configured, (
+        "secret_store: billing\n"
+        "env:\n  LOG_LEVEL: debug\n  DB_URL: postgres://app:${secret:DB_PASSWORD}@db/app\n"
+    ))
+    await add_store(sessions, box, "billing", DB_PASSWORD="hunter2", OTHER="x")
+
+    run_id = await submit_task(accept, published)
     containers.behaviours.append(runner(sessions))
     await manager.execute(run_id)
 
@@ -203,7 +237,9 @@ async def test_completed_run(manager, sessions, store, containers, published, se
 
     env = containers.started[0]["env"]
     assert env["ANTHROPIC_API_KEY"] == "sk-test"
-    assert env["LOG_LEVEL"] == "debug" and env["DB_PASSWORD"] == "hunter2"
+    assert env["LOG_LEVEL"] == "debug" and env["DB_URL"] == "postgres://app:hunter2@db/app"
+    assert "DB_PASSWORD" not in env and "OTHER" not in env  # used by reference only
+    assert env["GIT_AUTHOR_NAME"] == "Bug Fixer Bot" and env["EXRADIUS_AGENT"] == "bug-fixer"
     assert env["EXRADIUS_API_URL"] == settings.run_api_url and env["EXRADIUS_RUN_ID"] == str(run_id)
     assert containers.started[0]["image"] == settings.project_default_image
     assert containers.started[0]["runtime"].volume == "exradius-runtime-claude_code-0.1.0-test"
@@ -212,38 +248,81 @@ async def test_completed_run(manager, sessions, store, containers, published, se
         run = await session.get(Run, run_id)
         assert run.state == State.COMPLETED and run.ended_at is not None
         assert run.token_hash is None  # revoked
+        assert run.config_commit == commit
+        assert run.config["env"]["DB_URL"] == "postgres://app:${secret:DB_PASSWORD}@db/app"  # as written
+        assert run.agent_snapshot == {
+            "slug": "bug-fixer", "name": "Bug fixer", "model": None, "provider": None, "runtime": "claude_code",
+            "identity": {"name": "Bug Fixer Bot", "email": "bug-fixer@agents.example"}, "connections": ["docs"],
+        }
         assert (await session.get(Task, "T-1")).state == State.COMPLETED
     assert not containers.started[0]["paths"].root.exists()  # run directory deleted
 
 
-async def test_repositories_and_attachments_are_prepared(
-    manager, sessions, store, containers, published, configured, remote_repo
-):
-    async with sessions() as session:
-        project = await session.scalar(select(Project))
-        session.add(Repository(project_id=project.id, name="app", url=str(remote_repo), branch="feature"))
-        await session.commit()
-
-    seen = {}
-
-    def check(run, env):
-        paths = containers.started[0]["paths"]
-        seen["feature"] = (paths.project / "app" / "feature.txt").exists()
-        seen["attachment"] = (paths.attachments / "note.txt").read_text()
-
-    import base64
-    run_id = await submit_task(
-        sessions, store, published,
-        attachments=[{"name": "note.txt", "content_base64": base64.b64encode(b"hi").decode()}],
-    )
-    containers.behaviours.append(runner(sessions, check=check))
+async def test_config_is_read_in_preparing(manager, sessions, store, containers, published, configured, accept):
+    """A config that stops running between intake and preparing fails the run with the reason."""
+    run_id = await submit_task(accept, published)
+    await set_config(configured, "env:\n  X: ${secret:GONE}\nsecret_store: nowhere\n")
     await manager.execute(run_id)
-    assert seen == {"feature": True, "attachment": "hi"}
-    assert results(published)[0]["state"] == "completed"
+    assert containers.started == []
+    [result] = results(published)
+    assert result["state"] == "failed" and result["error"] == "PreparationError: secret store nowhere does not exist"
 
 
-async def test_info_request_waits_and_resumes(manager, sessions, store, containers, published, configured):
-    run_id = await submit_task(sessions, store, published)
+async def test_agent_removed_before_preparing(manager, sessions, store, containers, published, configured, accept):
+    run_id = await submit_task(accept, published, agent="scout")
+    commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG.replace("  scout:\n    role: You investigate.\n", "")})
+    await manager.execute(run_id)
+    [result] = results(published)
+    assert result["error"] == "PreparationError: agent 'scout' is no longer defined in project 'billing-platform'"
+
+
+async def test_workstation_is_built_from_the_config_repository(
+    manager, sessions, store, containers, published, configured, accept
+):
+    await set_config(configured, "workstation:\n  dockerfile: docker/Dockerfile\n  setup: [make deps]\n")
+    commit_config(configured["remote"], {"docker/Dockerfile": "FROM ubuntu:24.04\n", "docker/tools.sh": "echo\n"})
+    run_id = await submit_task(accept, published)
+    containers.behaviours.append(runner(sessions))
+    await manager.execute(run_id)
+
+    [build] = containers.builds
+    assert build["dockerfile"] == "Dockerfile" and {"Dockerfile", "tools.sh"} <= build["files"]
+    assert build["tag"].startswith("exradius/billing-platform/workstation:") and len(build["tag"].rsplit(":", 1)[1]) == 12
+    assert containers.started[0]["image"] == build["tag"]
+    assert containers.setup_images == [build["tag"]]
+    async with sessions() as session:
+        [row] = (await session.scalars(select(ImageBuild))).all()
+        assert (row.name, row.state, row.image) == ("workstation", "succeeded", build["tag"])
+
+    # Same context: no second build, even though the commit changed.
+    commit_config(configured["remote"], {"README": "unrelated\n"})
+    run_id = await submit_task(accept, published, task_id="T-2")
+    containers.behaviours.append(runner(sessions))
+    await manager.execute(run_id)
+    assert len(containers.builds) == 1 and containers.started[1]["image"] == build["tag"]
+
+
+async def test_failed_build_fails_the_run(manager, sessions, store, containers, published, configured, accept):
+    await set_config(configured, "workstation:\n  dockerfile: Dockerfile\n")
+    commit_config(configured["remote"], {"Dockerfile": "FROM nothing\n"})
+    containers.build_ok = False
+    run_id = await submit_task(accept, published)
+    await manager.execute(run_id)
+    [result] = results(published)
+    assert result["state"] == "failed"
+    assert result["error"].startswith("PreparationError: building workstation from Dockerfile failed:\n")
+    assert "pull access denied" in result["error"]
+    async with sessions() as session:
+        assert (await session.scalar(select(ImageBuild))).state == "failed"
+
+
+async def test_repositories_and_attachments_are_prepared(
+    manager, sessions, store, containers, published, configured, remote_repo, accept
+):
+    await set_config(configured, f"repositories:\n  - {{name: app, url: {remote_repo}, branch: feature}}\n")
+
+async def test_info_request_waits_and_resumes(manager, sessions, store, containers, published, configured, accept):
+    run_id = await submit_task(accept, published)
     containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Which region?"))
     await manager.execute(run_id)
 
@@ -279,22 +358,18 @@ async def test_info_request_waits_and_resumes(manager, sessions, store, containe
 
 
 async def test_answer_before_container_exit_resumes_immediately(
-    manager, sessions, store, containers, published, configured
-):
-    run_id = await submit_task(sessions, store, published)
+    manager, sessions, store, containers, published, configured, accept):
+    run_id = await submit_task(accept, published)
     containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?", answer_early=True))
     containers.behaviours.append(runner(sessions))
     await manager.execute(run_id)
     assert states(published)[-4:] == ["waiting_for_input", "resuming", "running", "completed"]
 
 
-async def test_setup_command_failure_fails_the_run(manager, sessions, store, containers, published, configured):
-    async with sessions() as session:
-        project = await session.scalar(select(Project))
-        project.setup_commands = ["make deps"]
-        await session.commit()
+async def test_setup_command_failure_fails_the_run(manager, sessions, store, containers, published, configured, accept):
+    await set_config(configured, "workstation:\n  setup: [make deps]\n")
     containers.setup_exit = 2
-    run_id = await submit_task(sessions, store, published)
+    run_id = await submit_task(accept, published)
     await manager.execute(run_id)
 
     assert containers.setup_commands == ["make deps"]
@@ -304,24 +379,24 @@ async def test_setup_command_failure_fails_the_run(manager, sessions, store, con
     assert result["state"] == "failed" and "make deps" in result["error"] and "boom" in result["error"]
 
 
-async def test_runner_crash_without_outcome(manager, sessions, store, containers, published, configured):
-    run_id = await submit_task(sessions, store, published)
+async def test_runner_crash_without_outcome(manager, sessions, store, containers, published, configured, accept):
+    run_id = await submit_task(accept, published)
     containers.behaviours.append(runner(sessions, status=None, exit_code=137))
     await manager.execute(run_id)
     [result] = results(published)
     assert result["state"] == "failed" and "137" in result["error"]
 
 
-async def test_runtime_failure_is_reported(manager, sessions, store, containers, published, configured):
-    run_id = await submit_task(sessions, store, published)
+async def test_runtime_failure_is_reported(manager, sessions, store, containers, published, configured, accept):
+    run_id = await submit_task(accept, published)
     containers.behaviours.append(runner(sessions, status="failed", error="invalid api key", exit_code=1))
     await manager.execute(run_id)
     [result] = results(published)
     assert result["state"] == "failed" and result["error"] == "invalid api key"
 
 
-async def test_cancel_waiting_run_frees_directory(manager, sessions, store, containers, published, configured):
-    run_id = await submit_task(sessions, store, published)
+async def test_cancel_waiting_run_frees_directory(manager, sessions, store, containers, published, configured, accept):
+    run_id = await submit_task(accept, published)
     containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?"))
     await manager.execute(run_id)
     paths = containers.started[0]["paths"]
@@ -336,8 +411,8 @@ async def test_cancel_waiting_run_frees_directory(manager, sessions, store, cont
     assert len(results(published)) == 1
 
 
-async def test_cancel_while_running(manager, sessions, store, containers, published, configured):
-    run_id = await submit_task(sessions, store, published)
+async def test_cancel_while_running(manager, sessions, store, containers, published, configured, accept):
+    run_id = await submit_task(accept, published)
     base = runner(sessions, strict=False)
 
     async def cancelled_mid_run(rid, env):
@@ -353,16 +428,16 @@ async def test_cancel_while_running(manager, sessions, store, containers, publis
     assert [r["state"] for r in results(published)] == ["cancelled"]  # exactly one result
 
 
-async def test_execute_ignores_runs_that_are_not_queued(manager, sessions, store, containers, published, configured):
-    run_id = await submit_task(sessions, store, published)
+async def test_execute_ignores_runs_that_are_not_queued(manager, sessions, store, containers, published, configured, accept):
+    run_id = await submit_task(accept, published)
     await manager.cancel(run_id)
     await manager.execute(run_id)
     assert containers.started == []
     assert [r["state"] for r in results(published)] == ["cancelled"]
 
 
-async def test_resumable_runs(manager, sessions, store, containers, published, configured):
-    run_id = await submit_task(sessions, store, published)
+async def test_resumable_runs(manager, sessions, store, containers, published, configured, accept):
+    run_id = await submit_task(accept, published)
     containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?"))
     await manager.execute(run_id)
     assert await manager.resumable_runs() == []
@@ -374,10 +449,9 @@ async def test_resumable_runs(manager, sessions, store, containers, published, c
 
 
 async def test_result_links_artifacts_by_signed_http_url(
-    manager, sessions, store, containers, published, settings, configured
-):
+    manager, sessions, store, containers, published, settings, configured, accept):
     settings.public_api_url = "https://exradius.example.com/"
-    run_id = await submit_task(sessions, store, published)
+    run_id = await submit_task(accept, published)
     base = runner(sessions)
 
     async def with_artifact(rid, env):

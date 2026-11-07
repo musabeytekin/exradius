@@ -3,14 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { environmentTextOf } from "@/lib/environment";
 import { EnvironmentPreview } from "./EnvironmentPreview";
-import type { ResolvedAgent } from "@/lib/types";
 
-const resolved: ResolvedAgent = {
-  project_id: "p1",
-  agent_id: "a1",
-  secret_overrides: {},
-  connections: [],
-  model: "claude-sonnet-5-5",
+const resolved = {
   environment_text: [
     "# Your environment",
     "",
@@ -25,7 +19,7 @@ const resolved: ResolvedAgent = {
 };
 
 describe("environment preview", () => {
-  it("reads the text from a resolved view or a run spec, and ignores its absence", () => {
+  it("reads the text from a run or its spec, and ignores its absence", () => {
     expect(environmentTextOf(resolved)).toMatch(/^# Your environment/);
     expect(environmentTextOf({ spec: { environment_text: "# Your environment\nx" } })).toBe("# Your environment\nx");
     expect(environmentTextOf({ connections: [] })).toBeNull();
