@@ -72,9 +72,12 @@ running verification shows the current step. The list of past verifications stay
 
 ## 2. The setup skill
 
-A Claude Code skill, `exradius-project`, in this repository under `skills/`, packaged as
-a plugin so developers install it from the Exradius repository and it is versioned with the
-schema it knows. A developer invokes it inside a checkout of their code (or an empty
+A Claude Code skill, `exradius-project`, in its own repository
+(`musabeytekin/exradius-skill`), packaged as a plugin so developers add that repository
+as a marketplace and install the skill without access to the Exradius source. The skill
+states which `exradius.yaml` `version` it writes; a schema change in Exradius is followed
+by a release of the skill, and this document names the skill repository so the two are
+found together. A developer invokes it inside a checkout of their code (or an empty
 folder, naming the repositories). It never calls the Exradius API, never asks for or
 stores a secret value, and creates or updates nothing without showing the developer the
 files first.
@@ -149,8 +152,8 @@ Exradius installed:
   project `env`, joined to the services' network;
 - stops and removes everything, prints the first failing step with its output.
 
-The flags mirror `backend/exradius/worker/containers.py`; a comment in both places names
-the other, and changing one means changing the other. The check does not cover the
+The flags mirror `backend/exradius/worker/containers.py` in the Exradius repository; a
+comment in both places names the other, and changing one means changing the other. The check does not cover the
 runtime bundle, providers, or pushes, which only a real run exercises.
 
 ### 2.5 Update mode
