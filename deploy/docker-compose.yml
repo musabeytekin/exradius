@@ -4,7 +4,8 @@
 #   docker compose -f deploy/docker-compose.yml up -d --build
 #
 # The worker starts run containers on the host's Docker daemon, attached to the
-# `exradius` network so they can reach the API at http://api:8000.
+# `exradius-runs` network, where only the API is (alias exradius-api): runs reach it at
+# http://exradius-api:8000 and cannot see postgres, rabbitmq or anything else of the stack.
 #
 # Agents run in run containers started from the project's image (any glibc-based image
 # with git; exradius-project-default when a project names none), with the runtime bundle
@@ -58,6 +59,10 @@ services:
       # provider "Anthropic (migrated)" at the first start without providers; it is not
       # read after that. Providers are managed in the admin panel.
       EXRADIUS_ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    networks:
+      default: {}
+      runs:
+        aliases: [exradius-api]
     ports:
       - "${EXRADIUS_API_PORT:-8000}:8000"
     volumes:
@@ -79,8 +84,10 @@ services:
       EXRADIUS_WORKER_CONCURRENCY: ${EXRADIUS_WORKER_CONCURRENCY:-4}
       EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE: ${EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE:-exradius-runtime-claude-code:0.1.0}
       EXRADIUS_PROJECT_DEFAULT_IMAGE: ${EXRADIUS_PROJECT_DEFAULT_IMAGE:-exradius-project-default:0.1.0}
-      EXRADIUS_RUN_NETWORK: exradius
-      EXRADIUS_RUN_API_URL: http://api:8000
+      # Runs join exradius-runs only (plus their own network when the project has
+      # services); the worker itself stays off it.
+      EXRADIUS_RUN_NETWORK: exradius-runs
+      EXRADIUS_RUN_API_URL: http://exradius-api:8000
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${EXRADIUS_DATA_DIR:-/var/lib/exradius}:/var/lib/exradius
@@ -157,6 +164,9 @@ services:
 networks:
   default:
     name: exradius
+  # Runs and the API only. Not internal: runs need outbound network access.
+  runs:
+    name: exradius-runs
 
 volumes:
   postgres:

@@ -1,8 +1,9 @@
 """The generated environment section of the system prompt (docs/environment-and-services.md §1).
 
 Built from facts Exradius holds: the project's image and repositories (URLs without
-credentials), the fixed "not available" line, the project's services and the maintainers'
-notes. It never names Exradius, and it does not list installed tools: the agent discovers
+credentials), the fixed "not available" line, the project's services with their settings
+(secret values never: a secret appears as the variable that carries it) and the
+maintainers' notes. It never names Exradius, and it does not list installed tools: the agent discovers
 those itself.
 """
 
@@ -15,6 +16,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from exradius.resolve import SECRET_REF
 
 HEADING = "# Your environment"
 NOT_AVAILABLE = (
@@ -53,11 +56,34 @@ class RepoFact:
     push: bool
 
 
+NOT_EXPORTED = "<a secret you do not have>"
+SECRET_HINT = "A value written as $NAME is the value of your environment variable NAME."
+
+
 @dataclass(frozen=True)
 class ServiceFact:
     name: str
     image: str
     ports: tuple[int, ...] = ()
+    settings: tuple[str, ...] = ()
+    """``KEY=value`` lines; see ``service_settings``."""
+
+
+def service_settings(env: dict[str, object], exported: set[str]) -> tuple[str, ...]:
+    """A service's env as the agent may see it: plain values as they are, each
+    ``${secret:NAME}`` as ``$NAME`` when the run environment carries ``NAME`` (project
+    secrets are exported under their own names), else as a placeholder. Plain settings
+    come first, then those built from secrets, each group in stored order."""
+    plain: list[str] = []
+    secret: list[str] = []
+    for key, raw in env.items():
+        value = str(raw)
+        if not SECRET_REF.search(value):
+            plain.append(f"{key}={value}")
+            continue
+        shown = SECRET_REF.sub(lambda m: f"${m.group(1)}" if m.group(1) in exported else NOT_EXPORTED, value)
+        secret.append(f"{key}={shown}")
+    return tuple(plain + secret)
 
 
 def build_environment_text(
@@ -87,7 +113,11 @@ def build_environment_text(
                 line += f" on port {service.ports[0]}"
             elif service.ports:
                 line += " on ports " + ", ".join(str(p) for p in service.ports)
+            if service.settings:
+                line += ", " + ", ".join(service.settings)
             lines.append(line)
+        if any("$" in setting for service in services for setting in service.settings):
+            lines.append(SECRET_HINT)
         parts.append("\n".join(lines))
 
     parts.append(CLOSING)
@@ -98,7 +128,7 @@ def build_environment_text(
 
 async def project_environment_text(session: AsyncSession, project_id: uuid.UUID, default_image: str) -> str:
     """The section for a project as the worker would build it now."""
-    from exradius.models import Project, ProjectService, Repository
+    from exradius.models import Project, ProjectService, Repository, Secret
 
     project = await session.get(Project, project_id)
     assert project is not None
@@ -112,12 +142,16 @@ async def project_environment_text(session: AsyncSession, project_id: uuid.UUID,
             .order_by(ProjectService.position, ProjectService.name)
         )
     ).all()
+    exported = set(await session.scalars(select(Secret.key).where(Secret.project_id == project_id)))
     return build_environment_text(
         image=project.image or default_image,
         repositories=[
             RepoFact(r.name, r.branch, r.url, can_push(r.url, r.push_allowed, r.auth_secret_id is not None))
             for r in repos
         ],
-        services=[ServiceFact(s.name, s.image, tuple(int(p) for p in s.ports or [])) for s in services],
+        services=[
+            ServiceFact(s.name, s.image, tuple(int(p) for p in s.ports or []), service_settings(s.env or {}, exported))
+            for s in services
+        ],
         notes=project.notes or "",
     )

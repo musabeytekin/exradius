@@ -216,10 +216,12 @@ async def delete_env_var(project_id: uuid.UUID, var_id: uuid.UUID, session: DB, 
 # Services (docs/environment-and-services.md §2) --------------------------------------------
 
 
-def _reserved_service_names(state) -> set[str]:
-    """Host names runs already use on the shared run network: the API's."""
+def _reserved_service_name(name: str, state) -> bool:
+    """Whether a service named ``name`` would shadow a host name runs see on the run
+    network: the API (``api``, ``exradius-api``, the host of ``EXRADIUS_RUN_API_URL``) and
+    every container Exradius or its compose stack names (``exradius-*``)."""
     host = urlsplit(state.settings.run_api_url).hostname
-    return {"api", "exradius-api", *([host] if host else [])}
+    return name in {"api", *([host] if host else [])} or name.startswith("exradius")
 
 
 async def _services(session, project_id: uuid.UUID) -> list[ProjectService]:
@@ -239,7 +241,7 @@ async def _service(session, project_id: uuid.UUID, service_id: uuid.UUID) -> Pro
 
 
 def _check_service_name(name: str, others: list[ProjectService], state) -> None:
-    if name in _reserved_service_names(state):
+    if _reserved_service_name(name, state):
         raise HTTPException(422, f"service name {name!r} is reserved")
     if any(other.name == name for other in others):
         raise HTTPException(409, f"service {name!r} already exists in this project")

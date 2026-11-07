@@ -24,6 +24,7 @@ from exradius.environment import (
     can_push,
     project_environment_text,
     public_url,
+    service_settings,
 )
 from exradius.models import EnvVar, Project, ProjectService, ProjectVerification, Repository, Run, Secret, Task
 from exradius.runner.prompt import OPERATING_RULES, build_system_prompt
@@ -61,7 +62,9 @@ REPOS = [
     RepoFact("platform-config", "main", "https://github.com/acme/platform-config.git?token=QSECRET#frag", False),
     RepoFact("legacy", "develop", "git@github.com:acme/legacy.git", False),
 ]
-SERVICES = [ServiceFact("postgres", "postgres:16", (5432,)), ServiceFact("redis", "redis:7", (6379,)),
+SERVICES = [ServiceFact("postgres", "postgres:16", (5432,),
+                        ("POSTGRES_USER=app", "POSTGRES_DB=app", "POSTGRES_PASSWORD=$DB_PASSWORD")),
+            ServiceFact("redis", "redis:7", (6379,)),
             ServiceFact("mailpit", "axllent/mailpit", (1025, 8025)), ServiceFact("worker", "acme/worker:1")]
 
 EXPECTED = """\
@@ -77,10 +80,11 @@ Each folder in the working directory is a git clone of one repository:
 Not available: a Docker daemon, Kubernetes, sudo, installing packages. Outbound network access is available.
 
 Services running for this task, reachable by host name from this container:
-- postgres (postgres:16) on port 5432
+- postgres (postgres:16) on port 5432, POSTGRES_USER=app, POSTGRES_DB=app, POSTGRES_PASSWORD=$DB_PASSWORD
 - redis (redis:7) on port 6379
 - mailpit (axllent/mailpit) on ports 1025, 8025
 - worker (acme/worker:1)
+A value written as $NAME is the value of your environment variable NAME.
 
 The working directory is deleted when the task ends. Only what you push, attach to the result,
 or write in the result survives.
@@ -97,6 +101,26 @@ def test_environment_text_matches_the_documented_layout():
     for secret in ("ghp_SECRET", "x-access-token", "QSECRET", "frag"):
         assert secret not in text
     assert "Exradius" not in text and "exradius" not in text
+
+
+def test_service_settings_show_plain_values_and_name_secrets():
+    env = {"POSTGRES_PASSWORD": "${secret:DB_PASSWORD}", "POSTGRES_USER": "app", "PGPORT": 5432,
+           "URL": "postgres://app:${secret:DB_PASSWORD}@postgres/app", "TOKEN": "${secret:GLOBAL_ONLY}"}
+    assert service_settings(env, {"DB_PASSWORD"}) == (
+        "POSTGRES_USER=app",
+        "PGPORT=5432",
+        "POSTGRES_PASSWORD=$DB_PASSWORD",
+        "URL=postgres://app:$DB_PASSWORD@postgres/app",
+        "TOKEN=<a secret you do not have>",  # global secrets are not in the run environment
+    )
+    assert service_settings({}, set()) == ()
+
+
+def test_secret_hint_only_when_a_setting_names_a_variable():
+    plain = [ServiceFact("redis", "redis:7", (6379,), ("REDIS_ARGS=--save ''",))]
+    text = build_environment_text(image="i", repositories=[], services=plain, notes="")
+    assert "- redis (redis:7) on port 6379, REDIS_ARGS=--save ''\n\nThe working" in text
+    assert "environment variable NAME" not in text
 
 
 def test_environment_text_without_services_notes_or_repositories():
@@ -146,16 +170,20 @@ async def test_project_environment_text_from_the_database(sessions, box, configu
                        auth_secret_id=token.id, push_allowed=True),
             Repository(project_id=project.id, name="a-repo", url="https://github.com/acme/a.git"),
             ProjectService(project_id=project.id, name="redis", image="redis:7", ports=[6379], position=1),
-            ProjectService(project_id=project.id, name="postgres", image="postgres:16", ports=[5432], position=0),
+            ProjectService(project_id=project.id, name="postgres", image="postgres:16", ports=[5432], position=0,
+                           env={"POSTGRES_USER": "app", "POSTGRES_PASSWORD": "${secret:DB_PASSWORD}"}),
+            Secret(project_id=project.id, key="DB_PASSWORD", value_encrypted=box.encrypt("s3cret-pw")),
         ])
         await session.commit()
         text = await project_environment_text(session, project.id, "exradius-project-default:0.1.0")
     assert "built from the image bank-of-anthos-dev:latest." in text
     assert "- a-repo: branch main, origin https://github.com/acme/a.git, pushing NOT allowed\n" \
            "- b-repo: branch main, origin https://github.com/acme/b.git, pushing allowed" in text
-    assert "- postgres (postgres:16) on port 5432\n- redis (redis:7) on port 6379" in text
+    assert "- postgres (postgres:16) on port 5432, POSTGRES_USER=app, POSTGRES_PASSWORD=$DB_PASSWORD\n" \
+           "- redis (redis:7) on port 6379\n" \
+           "A value written as $NAME is the value of your environment variable NAME." in text
     assert text.endswith("Notes from the project's maintainers:\nUse the warm Maven cache.")
-    assert "ghp_x" not in text
+    assert "ghp_x" not in text and "s3cret-pw" not in text
 
 
 # Prompt layout and the run spec ----------------------------------------------------------------
@@ -297,7 +325,9 @@ def test_service_crud_and_validation(admin):
         {"name": "db", "image": "x", "env": {"BAD KEY": "1"}},
     ):
         assert admin.post(base, json=bad).status_code == 422, bad
-    assert admin.post(base, json={"name": "api", "image": "x"}).status_code == 422  # the API's host name
+    # Names runs already resolve on the run network: the API's, and the stack's exradius-*.
+    for reserved in ("api", "exradius-api", "exradius-api-1", "exradius-postgres-1", "exradius"):
+        assert admin.post(base, json={"name": reserved, "image": "x"}).status_code == 422, reserved
     assert admin.post(base, json={"name": "postgres", "image": "x"}).status_code == 409
 
     patched = admin.patch(f"{base}/{redis['id']}", json={"image": "redis:7.4", "ready": None})
@@ -499,24 +529,57 @@ async def test_service_that_exits_fails_at_once(docker_manager, docker_fake):
         await docker_manager.start_service(run_id="r", network=network, service=ServiceSpec("postgres", "postgres:16"))
 
 
-async def test_run_containers_join_both_networks(settings, tmp_path):
+def test_runs_default_to_their_own_network_and_the_api_alias(monkeypatch, tmp_path):
+    for var in ("EXRADIUS_RUN_NETWORK", "EXRADIUS_RUN_API_URL"):
+        monkeypatch.delenv(var, raising=False)
+    defaults = Settings(database_url="sqlite+aiosqlite:///x", secret_key="k", admin_username="a",
+                        admin_password="p", broker_url="amqp://unused/", data_dir=tmp_path)
+    assert defaults.run_network == "exradius-runs"
+    assert defaults.run_api_url == "http://exradius-api:8000"
+
+
+def test_compose_keeps_runs_off_the_stack_network():
+    import yaml
+
+    compose = yaml.safe_load((Path(__file__).parents[2] / "deploy" / "docker-compose.yml").read_text())
+    assert compose["networks"]["runs"]["name"] == "exradius-runs"
+    on_runs = {name for name, svc in compose["services"].items() if "runs" in (svc.get("networks") or {})}
+    assert on_runs == {"api"}  # nothing else of the stack (postgres, rabbitmq, the worker) is visible to runs
+    assert compose["services"]["api"]["networks"]["runs"]["aliases"] == ["exradius-api"]
+    worker = compose["services"]["worker"]["environment"]
+    assert worker["EXRADIUS_RUN_NETWORK"] == "exradius-runs"
+    assert worker["EXRADIUS_RUN_API_URL"] == "http://exradius-api:8000"
+
+
+async def test_run_containers_join_the_run_network_and_never_the_stack(settings, tmp_path):
     ran = []
     fake = SimpleNamespace(
         containers=SimpleNamespace(run=lambda image, **kw: ran.append(kw) or SimpleNamespace(id="c1")),
         api=SimpleNamespace(create_endpoint_config=lambda aliases=None: {"Aliases": aliases}),
     )
-    shared = Settings(**{**settings.model_dump(), "run_network": "exradius"})
-    manager = ContainerManager(shared, client=fake)
+    manager = ContainerManager(settings, client=fake)
+    manager.wait = lambda cid: _async(SimpleNamespace(exit_code=0, logs=""))
     paths = prepare.create_run_directory(settings.data_dir, "r1")
     from exradius.worker.bundles import RuntimeMount
 
     runtime = RuntimeMount("claude_code", "0.1.0", "vol")
+
+    def networks(kw):
+        return {kw["network"], *kw.get("networking_config", {})}
+
     await manager.start_runner(image="img", run_id="r1", paths=paths, env={}, runtime=runtime,
                                service_network="exradius-run-r1")
-    assert ran[-1]["network"] == "exradius"
-    assert set(ran[-1]["networking_config"]) == {"exradius", "exradius-run-r1"}
+    assert ran[-1]["network"] == "exradius-runs" and networks(ran[-1]) == {"exradius-runs", "exradius-run-r1"}
     await manager.start_runner(image="img", run_id="r1", paths=paths, env={}, runtime=runtime)
-    assert ran[-1]["network"] == "exradius" and "networking_config" not in ran[-1]
+    assert networks(ran[-1]) == {"exradius-runs"} and "networking_config" not in ran[-1]
+    await manager.run_setup_command(image="img", run_id="r1", paths=paths, env={}, command="true",
+                                    service_network="exradius-run-r1")
+    assert networks(ran[-1]) == {"exradius-runs", "exradius-run-r1"}
+    await manager.run_probe(image="img", label="p", env={}, timeout=5, runtime=runtime)
+    assert networks(ran[-1]) == {"exradius-runs"}
+    await manager.inspect_clones(image="img", run_id="r1", paths=paths)
+    assert ran[-1]["network_mode"] == "none" and "network" not in ran[-1]
+    assert all("exradius" not in networks(kw) for kw in ran if "network" in kw)
 
 
 # The run user's passwd ----------------------------------------------------------------------------

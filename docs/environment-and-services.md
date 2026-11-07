@@ -28,8 +28,9 @@ Each folder in the working directory is a git clone of one repository:
 Not available: a Docker daemon, Kubernetes, sudo, installing packages. Outbound network access is available.
 
 Services running for this task, reachable by host name from this container:
-- postgres (postgres:16) on port 5432
+- postgres (postgres:16) on port 5432, POSTGRES_USER=app, POSTGRES_DB=app, POSTGRES_PASSWORD=$DB_PASSWORD
 - redis (redis:7) on port 6379
+A value written as $NAME is the value of your environment variable NAME.
 
 The working directory is deleted when the task ends. Only what you push, attach to the result,
 or write in the result survives.
@@ -45,7 +46,13 @@ Sources:
 - **Not available**: fixed text. The agent discovers installed tools itself (`which`,
   `--version`); Exradius lists only what it cannot discover: there is no Docker daemon even
   if a client is present, no Kubernetes, no sudo, no package installation.
-- **Services**: the project's services (§2) with name, image and ports.
+- **Services**: the project's services (§2) with name, image, ports and settings. A
+  setting is an env entry shown as `KEY=value`; a `${secret:NAME}` in it is shown as
+  `$NAME`, the variable the run environment carries (project secrets are exported under
+  their own names), never as the value. A secret that is only global is not in the run
+  environment and shows as `<a secret you do not have>`. The `$NAME` hint line is added
+  when any setting names a variable. (Added after BANK-204: the agent asked for the user
+  and database because the section gave only the port.)
 - **The last paragraph** is fixed text.
 - **Notes**: `projects.notes`, a text field; omitted when empty.
 
@@ -84,8 +91,19 @@ Lifecycle, per run:
 5. At finalize: stop and remove the services and the network. `reconcile` and
    `sweep_orphans` remove services and networks whose run is finished or unknown, by label.
 
-Runs of projects without services keep today's shared `run_network` setting. With
-services, each run has its own network so parallel runs never share a database.
+Networks (changed after BANK-204, where a run's `postgres` resolved to Exradius's own
+database because runs were on the stack network):
+
+- `exradius`: the stack (api, worker, frontend, postgres, rabbitmq). Runs never join it.
+- `exradius-runs` (`run_network`): the API, with the alias `exradius-api`, and every run,
+  setup and provider-probe container. Runs reach the API at `http://exradius-api:8000`
+  (`run_api_url`). The worker is not on it.
+- `exradius-run-<run_id>`: with services, the run's own network, so parallel runs never
+  share a database. Setup and run containers are on it and on `exradius-runs`.
+- The delivery check (§4) runs with no network.
+
+Service names that would shadow a name runs already resolve are refused: `api`, the host of
+`run_api_url`, and anything starting with `exradius`.
 
 Verify: steps "Start service <name>" (with readiness) for each service, before the setup
 commands, and "Stop services" at the end. There is no image probe or "Inspect image" step:

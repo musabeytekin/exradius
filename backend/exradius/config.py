@@ -70,9 +70,12 @@ class Settings(BaseSettings):
     """Image of run containers of projects without an image, and of provider probes."""
     runtime_mount: str = "/opt/exradius/runtime"
     """Where run containers see the runtime bundle (read-only)."""
-    run_network: str | None = None
-    run_api_url: str = "http://api:8000"
-    """``EXRADIUS_API_URL`` given to run containers."""
+    run_network: str | None = "exradius-runs"
+    """Network every run, setup and probe container joins: the API's alias is there and
+    nothing else of the stack is (never the stack network: its ``postgres`` would shadow a
+    service of the same name). ``None`` uses Docker's default bridge."""
+    run_api_url: str = "http://exradius-api:8000"
+    """``EXRADIUS_API_URL`` given to run containers (the API's alias on ``run_network``)."""
     run_user: str = "1000:1000"
     run_state_mount: str = "/exradius/state"
     docker_url: str | None = None

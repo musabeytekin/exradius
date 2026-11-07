@@ -79,6 +79,7 @@ needs_docker = pytest.mark.skipif(docker_client is None, reason=f"Docker, {PROJE
 def docker_settings(settings):
     settings.project_default_image = PROJECT_IMAGE
     settings.runtime_image_claude_code = BUNDLE_IMAGE
+    settings.run_network = None  # Docker's bridge: these tests need no API and no running stack
     return settings
 
 
