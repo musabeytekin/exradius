@@ -90,6 +90,12 @@ def test_cache_paths_are_checked(entry, message):
 
 def test_cache_entries_are_unique_and_commands_not_empty():
     assert errors(MINIMAL + "workstation:\n  cache: [~/.m2, ~/.m2/]\n") == ["workstation.cache[1]: '~/.m2/' is listed twice"]
+    assert errors(MINIMAL + "workstation:\n  cache: [~/.m2, /home/runner/.m2]\n") == [
+        "workstation.cache[1]: '/home/runner/.m2' is listed twice"]
+    assert errors(MINIMAL + "services:\n  r: {image: redis, command: [redis-server, --port, 6380]}\n") == [
+        "services.r.command[2]: must be a string"]
+    config = parse_config(MINIMAL + "services:\n  r: {image: valkey, command: [valkey-server, --save, '']}\n").config
+    assert config.services["r"].command == ["valkey-server", "--save", ""]
     assert errors(MINIMAL + "services:\n  db: {image: postgres, command: []}\n") == [
         "services.db.command: List should have at least 1 item after validation, not 0"]
 

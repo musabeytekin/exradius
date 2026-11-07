@@ -156,8 +156,9 @@ class ServiceDef(_Image):
     """Documentation for the agent; nothing is published."""
     ready: Ready | None = None
     """``None``: the image's HEALTHCHECK, else "running"."""
-    command: list[Text] | None = Field(default=None, min_length=1)
-    """The container command; the image's entrypoint is kept."""
+    command: list[str] | None = Field(default=None, min_length=1)
+    """The container command; the image's entrypoint is kept. Strings only (numbers are
+    refused, write them quoted); an empty one is an argument (valkey's ``--save ""``)."""
     memory: Memory | None = None
     """Reserved and enforced like ``resources.memory``."""
 
@@ -500,7 +501,7 @@ def _check(config: ProjectConfig, config_dir: str, lookup: Lookup | None, errors
         if problem:
             errors.append(f"{where}: {problem}")
             continue
-        normal = posixpath.normpath(entry)
+        normal = posixpath.normpath("/home/runner" + entry[1:] if entry.startswith("~") else entry)
         if normal in seen_caches:
             errors.append(f"{where}: {entry!r} is listed twice")
         seen_caches.add(normal)

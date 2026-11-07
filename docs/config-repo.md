@@ -131,7 +131,8 @@ Rules:
   `<data_dir>/caches/<slug>/<n>-<sanitised path>/` into the setup, run and resume
   containers and Verify; nothing cleans them, the project page shows their size, and they
   are deleted with the project (docs/run-environment.md §5).
-- A service's `command` is a non-empty list of strings; there is no `entrypoint` key.
+- A service's `command` is a non-empty list of strings (numbers quoted; `""` is an
+  argument); there is no `entrypoint` key.
 - Unknown keys anywhere are errors (typos must not pass silently). `version` must be 1.
 
 ## 3. Reading, validating, snapshotting
