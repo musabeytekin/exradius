@@ -10,7 +10,7 @@ Exradius only executes. It has no ticket model and no chat integration: whatever
 company uses publishes tasks on RabbitMQ and consumes the events. It runs on one machine
 with Docker Compose and is administered from a web panel.
 
-[![A ticket in a tracker is assigned to the Exradius agent](docs/media/assign-ticket.jpg)](docs/media/assign-ticket.mp4)
+[![A ticket in a tracker is assigned to the Exradius agent](docs/media/assign-ticket.gif)](docs/media/assign-ticket.mp4)
 
 *Assigning a ticket to the agent: the tracker's integration turns it into an Exradius task
 ([video, 6 s](docs/media/assign-ticket.mp4)).*
