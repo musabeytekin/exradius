@@ -97,7 +97,7 @@ def _killed(f: Failure) -> str | None:
         return None
     what = _code(f.command) if f.command else f"the {f.subject} step"
     return (f"{what[0].upper()}{what[1:]} was killed (exit 137): it ran out of memory; lower its parallelism "
-            "or give the worker's Docker more memory.")
+            "or declare `resources.memory` so the run's pod is placed on a node with room for it.")
 
 
 DECLARED = re.compile(r"exceeded its declared memory \(([^)]+)\)")
@@ -118,11 +118,30 @@ def _declared_memory(f: Failure) -> str | None:
             "raise `resources.memory` in the config, or lower the command's parallelism.")
 
 
-def _reservation(f: Failure) -> str | None:
-    if not f.step.startswith("Reserve memory") or "more than this worker's budget" not in f.log:
+# Kubernetes: image pulls and placement (docs/kubernetes.md §13) ----------------------------
+
+PULL = re.compile(r"ErrImagePull|ImagePullBackOff|ImagePullFailed|InvalidImageName|failed to pull|pull access denied"
+                  r"|manifest unknown|not found: manifest|failed to resolve reference", re.I)
+IMAGE = re.compile(r'\bimage\s+"?([\w.:/@-]*\w)"?', re.I)
+UNSCHEDULABLE = re.compile(r"Unschedulable|didn't match|Insufficient (memory|cpu)|nodes are available", re.I)
+
+
+def _image_pull(f: Failure) -> str | None:
+    if not PULL.search(f.log):
         return None
-    return (f"{f.log.strip().splitlines()[0][0].upper()}{f.log.strip().splitlines()[0][1:]}: lower the "
-            "declared memory, or raise the budget.")
+    image = IMAGE.search(f.log)
+    what = f"The image {_code(image.group(1))}" if image else "An image of the run's pod"
+    return (f"{what} could not be pulled: check `workstation.image` (name, tag, registry) and, for a private "
+            "registry, the install's `runs.imagePullSecrets`.")
+
+
+def _unschedulable(f: Failure) -> str | None:
+    if not UNSCHEDULABLE.search(f.log) or "waiting for cluster capacity" not in f.log:
+        return None
+    if memory := re.search(r"Insufficient (memory|cpu)", f.log, re.I):
+        return (f"No node has enough {memory.group(1).lower()} for the run's pod: lower `resources.memory`, or add "
+                "a node with more room to the cluster.")
+    return "No node can take the run's pod: check the install's `runs.nodeSelector` and `runs.tolerations`."
 
 
 # Services ------------------------------------------------------------------------------------
@@ -259,7 +278,8 @@ def _build(f: Failure) -> str | None:
     return f"{sentence} {mismatch}" if mismatch else sentence
 
 
-RULES: list[Rule] = [_config, _clone, _reservation, _declared_memory, _killed, _service, _build, _setup_mismatch, _missing_tool]
+RULES: list[Rule] = [_config, _image_pull, _unschedulable, _clone, _declared_memory, _killed, _service, _build,
+                     _setup_mismatch, _missing_tool]
 
 
 def diagnose(step: str, log: str) -> str | None:

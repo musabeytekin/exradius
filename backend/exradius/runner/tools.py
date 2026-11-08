@@ -64,6 +64,10 @@ class ExradiusTools:
     def suspend_requested(self) -> bool:
         return self._suspend
 
+    def clear_suspend(self) -> None:
+        """Before the session resumes with the answers, in the same process."""
+        self._suspend = False
+
     async def request_information(self, args: dict[str, Any]) -> dict[str, Any]:
         question = str(args.get("question") or "").strip()
         if not question:

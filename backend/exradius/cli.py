@@ -5,6 +5,7 @@
     exradius events                 # print every outbound event
     exradius answer --task-id JIRA-4821 --request-id <id> --answer "Yes, on Monday."
     exradius generate-key           # a new EXRADIUS_SECRET_KEY
+    exradius migrate                # alembic upgrade head, one process at a time
 """
 
 from __future__ import annotations
@@ -98,6 +99,42 @@ def generate_key(_: argparse.Namespace) -> None:
     print(generate_secret_key())
 
 
+MIGRATION_LOCK = 0x6578726164697573  # "exradius"
+
+
+async def migrate(_: argparse.Namespace) -> None:
+    """``alembic upgrade head`` under a Postgres advisory lock, so the api's and the worker's
+    init containers can both run it (docs/kubernetes.md §16)."""
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import text
+
+    from exradius import models
+    from exradius.config import get_settings
+    from exradius.db import make_engine
+
+    settings = get_settings()
+    config = Config()
+    config.set_main_option("script_location", str(Path(models.__file__).parent / "migrations"))
+    engine = make_engine(settings.database_url)
+    postgres = engine.dialect.name == "postgresql"
+    try:
+        async with engine.connect() as connection:
+            if postgres:
+                await connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": MIGRATION_LOCK})
+                await connection.commit()
+            try:
+                # env.py runs its own event loop: in a thread of its own.
+                await asyncio.to_thread(command.upgrade, config, "head")
+            finally:
+                if postgres:
+                    await connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": MIGRATION_LOCK})
+                    await connection.commit()
+    finally:
+        await engine.dispose()
+    print("database is at the latest migration", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="exradius")
     parser.add_argument("--broker", help="AMQP URL (default: $EXRADIUS_BROKER_URL)")
@@ -128,6 +165,9 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("generate-key", help="print a new EXRADIUS_SECRET_KEY")
     p.set_defaults(func=generate_key)
+
+    p = sub.add_parser("migrate", help="bring the database to the latest migration")
+    p.set_defaults(func=migrate)
 
     args = parser.parse_args(argv)
     result = args.func(args)

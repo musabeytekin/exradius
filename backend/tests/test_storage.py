@@ -91,19 +91,18 @@ def test_validate_key_splits_segments():
     assert validate_key("a..b/c") == ["a..b", "c"]  # dots inside a name are fine
 
 
-def test_store_selection(tmp_path):
-    default = make_store(Settings(data_dir=tmp_path))
-    assert isinstance(default, FilesystemObjectStore)
-    assert default.root == (tmp_path / "objects" / "exradius").resolve()
-
+def test_installs_use_s3():
+    """An install's store is always an S3 API (SeaweedFS locally); the filesystem store is for tests."""
     s3 = make_store(
-        Settings(object_store="s3", s3_endpoint_url="http://s3.example:9000", s3_access_key="k",
-                 s3_secret_key="s", s3_bucket="b")
+        Settings(s3_endpoint_url="http://s3.example:9000", s3_access_key="k", s3_secret_key="s", s3_bucket="b")
     )
     assert isinstance(s3, S3ObjectStore) and s3.bucket == "b"
+    assert isinstance(make_store(Settings()), S3ObjectStore)
+    with pytest.raises(ValueError):
+        Settings(object_store="filesystem")
 
 
 def test_empty_s3_settings_mean_unset():
     settings = Settings(s3_endpoint_url="", s3_access_key="", s3_secret_key="")
     assert settings.s3_endpoint_url is None and settings.s3_access_key is None
-    assert settings.object_store == "filesystem"
+    assert settings.object_store == "s3"

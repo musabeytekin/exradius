@@ -1,4 +1,10 @@
-"""FastAPI application: admin API (session cookie) and internal run API (run token)."""
+"""FastAPI application: admin API (session cookie) and internal API (run tokens).
+
+One process serves two ports (docs/kubernetes.md §3): ``api_port`` (8000) for the admin,
+integration, hook and download routes, and ``internal_port`` (8001) for ``/internal/*``
+only, the one port run pods reach. A request on either port for the other's routes is
+answered 404. Other ports (tests) see every route.
+"""
 
 from __future__ import annotations
 
@@ -74,6 +80,10 @@ class BrokerPublisher:
 
     async def test_provider(self, test_id: str) -> None:
         await self.publish(messaging.CONTROL_QUEUE, {"version": 1, "action": "test_provider", "test_id": test_id})
+
+    async def run_reported(self, run_id: str) -> None:
+        """The runner reported waiting or resumed: the worker settles the run now."""
+        await self.publish(messaging.CONTROL_QUEUE, {"version": 1, "action": "run_reported", "run_id": run_id})
 
     async def check(self) -> tuple[bool, str]:
         try:
@@ -154,7 +164,7 @@ def create_app(
         sessions = make_session_factory(engine)
         object_store = store or make_store(settings)
         await object_store.ensure_bucket()
-        publisher = broker or BrokerPublisher(settings.broker_url)
+        publisher = broker or BrokerPublisher(settings.effective_broker_url)
         app.state.exradius = AppState(
             settings=settings,
             sessions=sessions,
@@ -181,6 +191,7 @@ def create_app(
             await engine.dispose()
 
     app = FastAPI(title="Exradius", version="1", lifespan=lifespan)
+    app.add_middleware(PortSplit, api_port=settings.api_port, internal_port=settings.internal_port)
     app.add_middleware(
         SessionMiddleware,
         secret_key=settings.effective_session_secret,
@@ -208,4 +219,29 @@ def create_app(
     app.include_router(integration_routes.bridges_router)
     app.include_router(routing_routes.router)
     app.include_router(internal.router)
+    app.include_router(internal.verifications)
+    app.include_router(internal.probes)
     return app
+
+
+class PortSplit:
+    """``/internal/*`` on the internal port only, everything else on the api port only;
+    ``/healthz`` on both."""
+
+    def __init__(self, app, *, api_port: int, internal_port: int):
+        self.app = app
+        self.api_port = api_port
+        self.internal_port = internal_port
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            port = (scope.get("server") or (None, None))[1]
+            path = scope.get("path", "")
+            internal = path.startswith("/internal/")
+            if path != "/healthz" and (
+                (port == self.internal_port and not internal) or (port == self.api_port and internal)
+            ):
+                response = JSONResponse({"detail": "Not Found"}, 404)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)

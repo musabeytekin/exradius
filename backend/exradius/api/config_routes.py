@@ -35,7 +35,6 @@ from exradius.providers import provider_problem, resolve_provider
 from exradius.resolve import connection_view
 from exradius.schemas import api as s
 from exradius.schemas.project_config import NAME_PATTERN, SECRET_REF
-from exradius.worker import caches
 
 router = APIRouter(prefix="/api")
 NO_CONTENT = status.HTTP_204_NO_CONTENT
@@ -76,10 +75,7 @@ async def check_directory(state: AppState) -> None:
     await directory.check(state.sessions, state.broker.publish_directory)
 
 
-async def _project_out(session, state: AppState, project: Project, *, caches_size: bool = False) -> s.ProjectOut:
-    """``caches_size`` adds the size of the project's caches (a walk of the directory, kept
-    for a minute: the project page only, not the list)."""
-    data_dir = state.settings.data_dir
+async def _project_out(session, state: AppState, project: Project) -> s.ProjectOut:
     snapshot = cached(project) or ProjectConfigSnapshot.unreadable("the config has not been read yet")
     latest = await _latest_verification(session, project.id)
     health = await assess(session, project, snapshot)
@@ -104,7 +100,7 @@ async def _project_out(session, state: AppState, project: Project, *, caches_siz
         health=health.status,
         runnable=health.runnable,
         reason=health.reason,
-        errors=health.errors,
+        errors=[*health.errors, *health.unsupported],
         warnings=[*snapshot.warnings, *await _provider_warnings(session, snapshot)],
         store=snapshot.store,
         store_id=store_id,
@@ -117,7 +113,7 @@ async def _project_out(session, state: AppState, project: Project, *, caches_siz
         created_at=project.created_at,
         verification=s.VerificationSummary.model_validate(latest) if latest else None,
         freshness=freshness(latest, project.snapshot_commit),
-        cache_bytes=await caches.sizes.get(data_dir, project.slug) if caches_size else None,
+        cache_bytes=None,
         hook_url=hook_url(state, project),
         hook_last_at=project.hook_last_at,
         bridges=[s.BridgeFileOut(name=name, config=file.get("config"), error=file.get("error"))
@@ -153,7 +149,7 @@ def _file_slug(snapshot: ProjectConfigSnapshot) -> str | None:
 
 
 def _remove_mirror(state, project_id: uuid.UUID) -> None:
-    shutil.rmtree(config_repo.mirror_path(state.settings.data_dir, project_id), ignore_errors=True)
+    shutil.rmtree(config_repo.mirror_path(state.settings.cache_dir, project_id), ignore_errors=True)
 
 
 @router.get("/projects", response_model=list[s.ProjectOut])
@@ -170,7 +166,7 @@ async def create_project(body: s.ProjectIn, session: DB, state: State, _: Admin)
         id=uuid.uuid4(), slug="", config_url=body.config_url.strip(),
         config_branch=body.config_branch, config_path=body.config_path, created_at=utcnow(),
     )
-    snapshot = await read_config(session, state.box, state.settings.data_dir, project)
+    snapshot = await read_config(session, state.box, state.settings.cache_dir, project)
     if snapshot.commit is None:
         await asyncio.to_thread(_remove_mirror, state, project.id)
         raise HTTPException(422, snapshot.errors)
@@ -193,7 +189,7 @@ async def create_project(body: s.ProjectIn, session: DB, state: State, _: Admin)
 
 @router.get("/projects/{project_id}", response_model=s.ProjectOut)
 async def get_project(project_id: uuid.UUID, session: DB, state: State, _: Admin):
-    return await _project_out(session, state, await get_or_404(session, Project, project_id), caches_size=True)
+    return await _project_out(session, state, await get_or_404(session, Project, project_id))
 
 
 @router.post("/projects/{project_id}/reread", response_model=s.ProjectOut)
@@ -208,7 +204,7 @@ async def _reread(session, state, project: Project) -> None:
     directory is checked (docs/integration-api.md §3). The panel's re-read, PATCH and the
     config hook all read this way."""
     before = project.snapshot_commit
-    remember(project, await read_config(session, state.box, state.settings.data_dir, project))
+    remember(project, await read_config(session, state.box, state.settings.cache_dir, project))
     await session.commit()
     if project.snapshot_commit is not None and project.snapshot_commit != before:
         await _request_verification(session, state, project.id, strict=False)
@@ -247,8 +243,6 @@ async def delete_project(project_id: uuid.UUID, session: DB, state: State, _: Ad
     await session.commit()
     await check_directory(state)
     await asyncio.to_thread(_remove_mirror, state, project_id)
-    await asyncio.to_thread(caches.remove, state.settings.data_dir, project.slug)
-    caches.sizes.forget(state.settings.data_dir, project.slug)
     return Response(status_code=NO_CONTENT)
 
 

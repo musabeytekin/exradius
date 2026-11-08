@@ -145,6 +145,7 @@ function systemHealth(s: SystemStatus | undefined): { tone: "ok" | "warn" | "err
   if (!s.database.ok || !s.broker.ok) return { tone: "err", label: !s.database.ok ? "Database unreachable" : "Broker unreachable" };
   if (s.workers.length === 0) return { tone: "err", label: "No live workers" };
   if (s.workers.some((w) => !workerHealthy(w))) return { tone: "warn", label: "Worker needs attention" };
+  if (s.operator && !s.operator.alive) return { tone: "err", label: "Operator not running" };
   if (s.provider && !s.provider.configured) return { tone: "warn", label: "No model provider" };
   if (s.provider?.default?.last_test && !s.provider.default.last_test.ok) return { tone: "warn", label: "Provider test failed" };
   const slots = s.workers.reduce((n, w) => n + w.concurrency, 0);

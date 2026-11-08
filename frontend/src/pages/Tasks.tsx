@@ -88,7 +88,7 @@ export function TasksPage() {
                   <Table.Td>
                     <span className="flex items-center gap-2">
                       <StateChip state={t.state} />
-                      {t.waiting_for === "memory" && (t.state === "queued" || t.state === "waiting_for_input") && <span className="text-xs text-muted">waiting for memory</span>}
+                      {t.waiting_for === "capacity" && t.state === "preparing" && <span className="text-xs text-muted">waiting for cluster capacity</span>}
                     </span>
                   </Table.Td>
                   <Table.Td className="text-right">

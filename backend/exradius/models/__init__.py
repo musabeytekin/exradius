@@ -191,6 +191,10 @@ class ProviderTest(Base):
     """Of the provider's credential and settings when the test was requested; the result
     is stored as the provider's ``last_test`` only if they are unchanged."""
     worker_id: Mapped[str | None] = mapped_column(String(64))
+    token_hash: Mapped[str | None] = mapped_column(String(64))
+    """Of the probe Run's token (docs/kubernetes.md §13); cleared when the test ends."""
+    report: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
+    """What the probe reported through the internal API: ok, detail, error."""
 
 
 # --- Tasks and runs ---------------------------------------------------------------------
@@ -232,9 +236,7 @@ class Run(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
     state: Mapped[str] = mapped_column(String(30), index=True)
-    container_id: Mapped[str | None] = mapped_column(String(100))
     runtime_session_id: Mapped[str | None] = mapped_column(String(255))
-    directory: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(Timestamp)
     ended_at: Mapped[datetime | None] = mapped_column(Timestamp)
     error: Mapped[str | None] = mapped_column(Text)
@@ -244,8 +246,11 @@ class Run(Base):
     summary: Mapped[str | None] = mapped_column(Text)
     output: Mapped[Any] = mapped_column(nullable=True)
     resume_request_ids: Mapped[list[Any] | None] = mapped_column(nullable=True)
-    worker_id: Mapped[str | None] = mapped_column(String(64))
-    """The worker driving the run through preparing/running/resuming (crash recovery)."""
+    run_object: Mapped[str | None] = mapped_column(String(100))
+    """The name of the run's Kubernetes ``Run`` once the worker created it (``run-<id>``);
+    recovery tells a Run that disappeared from one never created (docs/kubernetes.md §4)."""
+    delivery_warnings: Mapped[list[Any] | None] = mapped_column(nullable=True)
+    """What the runner's delivery check found after the session (§8.5), for the result."""
     config_commit: Mapped[str | None] = mapped_column(String(64))
     """The config repository commit the run read in ``preparing``."""
     config: Mapped[dict[str, Any] | None] = mapped_column(OrderedJson, nullable=True)
@@ -254,7 +259,8 @@ class Run(Base):
     agent_snapshot: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
     """name, model, provider, runtime, identity and connection names of the agent."""
     waiting_for: Mapped[str | None] = mapped_column(String(30))
-    """``memory`` while the run waits for its memory reservation (docs/run-environment.md §4)."""
+    """``capacity`` while the run's pod cannot be scheduled (docs/kubernetes.md §6); the run
+    stays ``preparing``."""
     routing: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
     """How the agent was picked (docs/agent-routing.md §8)."""
 
@@ -323,11 +329,10 @@ class Worker(Base):
     started_at: Mapped[datetime] = mapped_column(Timestamp)
     last_seen_at: Mapped[datetime] = mapped_column(Timestamp, index=True)
     concurrency: Mapped[int] = mapped_column(Integer)
-    docker_ok: Mapped[bool] = mapped_column(default=False)
-    docker_detail: Mapped[str | None] = mapped_column(Text)
-    images: Mapped[list[Any]] = mapped_column(default=list)
     runtimes: Mapped[list[Any]] = mapped_column(default=list)
-    """Runtime bundles: [{name, version, ready, image, error}] (runtime-bundles.md §3)."""
+    """The configured runtime bundles: [{name, version, ready, image, error}]."""
+    operator: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
+    """The operator as this worker sees its leader Lease: alive, holder, renewed_at."""
     version: Mapped[str | None] = mapped_column(String(50))
 
 
@@ -349,6 +354,10 @@ class ProjectVerification(Base):
     """The config commit "Read config" read (setup-and-verify.md §1.2)."""
     diagnosis: Mapped[str | None] = mapped_column(Text)
     """What went wrong, from ``worker/diagnose.py``; ``None`` when passed or unrecognised."""
+    token_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    """Of the verify Run's token (docs/kubernetes.md §13); cleared when it ends."""
+    tool_reports: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
+    """What the verify pod's runner listed, by connection: ok, tools, error, log."""
 
 
 # --- Integrations (docs/integration-api.md) ------------------------------------------------

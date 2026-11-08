@@ -1,9 +1,16 @@
-"""Run orchestration: preparing, running, waiting/resuming and ending (architecture §5).
+"""Run orchestration on Kubernetes: preparing, running, waiting/resuming and ending
+(architecture §5, docs/kubernetes.md §8).
 
 Postgres is the source of truth. Every state change happens inside a transaction that
-locks the run row, records a ``task.status`` event and is published after commit. A run is
-finalised (transcript uploaded, ``task.result`` published, directory deleted) exactly
-once, guarded by ``runs.ended_at``.
+locks the run row, records a ``task.status`` event and is published after commit. A ``Run``
+object in the runs namespace holds only the live execution: the worker creates it with its
+per-run Secret, the operator turns it into a pod and mirrors the pod into ``status``, and
+the worker deletes it at finalize. A run is finalised (transcript uploaded, ``task.result``
+published, the Run deleted) exactly once, guarded by ``runs.ended_at``.
+
+``settle`` is the one place that turns what happened into transitions. It is idempotent and
+called for every Run event of the watch, for every ``run_reported`` nudge from the api, and
+by the sweep every 15 s, so a lost event or message only delays.
 """
 
 from __future__ import annotations
@@ -13,7 +20,8 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from pathlib import Path
+from datetime import UTC
+from typing import Any
 
 import httpx
 from sqlalchemy import select, update
@@ -22,44 +30,41 @@ from exradius import downloads
 from exradius.config import Settings
 from exradius.crypto import SecretBox, hash_token, new_run_token
 from exradius.db import SessionFactory
-from exradius.models import Artifact, InfoRequest, Project, ProjectVerification, Run, TranscriptChunk, utcnow
-from exradius.project_state import assess, cached, read_config, remember, store_values
-from exradius.providers import provider_problem, resolve_provider, runtime_environment, strip_credentials
-from exradius.resolve import StoreValues, repo_specs, service_environment, workstation_environment
-from exradius.schemas.project_config import ProjectConfig
+from exradius.models import Artifact, InfoRequest, Project, Run, TranscriptChunk, utcnow
+from exradius.project_state import assess, read_config, remember, store_values
+from exradius.providers import provider_problem, resolve_provider, runtime_environment
+from exradius.runtimes import runtime_class
 from exradius.schemas.messages import ArtifactRef, InfoRequestPayload, ResultPayload
-from exradius.states import ACTIVE, TERMINAL, State, can_transition, is_terminal
+from exradius.schemas.project_config import ProjectConfig
+from exradius.states import State, can_transition, is_terminal
 from exradius.storage import ObjectStore
-from exradius.schemas.project_config import memory_bytes
-from exradius.worker import caches, git_identity, prepare
-from exradius.worker.builds import BuildFailed, ImageBuilder, Images
-from exradius.worker.caches import CacheMount
-from exradius.worker.containers import HOME_DIR, KILLED, ContainerExit, ContainerManager, ServiceFailed, ServiceSpec
-from exradius.worker.memory import Abandoned, MemoryGate, TooLarge
-from exradius.worker.delivery import delivery_warnings
+from exradius.worker import git_identity, run_objects
+from exradius.worker.kube import Cluster
 from exradius.worker.lifecycle import PendingEvent, run_event, transition
+from exradius.worker.run_objects import RunObjects, RunView, run_name, tail
 
 log = logging.getLogger(__name__)
 
 Emit = Callable[[list[PendingEvent]], Awaitable[None]]
 
-
-async def _no_directory_check() -> None:
-    return None
-
-VERIFY_PREFIX = "verify-"
-"""Run directories of project verifications are ``runs/verify-<verification_id>``."""
-WAITING_FOR_MEMORY = "memory"
-"""``runs.waiting_for`` while a run waits for its memory reservation (it stays queued, or
-waiting_for_input when it waits to resume)."""
+WAITING_FOR_CAPACITY = "capacity"
+"""``runs.waiting_for`` while the run's pod cannot be scheduled (it stays preparing)."""
+CANCEL_GRACE = 90.0
+"""Seconds a cancelled run waits for its pod to go before it is finalised anyway."""
+ABANDONED_AFTER = 1800.0
+"""Seconds after which a run in preparing without a Run counts as abandoned by its worker."""
 
 
-def exceeded_memory(config: ProjectConfig) -> str:
-    return f"exceeded its declared memory ({config.resources.memory})"
+class PreparationError(Exception):
+    """The run cannot start; the message is the run's error."""
 
 
 class RunCancelled(Exception):
     pass
+
+
+def exceeded_memory(config: ProjectConfig) -> str:
+    return f"exceeded its declared memory ({config.resources.memory})"
 
 
 def agent_snapshot(config: ProjectConfig, agent: str) -> dict:
@@ -77,37 +82,66 @@ def agent_snapshot(config: ProjectConfig, agent: str) -> dict:
     }
 
 
+def step_error(view: RunView, config: ProjectConfig | None) -> str:
+    """The run's error when its pod ended during preparation: the failed step with its log."""
+    step = view.failed_step()
+    if step is None:
+        return view.message or f"the run's pod ended ({view.reason or view.phase}) before the agent started"
+    name, log_tail = step.get("name") or "", tail(step.get("log") or "")
+    code = step.get("exitCode")
+    if name.startswith("Setup: "):
+        command = name.removeprefix("Setup: ")
+        if step.get("reason") == "OOMKilled" and config is not None and config.resources.memory:
+            return f"setup command {command!r} {exceeded_memory(config)} and was killed (exit 137):\n{log_tail}"
+        return f"setup command {command!r} exited with {code}:\n{log_tail}"
+    if name.startswith("Clone "):
+        return f"{name[0].lower()}{name[1:]} failed:\n{log_tail}"
+    return f"{name} failed" + (f" ({step.get('reason')})" if step.get("reason") else "") + f":\n{log_tail}"
+
+
+def runner_error(view: RunView, config: ProjectConfig | None) -> str:
+    """The run's error when its pod ended without the runner reporting an outcome."""
+    workstation = view.workstation
+    log_tail = tail(workstation.get("log") or workstation.get("message") or "")
+    if view.reason == "PodLost":
+        return f"the run's pod was lost: {view.message or 'it was deleted'}"
+    if workstation.get("reason") == "OOMKilled" and config is not None and config.resources.memory:
+        return f"the run {exceeded_memory(config)} and was killed (exit 137):\n{log_tail}"
+    if workstation.get("state") == "terminated":
+        return (f"runner exited with code {workstation.get('exitCode')} without reporting an outcome:\n"
+                f"{log_tail}").strip()
+    return view.message or f"the run's pod ended ({view.reason or view.phase})"
+
+
 class RunManager:
-    def __init__(
-        self,
-        settings: Settings,
-        sessions: SessionFactory,
-        store: ObjectStore,
-        containers: ContainerManager,
-        emit: Emit,
-    ):
+    def __init__(self, settings: Settings, sessions: SessionFactory, store: ObjectStore, cluster: Cluster,
+                 emit: Emit):
         self.settings = settings
         self.sessions = sessions
         self.store = store
-        self.containers = containers
+        self.cluster = cluster
         self.emit = emit
         self.box = SecretBox(settings.secret_key)
-        self.builder = ImageBuilder(settings, sessions, containers)
-        self.memory = MemoryGate()
-        """Shared by runs and verifications; the worker sets the budget at start."""
-        self.worker_id: str | None = None
-        """Stamped on runs this worker drives through preparing/running/resuming, so a
-        restarting worker can tell its own dead runs from a live worker's."""
-        self.check_directory: Callable[[], Awaitable[None]] = _no_directory_check
+        self.check_directory: Callable[[], Awaitable[None]] = _nothing
         """Run after this worker stored a config snapshot (docs/integration-api.md §3); the
         worker sets it once it can publish."""
+        self.spawn: Callable[[Awaitable[Any]], None] = _run_now
+        """Starts background work; the worker sets it to its own task set."""
+        self.resume_later: Callable[[uuid.UUID], None] = lambda run_id: self.spawn(self.resume(run_id))
+        """Resumes a run in the background; the worker wraps it in a concurrency slot."""
+        self.other_workers_alive: Callable[[], Awaitable[bool]] = _no
+        """Whether another worker sent a heartbeat lately; the worker sets it."""
+        self._released: dict[uuid.UUID, asyncio.Event] = {}
+        self._settling: dict[uuid.UUID, asyncio.Lock] = {}
 
     # -- helpers ------------------------------------------------------------------------
 
-    def paths(self, run_id: uuid.UUID) -> prepare.RunPaths:
-        return prepare.run_paths(self.settings.data_dir, str(run_id))
+    @property
+    def namespace(self) -> str:
+        return self.settings.runs_namespace
 
-    async def _move(self, run_id: uuid.UUID, new: State, *, expect: set[State] | None = None, reason: str | None = None, **fields) -> Run:
+    async def _move(self, run_id: uuid.UUID, new: State, *, expect: set[State] | None = None,
+                    reason: str | None = None, **fields) -> Run:
         """Transition the run; raise ``RunCancelled`` if it already ended (e.g. cancelled)."""
         async with self.sessions() as session:
             run = await self._lock(session, run_id)
@@ -127,102 +161,51 @@ class RunManager:
         """Load the run row FOR UPDATE (only the run row; joined tables are not locked)."""
         return await session.get(Run, run_id, with_for_update={"of": Run}, populate_existing=True)
 
-    async def _state(self, run_id: uuid.UUID) -> State:
-        async with self.sessions() as session:
-            return State(await session.scalar(select(Run.state).where(Run.id == run_id)))
+    def _release(self, run_id: uuid.UUID) -> None:
+        event = self._released.get(run_id)
+        if event is not None:
+            event.set()
+
+    async def hold(self, run_id: uuid.UUID) -> None:
+        """Return once the run waits for input or has ended: the time it holds a slot of
+        ``worker.concurrency``. Re-checked every 15 s in case another worker settled it."""
+        event = self._released.setdefault(run_id, asyncio.Event())
+        try:
+            while not event.is_set():
+                try:
+                    await asyncio.wait_for(event.wait(), 15)
+                except TimeoutError:
+                    async with self.sessions() as session:
+                        run = await session.get(Run, run_id)
+                    if run is None or run.ended_at is not None or run.state == State.WAITING_FOR_INPUT:
+                        return
+        finally:
+            self._released.pop(run_id, None)
+
+    def _hold_from_now(self, run_id: uuid.UUID) -> None:
+        """Arm the slot event before anything can release it."""
+        self._released.setdefault(run_id, asyncio.Event()).clear()
 
     # -- preparing ----------------------------------------------------------------------
 
-    def cache_mounts(self, slug: str, config: ProjectConfig) -> list[CacheMount]:
-        return caches.mounts(self.settings.data_dir, slug, config.workstation.cache, HOME_DIR)
-
-    async def _mark_waiting(self, run_id: uuid.UUID) -> None:
-        """Shown in the panel's task row; the worker id lets a restarted worker take the
-        run over (``waiting_runs``)."""
-        async with self.sessions() as session:
-            run = await self._lock(session, run_id)
-            if run is not None and not is_terminal(run.state):
-                run.waiting_for = WAITING_FOR_MEMORY
-                run.worker_id = self.worker_id
-            await session.commit()
-
-    def _still_in(self, run_id: uuid.UUID, state: State) -> Callable[[], Awaitable[bool]]:
-        async def check() -> bool:
-            return await self._state(run_id) == state
-
-        return check
-
-    async def execute(self, run_id: uuid.UUID, memory: int = 0) -> None:
-        """Reserve the run's declared memory (waiting in ``queued`` until it fits), then
-        prepare and run it until it ends or waits for input."""
+    async def execute(self, run_id: uuid.UUID) -> None:
+        """Prepare the run and create its Run; return when it waits for input or ends."""
+        self._hold_from_now(run_id)
         try:
-            async with self.memory.reserve(
-                memory,
-                on_wait=lambda: self._mark_waiting(run_id),
-                still_wanted=self._still_in(run_id, State.QUEUED),
-            ):
-                await self._execute(run_id)
-        except TooLarge as exc:
-            await self.end(run_id, State.FAILED, error=str(exc))
-        except Abandoned:
-            await self.finalize(run_id)
-
-    async def _execute(self, run_id: uuid.UUID) -> None:
-        try:
-            run = await self._move(
-                run_id,
-                State.PREPARING,
-                expect={State.QUEUED},
-                directory=str(self.paths(run_id).root),
-                worker_id=self.worker_id,
-                waiting_for=None,
-            )
-            await self._prepare(run)
-            await self._start_container(run_id, from_state=State.PREPARING)
-            await self._settle(run_id)
+            run = await self._move(run_id, State.PREPARING, expect={State.QUEUED}, waiting_for=None)
+            await self._launch(run)
         except RunCancelled:
+            self._released.pop(run_id, None)
             await self.finalize(run_id)
+            return
         except Exception as exc:
-            log.exception("run %s failed", run_id)
-            await self.end(run_id, State.FAILED, error=f"{type(exc).__name__}: {exc}")
-
-    async def _prepare(self, run: Run) -> None:
-        task = run.task
-        config, commit = await self.read_run_config(run)
-        images = await self._images(task.project, commit, config)
-        async with self.sessions() as session:
-            secrets = await store_values(session, self.box, config.secret_store)
-        repos = repo_specs(config, secrets)
-        env = workstation_environment(config, secrets)
-        services = self.service_specs(config, images, secrets)
-
-        paths = await asyncio.to_thread(prepare.create_run_directory, self.settings.data_dir, str(run.id))
-        await asyncio.to_thread(
-            prepare.checkout_repositories, self.settings.data_dir, task.project.slug, paths, repos
-        )
-        files = [(a.name, await self._fetch(a.object_key, a.source_url)) for a in task.attachments]
-        await asyncio.to_thread(prepare.write_attachments, paths.attachments, files)
-        await self._hand_over(paths)
-
-        network = await self.start_services(str(run.id), services) if services else None
-
-        cache_mounts = self.cache_mounts(task.project.slug, config)
-        for command in config.workstation.setup:
-            if await self._state(run.id) != State.PREPARING:
-                raise RunCancelled("cancelled during setup")
-            result = await self.containers.run_setup_command(
-                image=images.workstation, run_id=str(run.id), paths=paths, env=env, command=command,
-                service_network=network, memory=config.workstation_memory, caches=cache_mounts,
-            )
-            if result.exit_code != 0:
-                tail = result.logs[-2000:].strip()
-                if result.exit_code == KILLED and config.workstation_memory:
-                    raise prepare.PreparationError(
-                        f"setup command {command!r} {exceeded_memory(config)} and was killed (exit 137):\n{tail}"
-                    )
-                raise prepare.PreparationError(
-                    f"setup command {command!r} exited with {result.exit_code}:\n{tail}"
-                )
+            if not isinstance(exc, PreparationError):
+                log.exception("run %s failed", run_id)
+            self._released.pop(run_id, None)
+            message = str(exc) if isinstance(exc, PreparationError) else f"{type(exc).__name__}: {exc}"
+            await self.end(run_id, State.FAILED, error=message)
+            return
+        await self.hold(run_id)
 
     async def read_run_config(self, run: Run) -> tuple[ProjectConfig, str]:
         """Read the project's config afresh (config-repo.md §9) and record what the run
@@ -232,17 +215,17 @@ class RunManager:
         async with self.sessions() as session:
             project = await session.get(Project, task.project_id)
             assert project is not None
-            snapshot = await read_config(session, self.box, self.settings.data_dir, project)
+            snapshot = await read_config(session, self.box, self.settings.cache_dir, project)
             remember(project, snapshot)
             health = await assess(session, project, snapshot)
             await session.commit()
         await self.check_directory()
         if health.reason is not None:
-            raise prepare.PreparationError(health.reason)
+            raise PreparationError(health.reason)
         config = snapshot.config
         assert config is not None and snapshot.commit is not None
         if task.agent not in config.agents:
-            raise prepare.PreparationError(f"agent {task.agent!r} is no longer defined in project {project.slug!r}")
+            raise PreparationError(f"agent {task.agent!r} is no longer defined in project {project.slug!r}")
         async with self.sessions() as session:
             row = await self._lock(session, run.id)
             assert row is not None
@@ -252,192 +235,200 @@ class RunManager:
             await session.commit()
         return config, snapshot.commit
 
-    async def _images(self, project: Project, commit: str, config: ProjectConfig) -> Images:
-        try:
-            return await self.builder.images(project.id, project.slug, commit, config)
-        except BuildFailed as exc:
-            raise prepare.PreparationError(str(exc)) from exc
+    def workstation_image(self, config: ProjectConfig) -> str:
+        return config.workstation.image or self.settings.project_default_image
 
-    async def _run_config(self, run_id: uuid.UUID) -> tuple[Run, ProjectConfig]:
+    async def _launch(self, run: Run) -> None:
+        config, _ = await self.read_run_config(run)
+        task = run.task
+        agent = config.agents[task.agent]
+        await self._store_url_attachments(run.id)
+        token = new_run_token()
+        name = run_name("task", run.id)
         async with self.sessions() as session:
-            run = await session.get(Run, run_id)
-            assert run is not None and run.config is not None
-            return run, ProjectConfig.model_validate(run.config, strict=False)
+            row = await self._lock(session, run.id)
+            if row is None or row.state != State.PREPARING:
+                raise RunCancelled(f"run is {row.state if row else 'gone'}")
+            provider = await resolve_provider(session, agent.provider)
+            if provider is None:
+                raise PreparationError(provider_problem(agent.provider))
+            secrets = await store_values(session, self.box, config.secret_store)
+            provider_env = runtime_environment(agent.runtime, self.box, provider)
+            identity_name, email = config.identity(task.agent)
+            objects = run_objects.task_run(
+                run_id=run.id, namespace=self.namespace, task_id=task.id, project=task.project.slug,
+                config=config, secrets=secrets, runtime=agent.runtime,
+                runtime_image=self.settings.runtime_image(agent.runtime),
+                workstation_image=self.workstation_image(config), provider_env=provider_env,
+                credential_variables=runtime_class(agent.runtime).credential_variables,
+                identity=git_identity.Identity(name=identity_name, email=email, agent=task.agent, task_id=task.id),
+                token=token,
+            )
+            # Recorded before the Run exists: its runner authenticates with this token, and
+            # recovery tells "disappeared" from "never created" by the name.
+            row.token_hash = hash_token(token)
+            row.run_object = name
+            await session.commit()
+        await self.create(objects)
+        log.info("run %s: created Run %s", run.id, name)
 
-    @staticmethod
-    def service_specs(config: ProjectConfig, images: Images, secrets: StoreValues) -> list[ServiceSpec]:
-        """The config's services with their images and secrets resolved now."""
-        return [
-            service_spec(name, service, images.services[name], secrets) for name, service in config.services.items()
-        ]
+    async def create(self, objects: RunObjects) -> dict[str, Any]:
+        """Create the Run, then its Secret owned by it (docs/kubernetes.md §5)."""
+        created = await self.cluster.create_run(objects.run)
+        await self.cluster.create_secret(objects.secret_body(created, self.namespace))
+        return created
 
-    async def start_services(self, label: str, services: list[ServiceSpec]) -> str:
-        """Create the run's network and start each service on it, waiting for readiness.
-        A service that does not come up raises ``PreparationError`` with its log tail."""
-        network = await self.containers.create_run_network(label)
-        for service in services:
-            try:
-                await self.containers.start_service(run_id=label, network=network, service=service)
-            except ServiceFailed as exc:
-                raise prepare.PreparationError(str(exc)) from exc
-        return network
-
-    async def _hand_over(self, paths: prepare.RunPaths) -> None:
-        uid, gid = self.settings.run_uid_gid
-        await asyncio.to_thread(prepare.chown_tree, paths.project, uid, gid, paths.attachments)
-        await asyncio.to_thread(prepare.chown_tree, paths.state, uid, gid)
-        await asyncio.to_thread(prepare.chown_tree, paths.home, uid, gid)
-        await asyncio.to_thread(prepare.chown_tree, paths.tmp, uid, gid)
-        await asyncio.to_thread(prepare.seal_read_only, paths.attachments)
-
-    async def _fetch(self, object_key: str | None, source_url: str | None) -> bytes:
-        if object_key:
-            return await self.store.get(object_key)
-        assert source_url
+    async def _fetch(self, url: str) -> bytes:
         async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
-            response = await client.get(source_url)
+            response = await client.get(url)
             response.raise_for_status()
             return response.content
 
-    # -- running ------------------------------------------------------------------------
-
-    async def _start_container(self, run_id: uuid.UUID, from_state: State) -> None:
-        token = new_run_token()
-        run, config = await self._run_config(run_id)
-        task = run.task
-        agent = config.agents[task.agent]
-        images = await self._images(task.project, run.config_commit, config)
+    async def _store_url_attachments(self, run_id: uuid.UUID) -> None:
+        """Download the task's URL attachments into the object store (§8.1): the pod's
+        ``prepare`` step reads every attachment from the internal API."""
         async with self.sessions() as session:
-            run = await self._lock(session, run_id)
-            if run is None or run.state != from_state:
-                raise RunCancelled(f"run is {run.state if run else 'gone'}")
-            provider = await resolve_provider(session, agent.provider)
-            if provider is None:
-                raise prepare.PreparationError(provider_problem(agent.provider))
-            secrets = await store_values(session, self.box, config.secret_store)
-            # Only this provider's variables reach the container, decrypted now.
-            env = strip_credentials(agent.runtime, workstation_environment(config, secrets))
-            env.update(runtime_environment(agent.runtime, self.box, provider))
-            name, email = config.identity(task.agent)
-            identity = git_identity.Identity(name=name, email=email, agent=task.agent, task_id=task.id)
-            repos = repo_specs(config, secrets)
-            services = self.service_specs(config, images, secrets) if from_state == State.RESUMING else []
-            run.token_hash = hash_token(token)
+            run = await session.get(Run, run_id)
+            assert run is not None
+            for attachment in run.task.attachments:
+                if attachment.object_key or not attachment.source_url:
+                    continue
+                key = f"tasks/{run.task_id}/attachments/{uuid.uuid4().hex[:8]}-{attachment.name}"
+                await self.store.put(key, await self._fetch(attachment.source_url), attachment.content_type)
+                attachment.object_key = key
             await session.commit()
-        runtime = agent.runtime
 
-        # Services stay up while a run waits; a resume restarts any that are gone.
-        if services:
-            service_network = await self.start_services(str(run_id), services)
-        else:
-            service_network = await self.containers.run_network(str(run_id))
+    # -- settling -------------------------------------------------------------------------
 
-        # Identity, commit trailers and push credentials; rewritten at every start (resume
-        # too), and applied after every other variable.
-        git_env = await asyncio.to_thread(
-            git_identity.prepare_git,
-            self.paths(run_id).state,
-            identity,
-            repos,
-            state_mount=self.settings.run_state_mount,
-            owner=self.settings.run_uid_gid,
-        )
-        env.update(
-            EXRADIUS_RUN_ID=str(run_id),
-            EXRADIUS_RUN_TOKEN=token,
-            EXRADIUS_API_URL=self.settings.run_api_url,
-        )
-        runtime_mount = await self.containers.ensure_runtime(runtime)
-        container_id = await self.containers.start_runner(
-            image=images.workstation,
-            run_id=str(run_id),
-            paths=self.paths(run_id),
-            env=env,
-            runtime=runtime_mount,
-            service_network=service_network,
-            git_env=git_env,
-            memory=config.workstation_memory,
-            caches=self.cache_mounts(task.project.slug, config),
-        )
-        try:
-            await self._move(
-                run_id,
-                State.RUNNING,
-                expect={from_state},
-                container_id=container_id,
-                reported_status=None,
-            )
-        except RunCancelled:
-            await self.containers.stop_run_containers(str(run_id))
-            await self.containers.wait(container_id)
-            raise
+    async def settle(self, run_id: uuid.UUID, obj: dict[str, Any] | None | Any = ...) -> None:
+        """Act on the Run's status and the runner's reports. ``obj`` is the Run as a watch
+        event delivered it (``None``: deleted); without it the Run is read."""
+        lock = self._settling.setdefault(run_id, asyncio.Lock())
+        async with lock:
+            try:
+                await self._settle(run_id, obj)
+            finally:
+                if not lock.locked():
+                    self._settling.pop(run_id, None)
 
-    async def _settle(self, run_id: uuid.UUID, container_id: str | None = None, *, wait: bool = True) -> None:
-        """Wait for the runner container to exit and act on what it reported.
-
-        ``wait=False`` settles a run whose container is already gone (recovery)."""
-        if container_id is None:
-            async with self.sessions() as session:
-                container_id = await session.scalar(select(Run.container_id).where(Run.id == run_id))
-        if wait:
-            assert container_id
-            exit_info = await self.containers.wait(container_id)
-        else:
-            exit_info = ContainerExit(exit_code=-1, logs="the runner container no longer exists")
+    async def _settle(self, run_id: uuid.UUID, obj: Any) -> None:
+        async with self.sessions() as session:
+            run = await session.get(Run, run_id)
+            if run is None:
+                return
+            if run.ended_at is not None:
+                self._release(run_id)
+                if obj is not None and obj is not ... and run.run_object:
+                    await self._delete_run(run.run_object)  # a stray Run of a finished run
+                return
+            name = run.run_object
+        if obj is ...:
+            obj = await self.cluster.get_run(name) if name else None
+        view = RunView(obj)
 
         events: list[PendingEvent] = []
-        resume_now = False
+        after: str | None = None  # "finalize" | "resume"
         async with self.sessions() as session:
             run = await self._lock(session, run_id)
-            assert run is not None
-            if is_terminal(run.state):  # cancelled while running
-                run.token_hash = None
-                run.container_id = None
-                await session.commit()
-                await self.finalize(run_id)
+            if run is None or run.ended_at is not None:
                 return
-            if run.state != State.RUNNING or run.container_id != container_id:
-                # Another worker already settled this container (both waited on it).
-                await session.rollback()
-                return
-            run.token_hash = None  # revoke this container's token
-            run.container_id = None
-            reported = run.reported_status
-            if reported == "waiting_for_input":
-                events.append(transition(session, run, State.WAITING_FOR_INPUT))
-                pending = (
-                    await session.scalars(
-                        select(InfoRequest)
-                        .where(InfoRequest.run_id == run_id, InfoRequest.published_at.is_(None))
-                        .order_by(InfoRequest.created_at)
-                    )
-                ).all()
-                for request in pending:
-                    request.published_at = utcnow()
-                    payload = InfoRequestPayload(
-                        request_id=str(request.id), question=request.question, context=request.context
-                    )
-                    events.append(run_event(session, run, "info_request", payload.model_dump()))
-                resume_now = await self._has_undelivered_answers(session, run_id)
-                await session.commit()
-            elif reported == "completed":
-                events.append(transition(session, run, State.COMPLETED))
-                await session.commit()
+            state = State(run.state)
+            config = ProjectConfig.model_validate(run.config, strict=False) if run.config else None
+
+            if is_terminal(state):  # cancelled or failed, waiting for its pod to go
+                if not view.exists or view.final:
+                    after = "finalize"
+            elif not view.exists:
+                if state == State.PREPARING and run.run_object is None:
+                    if not await self._abandoned(run):
+                        return  # the Run is still being created (by this worker or another)
+                    run.error = "the worker restarted while preparing the run"
+                    events.append(transition(session, run, State.FAILED, run.error))
+                    await session.commit()
+                    await self.emit(events)
+                    await self.finalize(run_id)
+                    return
+                run.error = run.error or "the run's Kubernetes object disappeared"
+                events.append(transition(session, run, State.FAILED, run.error))
+                after = "finalize"
             else:
-                config = ProjectConfig.model_validate(run.config, strict=False) if run.config else None
-                if exit_info.exit_code == KILLED and config is not None and config.workstation_memory:
-                    tail = exit_info.logs[-2000:].strip()
-                    run.error = f"the run {exceeded_memory(config)} and was killed (exit 137):\n{tail}"
-                elif not run.error:
-                    tail = exit_info.logs[-2000:].strip()
-                    run.error = f"runner exited with code {exit_info.exit_code} without reporting an outcome:\n{tail}"
-                events.append(transition(session, run, State.FAILED, reason=run.error[:500]))
-                await session.commit()
+                if state == State.PREPARING:
+                    capacity = WAITING_FOR_CAPACITY if view.unschedulable else None
+                    if run.waiting_for != capacity:
+                        run.waiting_for = capacity
+                    if view.current and (view.phase == "Running" or view.final and view.workstation.get("startedAt")):
+                        run.waiting_for = None
+                        events.append(transition(session, run, State.RUNNING))
+                        state = State.RUNNING
+                    elif view.final:
+                        run.error = step_error(view, config)
+                        events.append(transition(session, run, State.FAILED, run.error[:500]))
+                        after = "finalize"
+                if state == State.RESUMING:
+                    if run.reported_status is not None:  # the runner resumed (and maybe more)
+                        events.append(transition(session, run, State.RUNNING))
+                        state = State.RUNNING
+                    elif view.final and (fresh := RunView(await self.cluster.get_run(run.run_object))).final:
+                        # Read again under the row lock: resume() may have asked for a new pod.
+                        run.error = f"the run's pod ended before it resumed: {runner_error(fresh, config)}"
+                        events.append(transition(session, run, State.FAILED, run.error[:500]))
+                        after = "finalize"
+                if state == State.RUNNING:
+                    reported = run.reported_status
+                    if reported == "waiting_for_input":
+                        events += await self._wait_for_input(session, run)
+                        if await self._has_undelivered_answers(session, run_id):
+                            after = "resume"  # the answer arrived before the waiting state
+                        else:
+                            after = "release"
+                    elif view.final:
+                        if reported == "completed":
+                            events.append(transition(session, run, State.COMPLETED))
+                        else:
+                            if reported != "failed" or not run.error:
+                                run.error = runner_error(view, config)
+                            events.append(transition(session, run, State.FAILED, run.error[:500]))
+                        after = "finalize"
+                # waiting_for_input: nothing until the answer arrives; a pod lost meanwhile
+                # is recreated by resume().
+            await session.commit()
         await self.emit(events)
-        if reported != "waiting_for_input":
+        if after == "finalize":
             await self.finalize(run_id)
-        elif resume_now:  # the answer arrived before the container had exited
-            await self.resume(run_id)
+        elif after == "resume":
+            self._release(run_id)
+            self.resume_later(run_id)
+        elif after == "release":
+            self._release(run_id)
+
+    async def _abandoned(self, run: Run) -> bool:
+        """A run in preparing whose Run was never created and that no live worker is
+        preparing: this process is not (it would hold it), and either no other worker
+        is alive or it has been preparing for longer than any preparation takes."""
+        if run.id in self._released:
+            return False
+        if not await self.other_workers_alive():
+            return True
+        started = run.started_at
+        if started is not None and started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        return started is not None and (utcnow() - started).total_seconds() > ABANDONED_AFTER
+
+    async def _wait_for_input(self, session, run: Run) -> list[PendingEvent]:
+        """running -> waiting_for_input, with the questions not published yet."""
+        events = [transition(session, run, State.WAITING_FOR_INPUT)]
+        pending = (
+            await session.scalars(
+                select(InfoRequest)
+                .where(InfoRequest.run_id == run.id, InfoRequest.published_at.is_(None))
+                .order_by(InfoRequest.created_at)
+            )
+        ).all()
+        for request in pending:
+            request.published_at = utcnow()
+            payload = InfoRequestPayload(request_id=str(request.id), question=request.question, context=request.context)
+            events.append(run_event(session, run, "info_request", payload.model_dump()))
+        return events
 
     # -- waiting and resuming -----------------------------------------------------------
 
@@ -452,74 +443,83 @@ class RunManager:
         )
         return found is not None
 
-    async def _reservation(self, run_id: uuid.UUID) -> int:
-        """What a run that has read its config reserves."""
-        async with self.sessions() as session:
-            config = await session.scalar(select(Run.config).where(Run.id == run_id))
-        return ProjectConfig.model_validate(config, strict=False).memory_reservation() if config else 0
-
     async def resume(self, run_id: uuid.UUID) -> None:
-        """Deliver answered info requests to a waiting run in a new container, once its
-        declared memory fits (it stays waiting_for_input until then)."""
+        """Deliver answered info requests to a waiting run: its runner, long-polling in the
+        same pod, resumes the session (§8.2). A pod lost while waiting is recreated on the
+        same workspace (§8.3). Returns when the run waits again or ends."""
+        self._hold_from_now(run_id)
         try:
-            async with self.memory.reserve(
-                await self._reservation(run_id),
-                on_wait=lambda: self._mark_waiting(run_id),
-                still_wanted=self._still_in(run_id, State.WAITING_FOR_INPUT),
-            ):
-                await self._resume(run_id)
-        except TooLarge as exc:
-            await self.end(run_id, State.FAILED, error=str(exc))
-        except Abandoned:
-            return
-
-    async def _resume(self, run_id: uuid.UUID) -> None:
-        try:
-            async with self.sessions() as session:
-                run = await self._lock(session, run_id)
-                if run is None or run.state != State.WAITING_FOR_INPUT:
-                    return
-                answered = (
-                    await session.scalars(
-                        select(InfoRequest).where(
-                            InfoRequest.run_id == run_id,
-                            InfoRequest.answered_at.is_not(None),
-                            InfoRequest.delivered_at.is_(None),
-                        )
-                    )
-                ).all()
-                if not answered:
-                    return
-                for request in answered:
-                    request.delivered_at = utcnow()
-                run.resume_request_ids = [str(r.id) for r in answered]
-                run.worker_id = self.worker_id
-                run.waiting_for = None
-                event = transition(session, run, State.RESUMING)
-                attachments = [
-                    (str(r.id), a) for r in answered for a in (r.answer_attachments or [])
-                ]
-                await session.commit()
-            await self.emit([event])
-
-            paths = self.paths(run_id)
-            for request_id, attachment in attachments:
-                data = await self._fetch(attachment.get("object_key"), attachment.get("source_url"))
-                target = paths.attachments / request_id
-                await asyncio.to_thread(self._write_answer_attachment, target, attachment["name"], data)
-            await self._start_container(run_id, from_state=State.RESUMING)
-            await self._settle(run_id)
+            resumed = await self._resume(run_id)
         except RunCancelled:
-            await self.finalize(run_id)
+            resumed = False
         except Exception as exc:
             log.exception("resuming run %s failed", run_id)
+            self._released.pop(run_id, None)
             await self.end(run_id, State.FAILED, error=f"{type(exc).__name__}: {exc}")
+            return
+        if not resumed:
+            self._released.pop(run_id, None)
+            return
+        await self.settle(run_id)
+        await self.hold(run_id)
 
-    @staticmethod
-    def _write_answer_attachment(directory: Path, name: str, data: bytes) -> None:
-        directory.parent.chmod(0o755)
-        prepare.write_attachments(directory, [(name, data)])
-        prepare.seal_read_only(directory.parent)
+    async def _resume(self, run_id: uuid.UUID) -> bool:
+        await self._store_answer_attachments(run_id)
+        async with self.sessions() as session:
+            run = await self._lock(session, run_id)
+            if run is None or run.state != State.WAITING_FOR_INPUT:
+                return False
+            answered = (
+                await session.scalars(
+                    select(InfoRequest).where(
+                        InfoRequest.run_id == run_id,
+                        InfoRequest.answered_at.is_not(None),
+                        InfoRequest.delivered_at.is_(None),
+                    )
+                )
+            ).all()
+            if not answered:
+                return False
+            name = run.run_object
+            view = RunView(await self.cluster.get_run(name) if name else None)
+            if view.exists and view.final:
+                # The pod went while the run waited: a new one on the same workspace, whose
+                # runner starts in resume mode (/spec says "resume"). Asked for under the
+                # row lock, so no settle sees the old pod's end as this resume's.
+                generation = view.spec_generation + 1
+                log.info("run %s: its pod is gone (%s); recreating it (generation %s)", run_id,
+                         view.reason or view.phase, generation)
+                await self.cluster.patch_run(name, {"podGeneration": generation})
+            for request in answered:
+                request.delivered_at = utcnow()
+            run.resume_request_ids = [str(r.id) for r in answered]
+            run.reported_status = None  # the runner reports "resumed" once it has them
+            event = transition(session, run, State.RESUMING)
+            await session.commit()
+        await self.emit([event])
+        return True
+
+    async def _store_answer_attachments(self, run_id: uuid.UUID) -> None:
+        """Answer attachments given by URL go into the object store first, so the pod's
+        ``files`` sidecar reads all of them from the internal API."""
+        async with self.sessions() as session:
+            requests = (await session.scalars(select(InfoRequest).where(
+                InfoRequest.run_id == run_id, InfoRequest.answered_at.is_not(None), InfoRequest.delivered_at.is_(None),
+            ))).all()
+            for request in requests:
+                attachments = [dict(a) for a in request.answer_attachments or []]
+                changed = False
+                for attachment in attachments:
+                    if attachment.get("object_key") or not attachment.get("source_url"):
+                        continue
+                    key = f"tasks/{request.run_id}/answers/{request.id}/{uuid.uuid4().hex[:8]}-{attachment['name']}"
+                    await self.store.put(key, await self._fetch(attachment["source_url"]),
+                                         attachment.get("content_type") or "application/octet-stream")
+                    attachment["object_key"] = key
+                    changed = True
+                if changed:
+                    request.answer_attachments = attachments
+            await session.commit()
 
     # -- ending -------------------------------------------------------------------------
 
@@ -539,25 +539,32 @@ class RunManager:
         await self.finalize(run_id)
 
     async def cancel(self, run_id: uuid.UUID) -> None:
-        """Admin cancel: stop containers, free the directory, publish the result."""
+        """Admin cancel (§8.4): the operator deletes the pod with its grace period, the
+        runner reports its delivery check, and the run is finalised once the pod is gone."""
         try:
-            await self._move(run_id, State.CANCELLED, reason="cancelled by admin")
+            run = await self._move(run_id, State.CANCELLED, reason="cancelled by admin")
         except RunCancelled:
             return  # already ended
-        await self.containers.stop_run_containers(str(run_id))
+        self._release(run_id)
+        name = run.run_object
+        if name is None or await self.cluster.patch_run(name, {"cancel": True}) is None:
+            await self.finalize(run_id)
+            return
+        self.spawn(self._finalize_later(run_id))
+
+    async def _finalize_later(self, run_id: uuid.UUID) -> None:
+        """If the pod does not go (no operator), finalise anyway; deleting the Run removes it."""
+        await asyncio.sleep(CANCEL_GRACE)
         await self.finalize(run_id)
 
     async def finalize(self, run_id: uuid.UUID) -> None:
-        # Before the claim (which commits with the result): the check starts a container.
-        warnings = await self._delivery_warnings(run_id)
         async with self.sessions() as session:
             claimed = await session.execute(
-                update(Run)
-                .where(Run.id == run_id, Run.ended_at.is_(None))
-                .values(ended_at=utcnow(), token_hash=None)
+                update(Run).where(Run.id == run_id, Run.ended_at.is_(None)).values(ended_at=utcnow(), token_hash=None)
             )
             if claimed.rowcount != 1:
                 await session.rollback()
+                self._release(run_id)
                 return  # someone else finalised it
             run = await session.get(Run, run_id, populate_existing=True)
             assert run is not None
@@ -571,271 +578,80 @@ class RunManager:
                 )
             ).all()
             transcript = "".join(json.dumps(c.payload, ensure_ascii=False) + "\n" for c in chunks)
-            await self.store.put(
-                downloads.transcript_key(run_id), transcript.encode(), "application/x-ndjson"
-            )
+            await self.store.put(downloads.transcript_key(run_id), transcript.encode(), "application/x-ndjson")
             artifacts = (await session.scalars(select(Artifact).where(Artifact.run_id == run_id))).all()
             payload = ResultPayload(
                 state=run.state,
                 summary=run.summary,
                 output=run.output,
                 artifacts=[
-                    ArtifactRef(
-                        name=a.name,
-                        content_type=a.content_type,
-                        url=downloads.artifact_url(self.settings, a.id),
-                    )
+                    ArtifactRef(name=a.name, content_type=a.content_type, url=downloads.artifact_url(self.settings, a.id))
                     for a in artifacts
                 ],
                 transcript_url=downloads.transcript_url(self.settings, run_id),
                 error=run.error if run.state != State.COMPLETED else None,
-                warnings=warnings,
+                warnings=list(run.delivery_warnings or []),
             )
             events.append(run_event(session, run, "result", payload.model_dump(mode="json")))
+            name = run.run_object
             await session.commit()
         await self.emit(events)
-        try:
-            await self.containers.remove_run_services(str(run_id))
-        except Exception:  # noqa: BLE001 - the sweep retries at the next start
-            log.exception("could not remove the services of run %s", run_id)
-        await asyncio.to_thread(prepare.remove_run_directory, self.paths(run_id))
+        self._release(run_id)
+        if name:
+            await self._delete_run(name)
         log.info("run %s finished: %s", run_id, payload.state)
 
-    async def _delivery_warnings(self, run_id: uuid.UUID) -> list[str]:
-        """Uncommitted changes and unpushed commits in the clones, which the directory
-        removal discards. Report only; failures of the check give no warnings."""
-        paths = self.paths(run_id)
+    async def _delete_run(self, name: str) -> None:
+        """Deleting the Run removes its pod, workspace and Secret (ownerReferences)."""
         try:
-            async with self.sessions() as session:
-                run = await session.get(Run, run_id)
-            if run is None or run.ended_at is not None or run.config is None:
-                return []
-            has_clones = await asyncio.to_thread(
-                lambda: paths.project.is_dir() and any((p / ".git").exists() for p in paths.project.iterdir())
-            )
-            if not has_clones:
-                return []
-            config = ProjectConfig.model_validate(run.config, strict=False)
-            images = await self._images(run.task.project, run.config_commit, config)
-            result = await self.containers.inspect_clones(image=images.workstation, run_id=str(run_id), paths=paths)
-            warnings = delivery_warnings(result.logs)
-            if result.exit_code != 0 and not warnings:
-                log.warning("delivery check of run %s exited with %s: %s", run_id, result.exit_code, result.logs[-500:])
-            return warnings
-        except Exception:  # noqa: BLE001 - never block the result
-            log.exception("delivery check of run %s failed", run_id)
-            return []
+            await self.cluster.delete_run(name)
+        except Exception:  # noqa: BLE001 - recovery deletes Runs of finished runs
+            log.exception("could not delete Run %s", name)
 
     # -- recovery -----------------------------------------------------------------------
 
-    async def reconcile(self, is_alive: Callable[[str], Awaitable[bool]]) -> list[tuple[uuid.UUID, str]]:
-        """Startup recovery of runs left in preparing, running or resuming by a worker
-        that is no longer alive.
-
-        A run whose runner container still exists is returned for re-attachment (see
-        ``reattach``). A run without one is settled from its reported outcome if the
-        runner reported one, and otherwise failed and finalised. Runs owned by a live
-        worker are left alone; claiming a run (stamping ``worker_id`` under the row lock)
-        keeps two restarting workers from recovering the same run.
-        """
-        async with self.sessions() as session:
-            rows = (
-                await session.execute(select(Run.id, Run.worker_id).where(Run.state.in_(list(ACTIVE))))
-            ).all()
-
-        to_attach: list[tuple[uuid.UUID, str]] = []
-        for run_id, owner in rows:
-            if owner is not None and owner != self.worker_id and await is_alive(owner):
-                continue
-            claimed = await self._claim(run_id, owner)
-            if claimed is None:
-                continue
-            state, reported, recorded_container = claimed
-            containers = await self.containers.list_run_containers(str(run_id))
-            runners = [c for c in containers if c.kind == "run"]
-            if runners:
-                live = next((c for c in runners if c.running), runners[0])
-                stale = [c.id for c in containers if c.id != live.id and c.kind != "service"]
-                if stale:
-                    await self.containers.remove_containers(stale)
-                log.info("run %s: re-attaching to container %s", run_id, live.id[:12])
-                to_attach.append((run_id, live.id))
-                continue
-            leftovers = [c.id for c in containers if c.kind != "service"]
-            if leftovers:  # setup containers of a dead preparation; services go at finalize
-                await self.containers.remove_containers(leftovers)
-            if state == State.RUNNING and reported is not None:
-                log.info("run %s: container gone, settling reported outcome %s", run_id, reported)
-                try:
-                    await self._settle(run_id, recorded_container, wait=False)
-                except Exception as exc:
-                    log.exception("recovering run %s failed", run_id)
-                    await self.end(run_id, State.FAILED, error=f"{type(exc).__name__}: {exc}")
-                continue
-            log.warning("run %s: no container left; failing it", run_id)
-            await self.end(run_id, State.FAILED, error=f"worker restarted while the run was {state}")
-        return to_attach
-
-    async def waiting_runs(self, is_alive: Callable[[str], Awaitable[bool]]) -> list[tuple[uuid.UUID, int]]:
-        """Queued runs that were waiting for memory in a worker that is no longer alive:
-        their task message was acknowledged, so nothing else would start them. Returned
-        with what they reserve (from the project's latest read config), claimed for this
-        worker."""
+    async def recover(self) -> list[uuid.UUID]:
+        """At worker start (§4): compare the Runs with Postgres. An unfinished run with a
+        Run is settled and kept watching; one without fails; a Run of a finished run is
+        deleted. Returns the runs that hold a concurrency slot (preparing, running,
+        resuming) for the caller to hold."""
+        items, _ = await self.cluster.list_runs()
+        objects: dict[uuid.UUID, dict] = {}
+        for obj in items:
+            parsed = run_objects.parse_name(obj.get("metadata", {}).get("name", ""))
+            if parsed and parsed[0] == "task":
+                objects[parsed[1]] = obj
         async with self.sessions() as session:
             rows = (await session.execute(
-                select(Run.id, Run.worker_id).where(Run.state == State.QUEUED, Run.waiting_for.is_not(None))
+                select(Run.id, Run.state).where(Run.ended_at.is_(None), Run.state != State.QUEUED)
             )).all()
-        found = []
-        for run_id, owner in rows:
-            if owner is not None and owner != self.worker_id and await is_alive(owner):
-                continue
+        unfinished = {run_id: State(state) for run_id, state in rows if state is not None}
+        for run_id, obj in objects.items():
+            if run_id not in unfinished:
+                log.warning("deleting Run %s: its run has ended", obj["metadata"]["name"])
+                await self._delete_run(obj["metadata"]["name"])
+        held = []
+        for run_id in unfinished:
+            await self.settle(run_id, objects.get(run_id))
             async with self.sessions() as session:
-                run = await self._lock(session, run_id)
-                if run is None or run.state != State.QUEUED or run.worker_id != owner:
-                    await session.rollback()
-                    continue
-                run.worker_id = self.worker_id
-                project = await session.get(Project, run.task.project_id)
-                snapshot = cached(project) if project else None
-                await session.commit()
-            config = snapshot.config if snapshot else None
-            found.append((run_id, config.memory_reservation() if config else 0))
-        return found
+                run = await session.get(Run, run_id)
+            if run is not None and run.ended_at is None and run.state in (State.PREPARING, State.RUNNING, State.RESUMING):
+                held.append(run_id)
+        return held
 
-    async def _claim(self, run_id: uuid.UUID, owner: str | None) -> tuple[State, str | None, str | None] | None:
+    async def unfinished_runs(self) -> list[uuid.UUID]:
         async with self.sessions() as session:
-            run = await self._lock(session, run_id)
-            if run is None or run.state not in ACTIVE or run.worker_id != owner or run.ended_at is not None:
-                await session.rollback()
-                return None  # moved on, or claimed by another worker meanwhile
-            run.worker_id = self.worker_id
-            claimed = (State(run.state), run.reported_status, run.container_id)
-            await session.commit()
-            return claimed
+            return list((await session.scalars(
+                select(Run.id).where(Run.ended_at.is_(None), Run.state != State.QUEUED, Run.state.is_not(None))
+            )).all())
 
-    async def reattach(self, run_id: uuid.UUID, container_id: str) -> None:
-        """Resume supervising a runner container that outlived its worker. Its memory is
-        taken at once: the container is already running."""
-        async with self.memory.reserve(await self._reservation(run_id), wait=False):
-            await self._reattach(run_id, container_id)
-
-    async def _reattach(self, run_id: uuid.UUID, container_id: str) -> None:
-        try:
-            events: list[PendingEvent] = []
-            async with self.sessions() as session:
-                run = await self._lock(session, run_id)
-                if run is None or is_terminal(run.state):
-                    await session.rollback()
-                    await self.containers.remove_containers([container_id])
-                    if run is not None:
-                        await self.finalize(run_id)
-                    return
-                if run.state in (State.PREPARING, State.RESUMING):
-                    # The worker died between starting the container and recording it.
-                    run.container_id = container_id
-                    events.append(transition(session, run, State.RUNNING, "re-attached after worker restart"))
-                elif run.state == State.RUNNING:
-                    run.container_id = container_id
-                else:
-                    await session.rollback()
-                    return
-                await session.commit()
-            await self.emit(events)
-            await self._settle(run_id, container_id)
-        except RunCancelled:
-            await self.finalize(run_id)
-        except Exception as exc:
-            log.exception("re-attached run %s failed", run_id)
-            await self.end(run_id, State.FAILED, error=f"{type(exc).__name__}: {exc}")
-
-    async def sweep_orphans(self) -> list[str]:
-        """Remove run directories, services and run networks that no unfinished run or open
-        verification owns (e.g. left by a crash)."""
-        await self._sweep_services()
-        runs_dir = self.settings.data_dir / "runs"
-        if not runs_dir.is_dir():
-            return []
-        # List first, then ask Postgres: a directory is only created after its run is
-        # in preparing, so a run started meanwhile cannot be swept by mistake.
-        entries = await asyncio.to_thread(lambda: [p for p in runs_dir.iterdir() if p.is_dir()])
-        ids, verification_ids = [], []
-        for entry in entries:
-            name, target = entry.name, ids
-            if name.startswith(VERIFY_PREFIX):
-                name, target = name.removeprefix(VERIFY_PREFIX), verification_ids
+    async def sweep(self) -> None:
+        """Settle every unfinished run from its Run as it is now (every 15 s)."""
+        for run_id in await self.unfinished_runs():
             try:
-                target.append(uuid.UUID(name))
-            except ValueError:
-                pass
-        keep: set[str] = set()
-        async with self.sessions() as session:
-            if ids:
-                rows = await session.scalars(
-                    select(Run.id).where(Run.id.in_(ids), Run.state.not_in(list(TERMINAL)))
-                )
-                keep |= {str(run_id) for run_id in rows.all()}
-            if verification_ids:
-                rows = await session.scalars(
-                    select(ProjectVerification.id).where(
-                        ProjectVerification.id.in_(verification_ids),
-                        ProjectVerification.state.in_(["pending", "running"]),
-                    )
-                )
-                keep |= {f"{VERIFY_PREFIX}{vid}" for vid in rows.all()}
-        removed = []
-        for entry in entries:
-            if entry.name in keep:
-                continue
-            log.warning("removing orphaned run directory %s", entry)
-            try:
-                await asyncio.to_thread(prepare.remove_run_directory, prepare.run_paths(self.settings.data_dir, entry.name))
-                removed.append(entry.name)
-            except OSError:
-                log.exception("could not remove %s", entry)
-        return removed
-
-    async def _owned_labels(self, labels: list[str]) -> set[str]:
-        """The run and verification labels in ``labels`` whose owner is still open."""
-        ids, verification_ids = [], []
-        for name in labels:
-            target = ids
-            if name.startswith(VERIFY_PREFIX):
-                name, target = name.removeprefix(VERIFY_PREFIX), verification_ids
-            try:
-                target.append(uuid.UUID(name))
-            except ValueError:
-                pass
-        keep: set[str] = set()
-        async with self.sessions() as session:
-            if ids:
-                rows = await session.scalars(select(Run.id).where(Run.id.in_(ids), Run.state.not_in(list(TERMINAL))))
-                keep |= {str(run_id) for run_id in rows.all()}
-            if verification_ids:
-                rows = await session.scalars(
-                    select(ProjectVerification.id).where(
-                        ProjectVerification.id.in_(verification_ids),
-                        ProjectVerification.state.in_(["pending", "running"]),
-                    )
-                )
-                keep |= {f"{VERIFY_PREFIX}{vid}" for vid in rows.all()}
-        return keep
-
-    async def _sweep_services(self) -> list[str]:
-        try:
-            labels = sorted(await self.containers.service_run_ids())
-            if not labels:
-                return []
-            keep = await self._owned_labels(labels)
-            removed = []
-            for label in labels:
-                if label not in keep:
-                    log.warning("removing orphaned services and network of %s", label)
-                    await self.containers.remove_run_services(label)
-                    removed.append(label)
-            return removed
-        except Exception:  # noqa: BLE001 - retried at the next start
-            log.exception("could not sweep orphaned services")
-            return []
+                await self.settle(run_id)
+            except Exception:  # noqa: BLE001 - the next sweep retries
+                log.exception("settling run %s failed", run_id)
 
     async def resumable_runs(self) -> list[uuid.UUID]:
         """Waiting runs whose answer arrived while no worker could resume them."""
@@ -852,15 +668,24 @@ class RunManager:
             )
             return list(rows.all())
 
+    async def on_event(self, kind: str, obj: dict[str, Any]) -> None:
+        """A watch event of a task Run."""
+        parsed = run_objects.parse_name(obj.get("metadata", {}).get("name", ""))
+        if parsed is None or parsed[0] != "task":
+            return
+        try:
+            await self.settle(parsed[1], None if kind == "DELETED" else obj)
+        except Exception:  # noqa: BLE001 - the sweep settles it again
+            log.exception("settling run %s failed", parsed[1])
 
-def service_spec(name: str, service, image: str, secrets: StoreValues) -> ServiceSpec:
-    """A config service with its image and secrets resolved now."""
-    return ServiceSpec(
-        name=name,
-        image=image,
-        env=service_environment(service, secrets),
-        ready=service.ready.model_dump(exclude_none=True) if service.ready else None,
-        command=list(service.command) if service.command else None,
-        memory=memory_bytes(service.memory) if service.memory else None,
-        memory_text=service.memory,
-    )
+
+async def _nothing() -> None:
+    return None
+
+
+async def _no() -> bool:
+    return False
+
+
+def _run_now(coro: Awaitable[Any]) -> None:
+    asyncio.ensure_future(coro)

@@ -372,7 +372,8 @@ class ProviderTestOut(_Out):
 class RunOut(_Out):
     id: uuid.UUID
     state: str
-    container_id: str | None
+    run_object: str | None = None
+    """The run's Kubernetes ``Run`` (``run-<id>``), once created; deleted when the run ends."""
     runtime_session_id: str | None
     started_at: datetime | None
     ended_at: datetime | None
@@ -384,7 +385,7 @@ class RunOut(_Out):
     agent_snapshot: dict[str, Any] | None = None
     """name, model, provider, runtime, identity and connections of the agent at run start."""
     waiting_for: str | None = None
-    """``memory`` while the run waits for its memory reservation."""
+    """``capacity`` while the run's pod waits for room in the cluster (it stays preparing)."""
     routing: dict[str, Any] | None = None
     """How the agent was picked (docs/agent-routing.md §8)."""
 
@@ -397,7 +398,7 @@ class TaskSummaryOut(BaseModel):
     received_at: datetime
     run_id: uuid.UUID | None
     waiting_for: str | None = None
-    """``memory`` while the run waits for its memory reservation (it stays queued)."""
+    """``capacity`` while the run's pod waits for room in the cluster (it stays preparing)."""
 
 
 class AttachmentOut(_Out):
@@ -486,10 +487,17 @@ class WorkerOut(_Out):
     started_at: datetime
     last_seen_at: datetime
     concurrency: int
-    docker_ok: bool
-    docker_detail: str | None
     runtimes: list[RuntimeBundleOut]
     version: str | None
+
+
+class OperatorOut(BaseModel):
+    """The operator as the workers see its leader Lease (docs/kubernetes.md §15)."""
+
+    alive: bool
+    holder: str | None = None
+    renewed_at: str | None = None
+    detail: str | None = None
 
 
 class DefaultProviderOut(_Out):
@@ -510,16 +518,11 @@ class SystemStatusOut(BaseModel):
     database: CheckOut
     broker: CheckOut
     workers: list[WorkerOut]
+    operator: OperatorOut | None = None
+    """``None`` while no live worker reported it."""
     provider: ProviderStatusOut
     public_api_url: str
-    data_dir: str
     version: str
-
-
-class ImageOut(BaseModel):
-    tag: str
-    created_at: str | None = None
-    size: int | None = None
 
 
 class SettingFieldOut(BaseModel):

@@ -39,6 +39,12 @@ class FakeApi:
     async def report_outcome(self, outcome: OutcomeReport) -> None:
         pass
 
+    async def report(self, status: str) -> None:
+        pass
+
+    async def wait_answers(self, wait: float):  # pragma: no cover - unused here
+        raise NotImplementedError
+
 
 @pytest.fixture
 def api():

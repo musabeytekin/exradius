@@ -3,6 +3,7 @@ the admin password."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 
@@ -20,11 +21,11 @@ from exradius.runner.environment import RunnerEnvironment
 from exradius.runtimes import AuthMethod, ProbeResult, ProviderCredential, ProviderKind, RuntimeCapabilities, SettingField
 from exradius.runtimes.base import PROBE_PREFIX
 from exradius.runtimes.claude_code import OAUTH_NOTICE, ClaudeCodeRuntime
-from exradius.worker.containers import ContainerExit
-from exradius.worker.provider_test import ProviderTester, parse_probe
+from exradius.worker.provider_test import ProviderTester
 from tests.test_api import admin, client, control, sync_db  # noqa: F401 - fixtures
 from tests.conftest import BASE_CONFIG, commit_config, make_config_repo
-from tests.test_run_manager import containers, manager, published, runner, states, submit_task  # noqa: F401
+from tests.fakes import runner
+from tests.test_run_manager import cluster, execute, manager, published, states, submit_task  # noqa: F401
 
 API_KEY = {"slug": "anthropic", "name": "Anthropic", "kind": "anthropic", "auth_method": "api_key", "credential": "sk-ant-1"}
 OAUTH = {"slug": "subscription", "name": "Subscription", "kind": "anthropic", "auth_method": "oauth_token",
@@ -266,27 +267,30 @@ def test_status_shows_the_default_provider(admin, anthropic_api):
 # Injection and intake -------------------------------------------------------------------------
 
 
-async def test_api_key_provider_is_injected(manager, sessions, store, containers, published, configured, accept):
+async def test_api_key_provider_is_injected(manager, sessions, store, cluster, published, configured, accept):
     # Project variables with a provider variable's name do not reach the run.
     commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + "env:\n  ANTHROPIC_API_KEY: sk-project\n  CLAUDE_CODE_OAUTH_TOKEN: oat\n"})
     run_id = await submit_task(accept, published)
-    containers.behaviours.append(runner(sessions))
-    await manager.execute(run_id)
-    env = containers.started[0]["env"]
+    cluster.behaviours.append(runner(sessions))
+    await execute(manager, cluster, run_id)
+    [env] = cluster.envs
     assert env["ANTHROPIC_API_KEY"] == "sk-test"
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert cluster.created[0]["spec"]["runtime"]["env"] == [
+        {"name": "ANTHROPIC_API_KEY", "secretKey": "provider.ANTHROPIC_API_KEY"}]
+    assert "sk-test" not in json.dumps(cluster.created[0]["spec"])
 
 
-async def test_agents_own_oauth_provider_is_injected(manager, sessions, store, containers, published, configured, box, accept):
+async def test_agents_own_oauth_provider_is_injected(manager, sessions, store, cluster, published, configured, box, accept):
     async with sessions() as session:
         session.add(Provider(slug="sub", name="Sub", kind="anthropic", auth_method="oauth_token",
                              credential_encrypted=box.encrypt("oat-secret"), settings={}))
         await session.commit()
     commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG.replace("    role: You fix bugs.\n", "    role: You fix bugs.\n    provider: sub\n")})
     run_id = await submit_task(accept, published)
-    containers.behaviours.append(runner(sessions))
-    await manager.execute(run_id)
-    env = containers.started[0]["env"]
+    cluster.behaviours.append(runner(sessions))
+    await execute(manager, cluster, run_id)
+    [env] = cluster.envs
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oat-secret"
     assert "ANTHROPIC_API_KEY" not in env
     assert states(published)[-1] == "completed"
@@ -304,38 +308,25 @@ async def test_intake_rejects_without_providers(sessions, store, configured, acc
     assert event.envelope.payload["reason"] == "no provider configured"
 
 
-async def test_run_fails_if_the_provider_is_gone_at_container_start(manager, sessions, store, containers, published, configured, accept):
+async def test_run_fails_if_the_provider_is_gone_at_run_creation(manager, sessions, store, cluster, published, configured, accept):
     run_id = await submit_task(accept, published)
     async with sessions() as session:
         await session.delete(await session.get(Provider, configured["provider"].id))
         await session.commit()
-    await manager.execute(run_id)
+    await execute(manager, cluster, run_id)
     assert states(published)[-1] == "failed"
-    assert containers.started == []
+    assert cluster.created == []
     [result] = [e.payload for e in published if e.type == "result"]
     assert result["state"] == "failed" and "no provider configured" in result["error"]
 
 
-# The worker's provider test ---------------------------------------------------------------------
+# The worker's provider test: a probe Run (docs/kubernetes.md §13) -------------------------------
 
 
-def probe_logs(ok=True, detail="claude-x replied 'OK'", error=None) -> str:
-    return "starting\n" + PROBE_PREFIX + json.dumps({"ok": ok, "detail": detail, "error": error}) + "\n"
-
-
-def test_parse_probe():
-    assert parse_probe(0, probe_logs()) == (True, "claude-x replied 'OK'", None)
-    assert parse_probe(1, probe_logs(False, None, "Claude Code session failed: 401")) == (
-        False, None, "Claude Code session failed: 401",
-    )
-    ok, detail, error = parse_probe(137, "Killed\n")
-    assert not ok and detail is None and error.startswith("the probe exited with 137 without a result")
-
-
-async def new_test(sessions, provider_id) -> uuid.UUID:
+async def new_test(sessions, provider_id, model=None) -> uuid.UUID:
     async with sessions() as session:
         provider = await session.get(Provider, provider_id)
-        test = ProviderTest(provider_id=provider_id, state="pending", fingerprint=fingerprint(provider))
+        test = ProviderTest(provider_id=provider_id, state="pending", fingerprint=fingerprint(provider), model=model)
         session.add(test)
         await session.commit()
         return test.id
@@ -351,50 +342,73 @@ async def oauth_provider(sessions, box):
         return provider.id
 
 
-async def test_provider_test_passes_and_records_last_test(manager, sessions, containers, oauth_provider, settings):
-    probes = []
-
-    async def run_probe(*, image, label, env, timeout, runtime, model=None):
-        probes.append({"image": image, "label": label, "env": env, "runtime": runtime.name})
-        return ContainerExit(0, probe_logs())
-
-    containers.run_probe = run_probe
-    manager.worker_id = "me"
+@pytest.fixture
+def tester(manager):
     tester = ProviderTester(manager)
-    test_id = await new_test(sessions, oauth_provider)
-    assert await tester.claim(test_id, "me") and not await tester.claim(test_id, "other")
-    await tester.run(test_id)
+    tester.poll = 0.01
+    return tester
 
-    assert probes == [{"image": settings.project_default_image, "label": f"provider-test-{test_id}",
-                       "env": {"CLAUDE_CODE_OAUTH_TOKEN": "oat-secret"}, "runtime": "claude_code"}]
+
+async def test_provider_test_passes_and_records_last_test(tester, sessions, cluster, oauth_provider, settings):
+    test_id = await new_test(sessions, oauth_provider, model="claude-haiku-5-5")
+    assert await tester.claim(test_id, "me") and not await tester.claim(test_id, "other")
+    await asyncio.wait_for(tester.run(test_id), 10)
+
+    [created] = cluster.created
+    name = f"probe-{test_id}"
+    assert created["metadata"]["name"] == name and created["metadata"]["labels"]["exradius.dev/purpose"] == "probe"
+    spec = created["spec"]
+    assert (spec["purpose"], spec["id"], spec["model"]) == ("probe", str(test_id), "claude-haiku-5-5")
+    assert spec["workstation"] == {"image": settings.project_default_image, "setup": [], "env": []}
+    assert spec["repositories"] == [] and spec["runtime"]["image"] == settings.runtime_image_claude_code
+    assert spec["runtime"]["env"] == [{"name": "CLAUDE_CODE_OAUTH_TOKEN", "secretKey": "provider.CLAUDE_CODE_OAUTH_TOKEN"}]
+    assert "oat-secret" not in json.dumps(spec)
+    assert cluster.envs[0]["CLAUDE_CODE_OAUTH_TOKEN"] == "oat-secret"
+    assert cluster.deleted == [name]
+
     async with sessions() as session:
         test = await session.get(ProviderTest, test_id)
-        assert (test.state, test.detail, test.error) == ("passed", "claude-x replied 'OK'", None)
-        assert test.started_at and test.ended_at
+        assert (test.state, test.detail, test.error) == ("passed", "claude-sonnet-5-5 replied 'OK'", None)
+        assert test.started_at and test.ended_at and test.token_hash is None
         provider = await session.get(Provider, oauth_provider)
-        assert provider.last_test["ok"] is True and provider.last_test["detail"] == "claude-x replied 'OK'"
+        assert provider.last_test["ok"] is True and provider.last_test["detail"] == "claude-sonnet-5-5 replied 'OK'"
 
 
-async def test_provider_test_failure_is_kept_off_a_changed_provider(manager, sessions, containers, oauth_provider, box):
+async def test_provider_test_failure_is_kept_off_a_changed_provider(tester, sessions, cluster, oauth_provider, box):
     test_id = await new_test(sessions, oauth_provider)
-
-    async def run_probe(*, image, label, env, timeout, runtime, model=None):
-        async with sessions() as session:  # the credential is replaced while the probe runs
-            (await session.get(Provider, oauth_provider)).credential_encrypted = box.encrypt("oat-new")
-            await session.commit()
-        return ContainerExit(1, probe_logs(False, None, "Claude Code session failed: invalid token"))
-
-    containers.run_probe = run_probe
-    await ProviderTester(manager).run(test_id)
+    cluster.probe_report = {"ok": False, "detail": None, "error": "Claude Code session failed: invalid token"}
+    async with sessions() as session:  # the credential is replaced while the probe runs
+        (await session.get(Provider, oauth_provider)).credential_encrypted = box.encrypt("oat-new")
+        await session.commit()
+    await asyncio.wait_for(tester.run(test_id), 10)
     async with sessions() as session:
         test = await session.get(ProviderTest, test_id)
         assert test.state == "failed" and test.error == "Claude Code session failed: invalid token"
         assert (await session.get(Provider, oauth_provider)).last_test is None
 
 
-async def test_dead_workers_provider_tests_are_failed(manager, sessions, containers, oauth_provider):
-    from exradius.worker.containers import RunContainer
+async def test_a_probe_that_ends_without_a_report_fails_with_its_log(tester, sessions, cluster, oauth_provider):
+    test_id = await new_test(sessions, oauth_provider)
+    cluster.probe_report, cluster.probe_exit = None, 1
+    await asyncio.wait_for(tester.run(test_id), 10)
+    async with sessions() as session:
+        test = await session.get(ProviderTest, test_id)
+    assert test.state == "failed"
+    assert test.error == "the probe exited with 1 without a result:\nError: invalid x-api-key"
 
+
+async def test_a_probe_that_never_finishes_times_out(tester, sessions, cluster, oauth_provider):
+    cluster.auto = False
+    tester.timeout = 0.1
+    test_id = await new_test(sessions, oauth_provider)
+    await asyncio.wait_for(tester.run(test_id), 10)
+    async with sessions() as session:
+        test = await session.get(ProviderTest, test_id)
+    assert test.state == "failed" and test.error == "the probe did not finish within 0s"
+    assert cluster.deleted == [f"probe-{test_id}"]
+
+
+async def test_dead_workers_provider_tests_are_failed(tester, sessions, cluster, oauth_provider):
     async def is_alive(worker_id):
         return worker_id == "live"
 
@@ -404,30 +418,51 @@ async def test_dead_workers_provider_tests_are_failed(manager, sessions, contain
         (await session.get(ProviderTest, dead)).state = "running"
         (await session.get(ProviderTest, live)).worker_id = "live"
         await session.commit()
-    containers.existing[f"provider-test-{dead}"] = [RunContainer("probe-1", "probe", True)]
-    manager.worker_id = "me"
-    assert await ProviderTester(manager).reconcile(is_alive) == [dead]
-    assert containers.removed == ["probe-1"]
+    cluster.runs[f"probe-{dead}"] = {"metadata": {"name": f"probe-{dead}"}, "spec": {}, "status": {}}
+    assert await tester.reconcile(is_alive, "me") == [dead]
+    assert cluster.deleted == [f"probe-{dead}"]
     async with sessions() as session:
         failed = await session.get(ProviderTest, dead)
         assert failed.state == "failed" and failed.error == "worker restarted during the test"
         assert (await session.get(ProviderTest, live)).state == "pending"
+    assert await tester.open_ids() == {dead, live} - {dead}
 
 
-async def test_runner_probe_prints_one_result_line(monkeypatch, capsys):
+async def test_runner_probe_prints_one_result_line_and_reports_it(monkeypatch, capsys):
     seen = {}
 
     class FakeRuntime:
         async def probe(self, env, model=None):
-            seen["env"] = env
+            seen.update(env=env, model=model)
             return ProbeResult(True, detail="claude-x replied 'OK'")
 
+    reported = []
+
+    class FakeProbeApi:
+        def __init__(self, url, test_id, token):
+            seen.update(url=url, test_id=test_id, token=token)
+
+        async def report(self, report):
+            reported.append(report.model_dump())
+
+        async def aclose(self):
+            pass
+
     monkeypatch.setattr(runner_main, "get_runtime", lambda name, runtime_dir=None: FakeRuntime())
-    environment = RunnerEnvironment(container={"CLAUDE_CODE_OAUTH_TOKEN": "t"}, run_token=None, runtime_dir=None)
-    assert await runner_main.probe("claude_code", environment) == 0
-    assert seen["env"] == {"CLAUDE_CODE_OAUTH_TOKEN": "t"}
+    monkeypatch.setattr(runner_main, "HttpProbeApi", FakeProbeApi)
+    monkeypatch.setenv("EXRADIUS_API_URL", "http://exradius-api-internal.exradius:8001")
+    environment = RunnerEnvironment(container={"CLAUDE_CODE_OAUTH_TOKEN": "t"}, run_token="tok", runtime_dir=None)
+    assert await runner_main.probe("claude_code", environment, "claude-haiku-5-5", "t-1") == 0
+    assert seen == {"env": {"CLAUDE_CODE_OAUTH_TOKEN": "t"}, "model": "claude-haiku-5-5",
+                    "url": "http://exradius-api-internal.exradius:8001", "test_id": "t-1", "token": "tok"}
     line = capsys.readouterr().out.strip().splitlines()[-1]
-    assert parse_probe(0, line) == (True, "claude-x replied 'OK'", None)
+    assert line == PROBE_PREFIX + json.dumps({"ok": True, "detail": "claude-x replied 'OK'", "error": None})
+    assert reported == [{"ok": True, "detail": "claude-x replied 'OK'", "error": None}]
+
+    # Without --report (the skill's local check) nothing is sent.
+    reported.clear()
+    assert await runner_main.probe("claude_code", environment) == 0
+    assert reported == []
 
 
 # One-time migration and the admin password ----------------------------------------------------------

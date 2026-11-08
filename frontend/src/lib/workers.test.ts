@@ -5,7 +5,7 @@ import { workerHealthy, workerRuntimes } from "./workers";
 
 const worker = (hostname: string, extra: Partial<Worker>): Worker => ({
   id: hostname, hostname, started_at: "2026-11-05T10:00:00Z", last_seen_at: "2026-11-05T10:00:00Z",
-  concurrency: 2, docker_ok: true, docker_detail: null, version: "0.1.0", ...extra,
+  concurrency: 2, runtimes: [], version: "0.2.0", ...extra,
 });
 const RUNTIMES: Runtime[] = [{
   name: "claude_code", label: "Claude Code",
@@ -13,10 +13,6 @@ const RUNTIMES: Runtime[] = [{
 }];
 
 describe("workerRuntimes", () => {
-  it("is null for workers that predate the runtimes field", () => {
-    expect(workerRuntimes([worker("a", { runner_image: "exradius-runner:latest", runner_image_ok: true })], RUNTIMES)).toBeNull();
-  });
-
   it("merges runtimes across workers and is ready only when every worker has it ready", () => {
     const s = workerRuntimes([
       worker("a", { runtimes: [{ name: "claude_code", version: "2.1.3", ready: true }] }),
@@ -25,11 +21,10 @@ describe("workerRuntimes", () => {
     expect(s).toEqual([{ name: "claude_code", label: "Claude Code", versions: ["2.1.3", "2.1.4"], ready: false, notReadyOn: ["b"], errors: ["image not found"] }]);
   });
 
-  it("judges worker health by its runtimes, falling back to the runner image", () => {
+  it("judges worker health by its runtimes", () => {
     expect(workerHealthy(worker("a", { runtimes: [{ name: "claude_code", version: null, ready: true }] }))).toBe(true);
     expect(workerHealthy(worker("a", { runtimes: [] }))).toBe(false);
-    expect(workerHealthy(worker("a", { runner_image_ok: false }))).toBe(false);
-    expect(workerHealthy(worker("a", { docker_ok: false, runtimes: [{ name: "claude_code", version: null, ready: true }] }))).toBe(false);
+    expect(workerHealthy(worker("a", { runtimes: [{ name: "claude_code", version: null, ready: false }] }))).toBe(false);
   });
 });
 

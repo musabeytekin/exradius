@@ -37,30 +37,21 @@ async def system_status(session: DB, state: State, _: Admin):
     broker_ok, broker_detail = await state.broker.check()
 
     default = await default_provider(session)
+    workers = await live_workers(session)
+    seen = next((w for w in sorted(workers, key=lambda w: w.last_seen_at, reverse=True) if w.operator), None)
     return s.SystemStatusOut(
         database=database,
         broker=s.CheckOut(ok=broker_ok, detail=broker_detail),
-        workers=[s.WorkerOut.model_validate(w) for w in await live_workers(session)],
+        workers=[s.WorkerOut.model_validate(w) for w in workers],
+        operator=s.OperatorOut.model_validate(seen.operator) if seen else None,
         provider=s.ProviderStatusOut(
             configured=default is not None,
             default=s.DefaultProviderOut.model_validate(default) if default else None,
             count=await provider_count(session),
         ),
         public_api_url=state.settings.public_api_url,
-        data_dir=str(state.settings.data_dir),
         version=package_version(),
     )
-
-
-@router.get("/images", response_model=list[s.ImageOut])
-async def system_images(session: DB, _: Admin):
-    """Every tagged image on the live workers' daemons, as project image suggestions
-    (Exradius' own backend and runtime bundle images are left out)."""
-    images: dict[str, dict] = {}
-    for worker in await live_workers(session):
-        for image in worker.images or []:
-            images.setdefault(image["tag"], image)
-    return [s.ImageOut.model_validate(images[tag]) for tag in sorted(images)]
 
 
 def runtime_out(runtime) -> s.RuntimeOut:
@@ -97,7 +88,7 @@ async def system_runtimes(_: Admin):
 @router.get("/integration", response_model=s.IntegrationOut)
 async def system_integration(state: State, _: Admin):
     settings = state.settings
-    url = urlsplit(settings.broker_url)
+    url = urlsplit(settings.effective_broker_url)
     vhost = unquote(url.path[1:]) if len(url.path) > 1 else "/"
     return s.IntegrationOut(
         broker=s.BrokerInfoOut(

@@ -1,7 +1,7 @@
 """Resolve a project's config into what a run needs (docs/config-repo.md §5, §7).
 
 Every ``${secret:NAME}`` in the config resolves from the secret store the file names.
-Values are decrypted only here, at container start (worker) or for the run spec (API);
+Values are decrypted only here, at Run creation (worker) or for the run spec (API);
 the views for the panel show references as ``$NAME`` placeholders instead.
 """
 
@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from exradius.schemas.project_config import SECRET_REF, ProjectConfig, ServiceDef
-from exradius.worker.prepare import RepoSpec
+from exradius.git import RepoSpec
 
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 

@@ -26,7 +26,7 @@ from exradius.project_state import remember
 from tests.conftest import BASE_CONFIG, commit_config, make_config_repo
 from exradius.worker.verify import ProjectVerifier
 from tests.test_api import admin, client, control, sync_db  # noqa: F401 - fixtures
-from tests.test_run_manager import containers, manager, published, submit_task  # noqa: F401 - fixtures
+from tests.test_run_manager import cluster, execute, manager, published, submit_task  # noqa: F401 - fixtures
 from tests.test_verification import new_verification
 
 PLANE = """\
@@ -282,7 +282,7 @@ async def test_check_stores_only_what_it_published(sessions, configured):
 def test_startup_check(settings, store, control, sync_db, tmp_path):
     remote = make_config_repo(tmp_path, {"exradius.yaml": PLANE})
     project = Project(id=uuid.uuid4(), config_url=str(remote), slug="plane")
-    remember(project, read_snapshot(settings.data_dir, project.id, project.config_url))
+    remember(project, read_snapshot(settings.cache_dir, project.id, project.config_url))
     sync_db.add(project)
     sync_db.commit()
 
@@ -469,7 +469,7 @@ async def test_intake_says_whether_it_read_the_config(accept, configured, projec
     assert (await accept(json.dumps(body).encode())).config_read is read
 
 
-async def test_preparing_and_verify_check_the_directory(manager, sessions, published, configured, accept):
+async def test_preparing_and_verify_check_the_directory(manager, cluster, sessions, published, configured, accept):
     """A config that changed after intake is noticed when ``preparing`` or Verify reads it."""
     sent = []
 
@@ -480,12 +480,14 @@ async def test_preparing_and_verify_check_the_directory(manager, sessions, publi
     assert await directory.check(sessions, lambda event: _append(sent, event)) is True  # the baseline
     run_id = await submit_task(accept, published)
     commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + "  reviewer:\n    role: You review.\n"})
-    await manager.execute(run_id)  # the fake containers end the run; preparing read the config first
+    await execute(manager, cluster, run_id)  # the fake pod ends the run; preparing read the config first
     assert [e.payload.projects for e in sent] == [["billing-platform"], ["billing-platform"]]
 
     commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG})
     verification = await new_verification(sessions, configured["project"].id)
-    await ProjectVerifier(manager).run(verification)
+    verifier = ProjectVerifier(manager)
+    verifier.poll = 0.01
+    await asyncio.wait_for(verifier.run(verification), 10)
     assert len(sent) == 3
 
 
@@ -529,7 +531,7 @@ def test_bridge_files_are_read_with_the_config(tmp_path, settings):
         "bridges/notes.md": "hello\n",
         "bridges/huge.yaml": "x: '" + "y" * (65 * 1024) + "'\n",
     })
-    snapshot = read_snapshot(settings.data_dir, uuid.uuid4(), str(remote))
+    snapshot = read_snapshot(settings.cache_dir, uuid.uuid4(), str(remote))
     assert snapshot.config is not None and snapshot.errors == []  # problems are warnings only
     assert snapshot.bridges["jira"] == {"config": {"projects": ["PLANE"], "since": "2026-11-08"}}  # as JSON
     assert snapshot.bridges["github"]["error"].startswith("bridges/github.yaml: not valid YAML: line 2")
@@ -549,7 +551,7 @@ def test_bridge_files_next_to_a_nested_config_and_despite_errors(tmp_path, setti
         ".exradius/bridges/jira.yaml": JIRA,
         "bridges/jira.yaml": "projects: [OTHER]\n",  # not next to the config: not read
     })
-    snapshot = read_snapshot(settings.data_dir, uuid.uuid4(), str(remote))
+    snapshot = read_snapshot(settings.cache_dir, uuid.uuid4(), str(remote))
     assert snapshot.config is None and snapshot.errors
     assert snapshot.bridges == {"jira": {"config": {"projects": ["PLANE"]}}}
 

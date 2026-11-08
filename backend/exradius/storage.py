@@ -1,8 +1,9 @@
 """Object store for transcripts, artifacts and attachments.
 
-The default keeps objects on the filesystem under ``<data_dir>/objects/<bucket>/<key>``;
-``EXRADIUS_OBJECT_STORE=s3`` stores them in any S3 API instead. Objects are addressed by
-key only; consumers download them through the API (see ``exradius/downloads.py``).
+Installs use an S3 API: SeaweedFS in a local kind install, S3 (or another S3-compatible
+service) in clouds (docs/kubernetes.md §14). The filesystem and in-memory stores are for
+tests. Objects are addressed by key only; consumers download them through the API (see
+``exradius/downloads.py``).
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ def validate_key(key: str) -> list[str]:
 
 
 class FilesystemObjectStore:
+    """Objects under ``<root>/<bucket>/<key>``; for tests."""
+
     def __init__(self, root: Path, bucket: str = "exradius"):
         validate_key(bucket)
         if "/" in bucket:
@@ -165,6 +168,4 @@ class MemoryObjectStore:
 
 
 def make_store(settings: Settings) -> ObjectStore:
-    if settings.object_store == "s3":
-        return S3ObjectStore(settings)
-    return FilesystemObjectStore(settings.objects_dir, settings.s3_bucket)
+    return S3ObjectStore(settings)

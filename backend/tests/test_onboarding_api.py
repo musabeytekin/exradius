@@ -13,20 +13,21 @@ from sqlalchemy.orm import Session
 
 from exradius.api import task_routes
 from exradius.models import Event, ProjectVerification, TranscriptChunk, Worker
+from exradius.version import package_version
 from tests.conftest import commit_config, make_config_repo
 from tests.test_api import API_CONFIG, admin, client, control, make_run, setup_configuration, sync_db  # noqa: F401
 
 NOW = datetime.now(UTC)
 
 
-def add_worker(db, worker_id: str, seen_ago: float, images=(), docker_ok=True):
+def add_worker(db, worker_id: str, seen_ago: float, operator=None):
     db.add(
         Worker(
             id=worker_id, hostname=f"host-{worker_id}", started_at=NOW - timedelta(hours=1),
-            last_seen_at=datetime.now(UTC) - timedelta(seconds=seen_ago), concurrency=4,
-            docker_ok=docker_ok, docker_detail="reachable", images=list(images), version="0.1.0",
-            runtimes=[{"name": "claude_code", "version": "0.1.0", "ready": True,
-                       "image": "exradius-runtime-claude-code:0.1.0", "error": None}],
+            last_seen_at=datetime.now(UTC) - timedelta(seconds=seen_ago), concurrency=4, version="0.2.0",
+            runtimes=[{"name": "claude_code", "version": "0.2.0", "ready": True,
+                       "image": "exradius-runtime-claude-code:0.2.0", "error": None}],
+            operator=operator,
         )
     )
     db.commit()
@@ -36,21 +37,24 @@ def add_worker(db, worker_id: str, seen_ago: float, images=(), docker_ok=True):
 
 
 def test_system_status(admin, sync_db, control, settings):
-    add_worker(sync_db, "w-live", seen_ago=5)
-    add_worker(sync_db, "w-stale", seen_ago=120)
+    alive = {"alive": True, "holder": "exradius-operator-7d9f_1", "renewed_at": "2026-11-08T10:00:00+00:00", "detail": None}
+    add_worker(sync_db, "w-live", seen_ago=5, operator=alive)
+    add_worker(sync_db, "w-stale", seen_ago=120, operator={"alive": False, "holder": None, "renewed_at": None,
+                                                           "detail": "stale"})
     status = admin.get("/api/system/status").json()
     assert status["database"]["ok"] is True
     assert status["broker"] == {"ok": True, "detail": "connected"}
     assert [w["id"] for w in status["workers"]] == ["w-live"]  # unseen for 60 s: not listed
     worker = status["workers"][0]
-    assert (worker["hostname"], worker["concurrency"], worker["docker_ok"]) == ("host-w-live", 4, True)
-    assert worker["runtimes"] == [{"name": "claude_code", "version": "0.1.0", "ready": True,
-                                   "image": "exradius-runtime-claude-code:0.1.0", "error": None}]
-    assert "runner_image_ok" not in worker
+    assert (worker["hostname"], worker["concurrency"]) == ("host-w-live", 4)
+    assert worker["runtimes"] == [{"name": "claude_code", "version": "0.2.0", "ready": True,
+                                   "image": "exradius-runtime-claude-code:0.2.0", "error": None}]
+    assert "docker_ok" not in worker and "images" not in worker
+    assert status["operator"] == alive  # from the live worker only
     assert status["provider"] == {"configured": False, "default": None, "count": 0}
     assert "anthropic_key" not in status and "object_store" not in status
     assert status["public_api_url"] == settings.public_api_url
-    assert status["data_dir"] == str(settings.data_dir)
+    assert "data_dir" not in status
     assert status["version"]
 
     control.healthy = False
@@ -58,19 +62,19 @@ def test_system_status(admin, sync_db, control, settings):
     assert broker["ok"] is False and "broker down" in broker["detail"]
 
 
+def test_system_status_without_an_operator_report(admin, sync_db):
+    add_worker(sync_db, "w-live", seen_ago=5)
+    assert admin.get("/api/system/status").json()["operator"] is None
+
+
 def test_system_requires_login(client):
-    for path in ("/api/system/status", "/api/system/images", "/api/system/runtimes", "/api/system/integration"):
+    for path in ("/api/system/status", "/api/system/runtimes", "/api/system/integration"):
         assert client.get(path).status_code == 401
 
 
-def test_system_images_from_live_heartbeats(admin, sync_db):
-    runner = {"tag": "python:3.14", "created_at": "2026-11-05T10:00:00Z", "size": 1000}
-    node = {"tag": "acme/node-project:1", "created_at": "2026-11-05T11:00:00Z", "size": 2000}
-    old = {"tag": "acme/old:1", "created_at": None, "size": 3}
-    add_worker(sync_db, "w1", seen_ago=1, images=[runner, node])
-    add_worker(sync_db, "w2", seen_ago=2, images=[runner])
-    add_worker(sync_db, "w3", seen_ago=600, images=[old])
-    assert admin.get("/api/system/images").json() == [node, runner]  # sorted, deduplicated, live only
+def test_there_is_no_image_list(admin):
+    """No daemon whose images could be listed (docs/kubernetes.md §15)."""
+    assert admin.get("/api/system/images").status_code in (404, 405)
 
 
 def test_system_runtimes(admin):
@@ -229,7 +233,7 @@ def test_resolved_agent_shows_placeholders_not_values(admin, tmp_path):
     assert resolved["provider"] == "main" and resolved["resolved_provider"] is None
     assert resolved["provider_error"] == "unknown provider 'main'"
     assert resolved["identity"] == {"name": "Bug fixer", "email": "bug-fixer@agents.example"}
-    assert resolved["commit"] == cfg["project"]["commit"] and resolved["image"] == "exradius-project-default:0.1.0"
+    assert resolved["commit"] == cfg["project"]["commit"] and resolved["image"] == f"exradius-project-default:{package_version()}"
     assert resolved["environment_text"].startswith("# Your environment")
     connections = {c["name"]: c for c in resolved["connections"]}
     assert list(connections) == ["docs", "sentry", "github", "files"]

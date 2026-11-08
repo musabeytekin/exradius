@@ -32,8 +32,6 @@ log = logging.getLogger(__name__)
 class TaskIntake:
     run_id: uuid.UUID | None
     events: list[PendingEvent] = field(default_factory=list)
-    memory: int = 0
-    """What the run reserves, from the config intake read (docs/run-environment.md §4)."""
     config_read: bool = False
     """Intake read the project's config and stored the snapshot, so the directory may have
     changed (docs/integration-api.md §3)."""
@@ -65,7 +63,7 @@ async def accept_task(
     body: bytes,
     *,
     box: SecretBox,
-    data_dir: Path,
+    cache_dir: Path,
     router: routing.Router | None = None,
 ) -> TaskIntake:
     """Persist a valid task for a runnable project, or record its rejection. The project's
@@ -117,7 +115,7 @@ async def accept_task(
         if project is None:
             return await rejected(f"unknown project {message.project!r}")
         # The agent must exist in the project's current config (config-repo.md §1, §3).
-        snapshot = await read_config(session, box, data_dir, project)
+        snapshot = await read_config(session, box, cache_dir, project)
         remember(project, snapshot)
         config_read = True
         health = await assess(session, project, snapshot)
@@ -181,9 +179,7 @@ async def accept_task(
             await session.rollback()
             return await rejected(f"duplicate task_id {message.task_id!r}")
         log.info("accepted task %s as run %s", task.id, run.id)
-        return TaskIntake(
-            run_id=run.id, events=[event], memory=config.memory_reservation(), config_read=True
-        )
+        return TaskIntake(run_id=run.id, events=[event], config_read=True)
 
 
 @dataclass

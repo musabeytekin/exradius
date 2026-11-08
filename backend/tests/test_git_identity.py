@@ -1,5 +1,7 @@
-"""Agent identity (docs/agent-identity.md): the git config and hook a run gets, real commits
-with the identity and trailers, and pushes through the credential helper."""
+"""Agent identity (docs/agent-identity.md): the git variables a Run's workstation gets
+(``worker/git_identity.py``), the git config and hooks the runner and the bundle write
+(``runner/gitconfig.py``), real commits with the identity and trailers, and pushes through
+the credential helper."""
 
 from __future__ import annotations
 
@@ -14,12 +16,15 @@ from pathlib import Path
 
 import pytest
 
+from exradius.git import RepoSpec
 from exradius.models import SecretStore, SecretStoreEntry
-from exradius.worker import git_identity, prepare
-from exradius.worker.git_identity import Identity, prepare_git
+from exradius.runner import gitconfig
+from exradius.worker import git_identity
+from exradius.worker.git_identity import Identity, workstation_git
 from exradius.worker.intake import accept_answer
-from tests.conftest import BASE_CONFIG, commit_config
-from tests.test_run_manager import containers, manager, published, runner, states, submit_task  # noqa: F401
+from tests.conftest import BASE_CONFIG, commit_config, git
+from tests.test_run_manager import cluster, manager, published, states, submit_task  # noqa: F401
+from tests.fakes import runner
 
 IDENTITY = Identity(name='Bug "Fixer" Bot', email="bug-fixer@agents.example", agent="bug-fixer", task_id="T-42")
 
@@ -29,35 +34,47 @@ def run_git(*args, cwd: Path, env: dict[str, str], check=True) -> subprocess.Com
 
 
 def container_env(home: Path, extra: dict[str, str]) -> dict[str, str]:
-    """What a run container's shell would have: an empty home, no system git config of the
-    host, no terminal to prompt on, plus what the worker adds."""
+    """What the workstation's shell would have: an empty home, no system git config of the
+    host, no terminal to prompt on, plus what the Run spec adds."""
     home.mkdir(exist_ok=True)
     return {"PATH": os.environ["PATH"], "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
             **extra}
 
 
+def resolve(entries: list[dict[str, str]], secret: dict[str, str]) -> dict[str, str]:
+    """Env entries as the kubelet resolves them (``secretKey`` from the per-run Secret)."""
+    return {e["name"]: e["value"] if "value" in e else secret[e["secretKey"]] for e in entries}
+
+
 # Contents ---------------------------------------------------------------------------------------
 
 
-def test_config_hook_and_environment(tmp_path):
+def test_workstation_git_environment():
     repos = [
-        prepare.RepoSpec("api", "https://git.example/acme/api.git", "main", "ghp_token", push_allowed=True),
-        prepare.RepoSpec("docs", "https://git.example/acme/docs.git", "main", "deploy:s3cret", push_allowed=True),
-        prepare.RepoSpec("readonly", "https://git.example/acme/ro.git", "main", "ghp_other", push_allowed=False),
-        prepare.RepoSpec("ssh", "git@git.example:acme/ssh.git", "main", "key", push_allowed=True),
+        RepoSpec("api", "https://git.example/acme/api.git", "main", "ghp_token", push_allowed=True),
+        RepoSpec("docs", "https://git.example/acme/docs.git", "main", "deploy:s3cret", push_allowed=True),
+        RepoSpec("readonly", "https://git.example/acme/ro.git", "main", "ghp_other", push_allowed=False),
+        RepoSpec("ssh", "git@git.example:acme/ssh.git", "main", "key", push_allowed=True),
     ]
-    env = prepare_git(tmp_path, IDENTITY, repos, state_mount="/exradius/state")
+    entries, secret = workstation_git(IDENTITY, repos)
+    # Only push-allowed http(s) remotes with a secret; the token part, under push.<N>.
+    assert secret == {"push.0": "ghp_token", "push.1": "s3cret"}
+    assert [e for e in entries if "secretKey" in e] == [
+        {"name": "EXRADIUS_GIT_CREDENTIAL_0", "secretKey": "push.0"},
+        {"name": "EXRADIUS_GIT_CREDENTIAL_1", "secretKey": "push.1"},
+    ]
+    assert "ghp_token" not in json.dumps(entries) and "s3cret" not in json.dumps(entries)  # the spec is secret-free
+    env = resolve(entries, secret)
     assert env == {
         "GIT_AUTHOR_NAME": 'Bug "Fixer" Bot', "GIT_AUTHOR_EMAIL": "bug-fixer@agents.example",
         "GIT_COMMITTER_NAME": 'Bug "Fixer" Bot', "GIT_COMMITTER_EMAIL": "bug-fixer@agents.example",
         "GIT_CONFIG_GLOBAL": "/exradius/state/git/config",
         "EXRADIUS_AGENT": "bug-fixer", "EXRADIUS_TASK_ID": "T-42",
-        # N is the repository's index; only push-allowed http(s) remotes with a secret.
         "EXRADIUS_GIT_CREDENTIAL_0": "ghp_token", "EXRADIUS_GIT_CREDENTIAL_1": "s3cret",
         # The hooks path and the helpers at the command-line level, where no file overrides them.
         "GIT_CONFIG_COUNT": "7",
         "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*",
-        "GIT_CONFIG_KEY_1": "core.hooksPath", "GIT_CONFIG_VALUE_1": "/exradius/state/git-hooks",
+        "GIT_CONFIG_KEY_1": "core.hooksPath", "GIT_CONFIG_VALUE_1": "/opt/exradius/runtime/git-hooks",
         "GIT_CONFIG_KEY_2": "credential.https://git.example.useHttpPath", "GIT_CONFIG_VALUE_2": "true",
         "GIT_CONFIG_KEY_3": "credential.https://git.example/acme/api.git.helper", "GIT_CONFIG_VALUE_3": "",
         "GIT_CONFIG_KEY_4": "credential.https://git.example/acme/api.git.helper",
@@ -68,52 +85,84 @@ def test_config_hook_and_environment(tmp_path):
         "GIT_CONFIG_VALUE_6": '!f() { test "$1" = get || exit 0; echo "username=deploy"; '
                               'echo "password=$EXRADIUS_GIT_CREDENTIAL_1"; }; f',
     }
+
+
+def test_setup_containers_get_safe_directory_only():
+    assert git_identity.setup_git() == [
+        {"name": "GIT_CONFIG_COUNT", "value": "1"},
+        {"name": "GIT_CONFIG_KEY_0", "value": "safe.directory"},
+        {"name": "GIT_CONFIG_VALUE_0", "value": "*"},
+    ]
+
+
+def test_config_files_and_hooks(tmp_path):
+    gitconfig.write_git_config(tmp_path, IDENTITY.name, IDENTITY.email)
     managed = (tmp_path / "git" / "exradius.gitconfig").read_text()
     assert '\tname = "Bug \\"Fixer\\" Bot"\n' in managed
     assert '\temail = "bug-fixer@agents.example"\n' in managed
     assert "[push]\n\tautoSetupRemote = true\n" in managed and "[init]\n\tdefaultBranch = main\n" in managed
-    # Nothing a repository-local value could override lives in a file any more.
+    # Nothing a repository-local value could override lives in a file.
     assert "[core]" not in managed and "[credential" not in managed
-    # Secrets never land on disk, only the variable names.
-    for secret in ("ghp_token", "s3cret", "ghp_other"):
-        assert secret not in managed and secret not in (tmp_path / "git-hooks" / "pre-commit").read_text()
-
     assert (tmp_path / "git" / "config").read_text().endswith("[include]\n\tpath = exradius.gitconfig\n")
-    hooks = sorted(p.name for p in (tmp_path / "git-hooks").iterdir())
-    assert hooks == sorted(git_identity.HOOK_NAMES) and "push-to-checkout" not in hooks
+
+    hooks_dir = tmp_path / "git-hooks"
+    gitconfig.write_hooks(hooks_dir)
+    hooks = sorted(p.name for p in hooks_dir.iterdir())
+    assert hooks == sorted(gitconfig.HOOK_NAMES) and "push-to-checkout" not in hooks
     for name in hooks:
-        hook = tmp_path / "git-hooks" / name
-        assert hook.read_text() == git_identity.DISPATCHER and os.access(hook, os.X_OK)
-    assert '--trailer "Exradius-Task: $EXRADIUS_TASK_ID"' in git_identity.DISPATCHER
+        hook = hooks_dir / name
+        assert hook.read_text() == gitconfig.DISPATCHER and os.access(hook, os.X_OK)
+    assert '--trailer "Exradius-Task: $EXRADIUS_TASK_ID"' in gitconfig.DISPATCHER
 
 
 def test_global_config_is_kept_and_managed_config_rewritten(tmp_path):
-    prepare_git(tmp_path, IDENTITY, [], state_mount="/s")
+    gitconfig.write_git_config(tmp_path, IDENTITY.name, IDENTITY.email)
     global_file = tmp_path / "git" / "config"
     global_file.write_text(global_file.read_text() + "[alias]\n\tst = status\n")  # the agent's own setting
-    prepare_git(tmp_path, Identity("Renamed", "new@agents.example", "bug-fixer", "T-42"), [], state_mount="/s")
+    gitconfig.write_git_config(tmp_path, "Renamed", "new@agents.example")
     assert "st = status" in global_file.read_text()
     assert '"Renamed"' in (tmp_path / "git" / "exradius.gitconfig").read_text()
+
+
+def test_the_runner_writes_the_git_config_at_start(tmp_path):
+    from exradius.runner import main as runner_main
+
+    runner_main._git_config(tmp_path, {"GIT_AUTHOR_NAME": "Bot", "GIT_AUTHOR_EMAIL": "bot@agents.example"})
+    assert '"Bot"' in (tmp_path / "git" / "exradius.gitconfig").read_text()
+    runner_main._git_config(tmp_path / "none", {})  # a verify pod has no identity: nothing written
+    assert not (tmp_path / "none").exists()
 
 
 # Real git ---------------------------------------------------------------------------------------
 
 
+class Pod:
+    """A clone and the state and bundle directories, as the pod mounts them, with the
+    workstation's git variables pointed at them."""
+
+    def __init__(self, root: Path, remote: Path, repos: list[RepoSpec] = ()):
+        self.work = root / "work"
+        self.state = root / "state"
+        self.hooks = root / "runtime" / "git-hooks"
+        self.app = self.work / "app"
+        self.work.mkdir(parents=True)
+        git("clone", "-q", str(remote), str(self.app))
+        gitconfig.write_hooks(self.hooks)
+        gitconfig.write_git_config(self.state, IDENTITY.name, IDENTITY.email)
+        entries, secret = workstation_git(IDENTITY, list(repos))
+        env = resolve(entries, secret)
+        env = {k: v.replace(git_identity.HOOKS_PATH, str(self.hooks)).replace(
+            git_identity.GLOBAL_CONFIG, str(self.state / "git" / "config")) for k, v in env.items()}
+        self.env = container_env(root / "home", env)
+
+
 @pytest.fixture
-def prepared_run(tmp_path, remote_repo):
-    """A run directory prepared as the worker does: mirror, clone, then the git files, with
-    the state mount at its host path."""
-    data_dir = tmp_path / "data"
-    paths = prepare.create_run_directory(data_dir, "run-1")
-    repo = prepare.RepoSpec("app", str(remote_repo), "main")
-    prepare.checkout_repositories(data_dir, "proj", paths, [repo])
-    return paths
+def pod(tmp_path, remote_repo):
+    return Pod(tmp_path / "pod", remote_repo)
 
 
-def test_commit_gets_identity_and_trailers(prepared_run, tmp_path):
-    paths = prepared_run
-    env = container_env(tmp_path / "home", prepare_git(paths.state, IDENTITY, [], state_mount=str(paths.state)))
-    app = paths.project / "app"
+def test_commit_gets_identity_and_trailers(pod, tmp_path):
+    env, app = pod.env, pod.app
     (app / "fix.txt").write_text("fixed\n")
     run_git("add", "fix.txt", cwd=app, env=env)
     run_git("commit", "-m", "Fix the invoices", cwd=app, env=env)
@@ -128,13 +177,13 @@ def test_commit_gets_identity_and_trailers(prepared_run, tmp_path):
     message = run_git("log", "-1", "--format=%B", cwd=app, env=env).stdout
     assert message.count("Exradius-Task:") == 1 and message.count("Exradius-Agent:") == 1
 
-    # Without the worker's variables git falls back to the config file alone.
+    # Without the identity variables git falls back to the config file alone.
     bare = {k: v for k, v in env.items() if not k.startswith("GIT_AUTHOR") and not k.startswith("GIT_COMMITTER")}
     assert run_git("config", "user.email", cwd=app, env=bare).stdout.strip() == "bug-fixer@agents.example"
-    # `git config --global` writes the kept file in the state mount, not the home.
+    # `git config --global` writes the kept file in the state directory, not the home.
     run_git("config", "--global", "alias.st", "status", cwd=app, env=env)
-    assert "st = status" in (paths.state / "git" / "config").read_text()
-    assert not (tmp_path / "home" / ".gitconfig").exists()
+    assert "st = status" in (pod.state / "git" / "config").read_text()
+    assert not (tmp_path / "pod" / "home" / ".gitconfig").exists()
 
 
 def _hook(path: Path, body: str) -> None:
@@ -143,12 +192,10 @@ def _hook(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def test_project_hooks_run_after_the_exradius_part(prepared_run, tmp_path):
+def test_project_hooks_run_after_the_exradius_part(pod, tmp_path):
     """A repository-local core.hooksPath (husky's prepare script writes one) neither drops
     the trailers nor stops the project's own hooks."""
-    paths = prepared_run
-    env = container_env(tmp_path / "home", prepare_git(paths.state, IDENTITY, [], state_mount=str(paths.state)))
-    app = paths.project / "app"
+    env, app = pod.env, pod.app
     run_git("config", "core.hooksPath", ".husky/_", cwd=app, env=env)  # as `husky` does
     ran = tmp_path / "ran.log"
     _hook(app / ".husky" / "_" / "pre-commit", f'echo "pre-commit $(git rev-parse --show-toplevel)" >> {ran}\n')
@@ -164,10 +211,8 @@ def test_project_hooks_run_after_the_exradius_part(prepared_run, tmp_path):
     assert ran.read_text().splitlines() == [f"pre-commit {app.resolve()}", "commit-msg COMMIT_EDITMSG"]
 
 
-def test_a_failing_project_hook_fails_the_commit(prepared_run, tmp_path):
-    paths = prepared_run
-    env = container_env(tmp_path / "home", prepare_git(paths.state, IDENTITY, [], state_mount=str(paths.state)))
-    app = paths.project / "app"
+def test_a_failing_project_hook_fails_the_commit(pod):
+    env, app = pod.env, pod.app
     run_git("config", "core.hooksPath", ".husky/_", cwd=app, env=env)
     _hook(app / ".husky" / "_" / "pre-commit", 'echo "lint-staged: 1 error" >&2\nexit 3\n')
     (app / "bad.txt").write_text("bad\n")
@@ -177,12 +222,10 @@ def test_a_failing_project_hook_fails_the_commit(prepared_run, tmp_path):
     assert run_git("rev-list", "--count", "HEAD", cwd=app, env=env).stdout.strip() == "1"  # nothing committed
 
 
-def test_default_hooks_folder_and_stdin(prepared_run, tmp_path):
+def test_default_hooks_folder_and_stdin(pod, tmp_path):
     """Without a configured hooks path the project's hooks are in .git/hooks; hooks that
     read stdin (pre-push, reference-transaction) get it unchanged."""
-    paths = prepared_run
-    env = container_env(tmp_path / "home", prepare_git(paths.state, IDENTITY, [], state_mount=str(paths.state)))
-    app = paths.project / "app"
+    env, app = pod.env, pod.app
     seen = tmp_path / "stdin.log"
     _hook(app / ".git" / "hooks" / "post-commit", f'echo post-commit >> {seen}\n')
     _hook(app / ".git" / "hooks" / "reference-transaction", f'[ "$1" = committed ] && cat >> {seen}\nexit 0\n')
@@ -193,9 +236,7 @@ def test_default_hooks_folder_and_stdin(prepared_run, tmp_path):
     assert "post-commit" in lines
     assert any(line.endswith(" refs/heads/main") for line in lines)
     # A project env that sets its own command-line config cannot reach the container.
-    from exradius.worker import git_identity as gi
-
-    assert gi.without_command_line_config({"GIT_CONFIG_COUNT": "0", "GIT_CONFIG_KEY_0": "x", "A": "1"}) == {"A": "1"}
+    assert git_identity.without_command_line_config({"GIT_CONFIG_COUNT": "0", "GIT_CONFIG_KEY_0": "x", "A": "1"}) == {"A": "1"}
 
 
 class GitHttpServer:
@@ -273,14 +314,13 @@ def _commit(app: Path, env: dict[str, str]) -> None:
 
 
 @pytest.mark.parametrize("push_allowed", [True, False])
-def test_push_through_the_credential_helper(prepared_run, http_remote, tmp_path, push_allowed):
+def test_push_through_the_credential_helper(http_remote, remote_repo, tmp_path, push_allowed):
     server, bare = http_remote
-    paths = prepared_run
-    app = paths.project / "app"
     url = f"{server.url}/app.git"
-    run_git("remote", "set-url", "origin", url, cwd=app, env={"PATH": os.environ["PATH"]})  # as the worker's clone
-    repo = prepare.RepoSpec("app", url, "main", "deploy:push-token", push_allowed=push_allowed)
-    env = container_env(tmp_path / "home", prepare_git(paths.state, IDENTITY, [repo], state_mount=str(paths.state)))
+    repo = RepoSpec("app", url, "main", "deploy:push-token", push_allowed=push_allowed)
+    pod = Pod(tmp_path / "pod", remote_repo, [repo])
+    env, app = pod.env, pod.app
+    run_git("remote", "set-url", "origin", url, cwd=app, env={"PATH": os.environ["PATH"]})  # as the clone step does
     run_git("checkout", "-b", "agent/fix", cwd=app, env=env)
     _commit(app, env)
 
@@ -302,7 +342,8 @@ def test_push_through_the_credential_helper(prepared_run, http_remote, tmp_path,
 # Through the run manager --------------------------------------------------------------------------
 
 
-async def test_every_container_start_gets_the_identity(manager, sessions, store, containers, published, configured, box, monkeypatch, accept):
+async def test_every_session_of_a_run_has_the_identity(manager, sessions, store, cluster, published, configured, box,
+                                                       accept):
     commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + (
         "secret_store: billing\nrepositories:\n"
         "  - {name: app, url: 'https://git.example/acme/app.git', branch: main, credential: '${secret:GIT_TOKEN}', push: true}\n"
@@ -313,28 +354,24 @@ async def test_every_container_start_gets_the_identity(manager, sessions, store,
         await session.flush()
         session.add(SecretStoreEntry(store_id=secret_store.id, key="GIT_TOKEN", value_encrypted=box.encrypt("ghp_push")))
         await session.commit()
-
-    monkeypatch.setattr(prepare, "checkout_repositories", lambda *a, **k: None)  # no real remote here
     seen = []
 
     def check(run, env):
-        state = containers.started[-1]["paths"].state
-        seen.append({**{k: env.get(k) for k in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_EMAIL", "EXRADIUS_AGENT",
-                                                "EXRADIUS_TASK_ID", "EXRADIUS_GIT_CREDENTIAL_0", "GIT_CONFIG_GLOBAL")},
-                     "hook": (state / "git-hooks" / "prepare-commit-msg").exists(),
-                     "config": (state / "git" / "exradius.gitconfig").exists()})
+        seen.append({k: env.get(k) for k in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_EMAIL", "EXRADIUS_AGENT",
+                                             "EXRADIUS_TASK_ID", "EXRADIUS_GIT_CREDENTIAL_0", "GIT_CONFIG_GLOBAL")})
 
     run_id = await submit_task(accept, published)
-    containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Which region?", check=check))
+    cluster.behaviours.append(runner(sessions, status="waiting_for_input", question="Which region?", check=check))
     await manager.execute(run_id)
     [info] = [e for e in published if e.type == "info_request"]
     answer = json.dumps({"version": 1, "task_id": "T-1", "request_id": info.payload["request_id"], "answer": "eu"})
     await accept_answer(sessions, store, answer.encode())
-    containers.behaviours.append(runner(sessions, check=check))
+    cluster.behaviours.append(runner(sessions, check=check))
     await manager.resume(run_id)
+    await cluster.idle()
 
     assert states(published)[-1] == "completed"
     expected = {"GIT_AUTHOR_NAME": "Bug Fixer Bot", "GIT_COMMITTER_EMAIL": "bug-fixer@agents.example",
                 "EXRADIUS_AGENT": "bug-fixer", "EXRADIUS_TASK_ID": "T-1", "EXRADIUS_GIT_CREDENTIAL_0": "ghp_push",
-                "GIT_CONFIG_GLOBAL": "/exradius/state/git/config", "hook": True, "config": True}
-    assert seen == [expected, expected]  # first start and the resume
+                "GIT_CONFIG_GLOBAL": "/exradius/state/git/config"}
+    assert seen == [expected, expected]  # the first session and the resumed one, in the same pod

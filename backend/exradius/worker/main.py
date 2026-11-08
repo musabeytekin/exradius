@@ -1,4 +1,11 @@
-"""``exradius-worker``: consume tasks and answers, run agents, publish events."""
+"""``exradius-worker``: consume tasks, answers and control messages, drive Runs, publish events.
+
+The worker holds the master key, Postgres and the broker, and in Kubernetes it may only ask
+for Runs and write their Secrets (docs/kubernetes.md §3). It never creates pods: the
+operator does. It watches the Runs in the runs namespace and settles each run from its
+Run's status and from what the runner reported, which the api announces with a
+``run_reported`` control message; a sweep every 15 s catches anything missed.
+"""
 
 from __future__ import annotations
 
@@ -13,53 +20,56 @@ from sqlalchemy import update
 
 from exradius import directory, messaging
 from exradius.config import Settings, get_settings
-from exradius.routing import Router
 from exradius.db import make_engine, make_session_factory
 from exradius.models import Event, utcnow
+from exradius.routing import Router
 from exradius.storage import make_store
-from exradius.schemas.project_config import format_memory, memory_bytes
-from exradius.worker.containers import ContainerManager
-from exradius.worker.memory import HEADROOM
+from exradius.worker import run_objects
+from exradius.worker.heartbeat import Heartbeat, operator_status, runtimes
 from exradius.worker.intake import accept_answer, accept_task
+from exradius.worker.kube import Cluster, Gone, KubeCluster
 from exradius.worker.lifecycle import PendingEvent
-from exradius.worker.heartbeat import Heartbeat
 from exradius.worker.presence import make_presence, new_worker_id
 from exradius.worker.provider_test import ProviderTester
-from exradius.worker.verify import ProjectVerifier
 from exradius.worker.runs import RunManager
+from exradius.worker.verify import ProjectVerifier
 
 log = logging.getLogger("exradius.worker")
 
-TARGET_KEYS = {"cancel": "run_id", "verify": "verification_id", "test_provider": "test_id"}
+TARGET_KEYS = {"cancel": "run_id", "verify": "verification_id", "test_provider": "test_id", "run_reported": "run_id"}
 """Control actions and the key of the id each one carries."""
+SWEEP_SECONDS = 15
 
 
 class Worker:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, cluster: Cluster | None = None):
         self.settings = settings
         self.engine = make_engine(settings.database_url)
         self.sessions = make_session_factory(self.engine)
         self.store = make_store(settings)
         self.publisher: messaging.EventPublisher | None = None
         # Concurrency is the prefetch count: a task message stays unacknowledged (and is
-        # not persisted) until a slot is free, so the broker holds the backlog.
+        # not persisted) until a slot is free, so the broker holds the backlog. A slot is
+        # held while a run prepares, runs or resumes; a waiting run gives it back.
         self.slots = asyncio.Semaphore(settings.worker_concurrency)
-        self.containers = ContainerManager(settings)
-        self.runs = RunManager(settings, self.sessions, self.store, self.containers, self.emit)
+        self.cluster = cluster or KubeCluster(settings.runs_namespace, settings.kube_api_url)
+        self.runs = RunManager(settings, self.sessions, self.store, self.cluster, self.emit)
         self.router = Router(settings.openai_base_url)
         self.verifier = ProjectVerifier(self.runs)
         self.provider_tester = ProviderTester(self.runs)
         self._background: set[asyncio.Task] = set()
         self.worker_id = new_worker_id()
-        self.runs.worker_id = self.worker_id
         self.runs.check_directory = self.check_directory
+        self.runs.spawn = self._spawn
+        self.runs.resume_later = lambda run_id: self._spawn(self._resume(run_id))
         self.presence = make_presence(self.engine, self.worker_id)
         self.heartbeat = Heartbeat(
-            self.sessions,
-            self.containers,
-            worker_id=self.worker_id,
-            concurrency=settings.worker_concurrency,
+            self.sessions, worker_id=self.worker_id, concurrency=settings.worker_concurrency, report=self.report,
         )
+        self.runs.other_workers_alive = self.heartbeat.others_alive
+
+    async def report(self) -> dict:
+        return {"runtimes": runtimes(self.settings), "operator": await operator_status(self.cluster, self.settings)}
 
     async def emit(self, events: list[PendingEvent]) -> None:
         assert self.publisher is not None
@@ -71,9 +81,7 @@ class Worker:
                 log.exception("could not publish %s for task %s", pending.envelope.routing_key, pending.envelope.task_id)
                 continue
             async with self.sessions() as session:
-                await session.execute(
-                    update(Event).where(Event.id == pending.id).values(published_at=utcnow())
-                )
+                await session.execute(update(Event).where(Event.id == pending.id).values(published_at=utcnow()))
                 await session.commit()
 
     async def check_directory(self) -> None:
@@ -95,7 +103,7 @@ class Worker:
         async with self.slots:
             try:
                 intake = await accept_task(
-                    self.sessions, self.store, message.body, box=self.runs.box, data_dir=self.settings.data_dir,
+                    self.sessions, self.store, message.body, box=self.runs.box, cache_dir=self.settings.cache_dir,
                     router=self.router,
                 )
             except Exception:
@@ -108,7 +116,7 @@ class Worker:
             if intake.config_read:
                 await self.check_directory()
             if intake.run_id is not None:
-                await self.runs.execute(intake.run_id, intake.memory)
+                await self.runs.execute(intake.run_id)
 
     async def on_answer(self, message: AbstractIncomingMessage) -> None:
         try:
@@ -126,13 +134,10 @@ class Worker:
         async with self.slots:
             await self.runs.resume(run_id)
 
-    async def _execute_waiting(self, run_id: uuid.UUID, memory: int) -> None:
+    async def _hold(self, run_id: uuid.UUID) -> None:
+        """A run this worker took over at start: its slot until it waits or ends."""
         async with self.slots:
-            await self.runs.execute(run_id, memory)
-
-    async def _reattach(self, run_id: uuid.UUID, container_id: str) -> None:
-        async with self.slots:
-            await self.runs.reattach(run_id, container_id)
+            await self.runs.hold(run_id)
 
     async def _verify(self, verification_id: uuid.UUID) -> None:
         async with self.slots:
@@ -148,46 +153,6 @@ class Worker:
             except Exception:
                 log.exception("provider test %s crashed", test_id)
 
-    async def recover(self) -> None:
-        """Crash recovery before consuming: re-attach to or fail runs that a dead
-        worker left mid-flight, sweep orphaned run directories, and resume waiting runs
-        whose answer arrived while no worker could act on it."""
-        for run_id, container_id in await self.runs.reconcile(self.presence.is_alive):
-            self._spawn(self._reattach(run_id, container_id))
-        for run_id, memory in await self.runs.waiting_runs(self.presence.is_alive):
-            self._spawn(self._execute_waiting(run_id, memory))
-        await self.verifier.reconcile(self.presence.is_alive)
-        await self.provider_tester.reconcile(self.presence.is_alive)
-        removed = await self.runs.sweep_orphans()
-        if removed:
-            log.info("removed %d orphaned run directories", len(removed))
-        for run_id in await self.runs.resumable_runs():
-            self._spawn(self._resume(run_id))
-
-    async def set_memory_budget(self) -> None:
-        """``EXRADIUS_RUN_MEMORY_BUDGET``, else the Docker daemon's memory less 1 GiB. A
-        daemon that does not answer leaves the budget unknown: nothing waits."""
-        if self.settings.run_memory_budget:
-            budget = memory_bytes(self.settings.run_memory_budget)
-        else:
-            try:
-                total = int((await asyncio.to_thread(self.containers.client.info)).get("MemTotal") or 0)
-            except Exception:  # noqa: BLE001 - reported, the worker still starts
-                log.exception("could not read the Docker daemon's memory; reservations are not enforced")
-                return
-            budget = max(total - HEADROOM, 0) or None
-        self.runs.memory.budget = budget
-        log.info("memory budget for runs: %s", format_memory(budget) if budget else "unknown")
-
-    async def prepare_runtimes(self) -> None:
-        """Extract the runtime bundles now rather than at the first run, and remove the
-        volumes of older bundles that no container uses."""
-        await self.containers.bundles.ensure_all()
-        try:
-            await self.containers.bundles.remove_unused()
-        except Exception:  # noqa: BLE001 - cleanup only; retried at the next start
-            log.exception("could not remove old runtime bundle volumes")
-
     async def on_control(self, message: AbstractIncomingMessage) -> None:
         async with message.process(requeue=False):
             try:
@@ -200,6 +165,8 @@ class Worker:
             if action == "cancel":
                 log.info("cancelling run %s", target)
                 self._spawn(self.runs.cancel(target))
+            elif action == "run_reported":
+                self._spawn(self.runs.settle(target))
             elif action == "verify":
                 # Claimed before the ack, so a crash leaves a detectable owner.
                 if await self.verifier.claim(target, self.worker_id):
@@ -210,11 +177,70 @@ class Worker:
                     log.info("testing provider (test %s)", target)
                     self._spawn(self._test_provider(target))
 
+    # -- Runs -------------------------------------------------------------------------------
+
+    async def recover(self) -> None:
+        """Before consuming (§4): settle every unfinished run from its Run, fail the ones
+        whose Run is gone, delete Runs nothing owns, fail verifications and provider tests
+        a dead worker held, and resume waiting runs whose answer arrived meanwhile."""
+        for run_id in await self.runs.recover():
+            self._spawn(self._hold(run_id))
+        await self.verifier.reconcile(self.presence.is_alive, self.worker_id)
+        await self.provider_tester.reconcile(self.presence.is_alive, self.worker_id)
+        await self._delete_stray_runs()
+        for run_id in await self.runs.resumable_runs():
+            self._spawn(self._resume(run_id))
+
+    async def _delete_stray_runs(self) -> None:
+        """Verify and probe Runs whose verification or test is no longer open."""
+        items, _ = await self.cluster.list_runs()
+        open_verifications = await self.verifier.open_ids()
+        open_tests = await self.provider_tester.open_ids()
+        for obj in items:
+            name = obj.get("metadata", {}).get("name", "")
+            parsed = run_objects.parse_name(name)
+            if parsed is None:
+                continue
+            purpose, object_id = parsed
+            if (purpose == "verify" and object_id not in open_verifications) or \
+                    (purpose == "probe" and object_id not in open_tests):
+                log.warning("deleting Run %s: nothing owns it", name)
+                await self.runs._delete_run(name)
+
+    async def watch(self) -> None:
+        """List, then watch the Runs, forever; every event settles its run."""
+        while True:
+            try:
+                items, version = await self.cluster.list_runs()
+                for obj in items:
+                    await self.runs.on_event("ADDED", obj)
+                async for kind, obj in self.cluster.watch_runs(version):
+                    if kind == "BOOKMARK":
+                        continue
+                    self._spawn(self.runs.on_event(kind, obj))
+            except Gone:
+                continue  # list again
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - the API server restarted, a network blip
+                log.exception("watching Runs failed; listing again in 2 s")
+                await asyncio.sleep(2)
+
+    async def sweep(self) -> None:
+        while True:
+            await asyncio.sleep(SWEEP_SECONDS)
+            try:
+                await self.runs.sweep()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - the next sweep retries
+                log.exception("sweep failed")
+
     # -- lifecycle ------------------------------------------------------------------------
 
     async def start(self) -> None:
         await self.store.ensure_bucket()
-        connection = await messaging.connect(self.settings.broker_url)
+        connection = await messaging.connect(self.settings.effective_broker_url)
         async with connection:
             tasks_channel = await connection.channel()
             await tasks_channel.set_qos(prefetch_count=self.settings.worker_concurrency)
@@ -228,19 +254,17 @@ class Worker:
             control_queue = await other_channel.declare_queue(messaging.CONTROL_QUEUE, durable=True)
 
             await self.presence.start()
-            await self.set_memory_budget()
-            await self.prepare_runtimes()
             self.heartbeat.start()
             await self.recover()
+            watcher = asyncio.create_task(self.watch())
+            sweeper = asyncio.create_task(self.sweep())
 
             await tasks_queue.consume(self.on_task)
             await answers_queue.consume(self.on_answer)
             await control_queue.consume(self.on_control)
             log.info(
-                "worker %s ready (concurrency %s, data dir %s)",
-                self.worker_id[:8],
-                self.settings.worker_concurrency,
-                self.settings.data_dir,
+                "worker %s ready (concurrency %s, Runs in %s)",
+                self.worker_id[:8], self.settings.worker_concurrency, self.settings.runs_namespace,
             )
             stop = asyncio.Event()
             loop = asyncio.get_running_loop()
@@ -248,6 +272,8 @@ class Worker:
                 loop.add_signal_handler(sig, stop.set)
             await stop.wait()
             log.info("shutting down")
+            watcher.cancel()
+            sweeper.cancel()
         await self.heartbeat.stop()
         await self.presence.stop()
         await self.engine.dispose()
@@ -257,6 +283,7 @@ def run() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("aio_pika").setLevel(logging.WARNING)
     logging.getLogger("aiormq").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     asyncio.run(Worker(get_settings()).start())
 
 

@@ -1,19 +1,20 @@
 # The Claude Code runtime bundle (docs/runtime-bundles.md §2.1).
 #
-# The image holds only /opt/exradius/runtime:
+# The image's root is the bundle, which run pods see at /opt/exradius/runtime:
 #   bin/exradius-runner   launcher: runs exradius.runner on the bundle's own Python
 #   bin/claude            native Claude Code binary, pinned below (no Node)
 #   python/               relocatable CPython (python-build-standalone, glibc >= 2.17)
 #                         with exradius and the Claude Agent SDK installed
+#   git-hooks/            the hooks dispatcher under every hook name (core.hooksPath)
 #   VERSION               exradius version, runtime name, Claude Code version
 #
-# The worker copies it into a Docker volume and mounts that read-only into run containers,
-# so any glibc-based project image can run the agent. Compiled wheels are limited to
+# Run pods mount it read-only at /opt/exradius/runtime as an image volume (docs/kubernetes.md
+# §7.2), so any glibc-based project image can run the agent. Compiled wheels are limited to
 # manylinux_2_28 (glibc 2.28), which sets the oldest supported project image glibc.
 #
 # Build the bundle directory alone with `make -C deploy bundle-claude-code`.
 
-ARG EXRADIUS_VERSION=0.1.0
+ARG EXRADIUS_VERSION=0.2.0
 
 FROM debian:bookworm-slim AS build
 ARG TARGETARCH
@@ -75,6 +76,7 @@ RUN set -eu; \
 
 COPY deploy/runtime-claude-code/exradius-runner /bundle/bin/exradius-runner
 RUN set -eu; \
+    /bundle/python/bin/python3 -I -m exradius.runner.gitconfig /bundle/git-hooks; \
     printf 'exradius %s\nruntime claude_code\nclaude-code %s\n' "$EXRADIUS_VERSION" "$CLAUDE_CODE_VERSION" > /bundle/VERSION; \
     chmod -R a+rX,go-w /bundle; chmod 755 /bundle/bin/exradius-runner
 
@@ -82,9 +84,11 @@ RUN set -eu; \
 FROM scratch AS bundle
 COPY --from=build /bundle /
 
+# The image a run pod mounts as an image volume at /opt/exradius/runtime: its root is the
+# bundle (docs/kubernetes.md §7.2).
 FROM scratch
 ARG EXRADIUS_VERSION
 LABEL exradius.role="runtime-bundle" \
       exradius.runtime="claude_code" \
       exradius.version="${EXRADIUS_VERSION}"
-COPY --from=build /bundle /opt/exradius/runtime
+COPY --from=build /bundle /

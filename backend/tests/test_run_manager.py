@@ -1,163 +1,30 @@
-"""Run lifecycle end to end, with a fake container manager standing in for Docker."""
+"""Run lifecycle end to end, with a fake Kubernetes API standing in for the cluster
+(tests/fakes.py: a stand-in operator and runner)."""
 
 from __future__ import annotations
 
-import io
+import asyncio
 import json
-import tarfile
 import uuid
-from collections.abc import Awaitable, Callable
 
 import pytest
 from sqlalchemy import select
 
 from exradius import downloads
 from exradius.crypto import hash_token
-from exradius.models import Artifact, ImageBuild, InfoRequest, Run, SecretStore, SecretStoreEntry, Task, TranscriptChunk
+from exradius.models import Artifact, InfoRequest, Run, SecretStore, SecretStoreEntry, Task
 from exradius.states import State
-from exradius.worker.bundles import RuntimeMount
-from exradius.worker.containers import (
-    ContainerExit,
-    ListedTools,
-    RunContainer,
-    ServiceFailed,
-    ServiceStarted,
-    run_network_name,
-)
 from exradius.worker.intake import accept_answer
 from exradius.worker.runs import RunManager
 from tests.conftest import BASE_CONFIG, commit_config
-
-Behaviour = Callable[[uuid.UUID, dict], Awaitable[int]]
-
-
-class FakeContainers:
-    def __init__(self):
-        self.behaviours: list[Behaviour] = []
-        self.started: list[dict] = []
-        self.setup_commands: list[str] = []
-        self.setup_exit = 0
-        self.stopped: list[str] = []
-        self.removed: list[str] = []
-        self.runtimes_ensured: list[str] = []
-        self.existing: dict[str, list[RunContainer]] = {}  # containers left on the daemon
-        self._pending: dict[str, tuple[Behaviour, uuid.UUID, dict]] = {}
-        self.networks: set[str] = set()
-        self.services: dict[str, dict[str, object]] = {}  # run label -> service name -> spec
-        self.service_failures: dict[str, str] = {}  # service name -> reason
-        self.service_log: list[tuple[str, str]] = []  # (event, detail)
-        self.setup_networks: list[str | None] = []
-        self.inspect_output = ""
-        self.inspected: list[str] = []
-        self.images: set[str] = set()
-        self.builds: list[dict] = []
-        self.build_ok = True
-        self.setup_images: list[str] = []
-        self.setup_limits: list[tuple] = []  # (memory, caches) per setup command
-        self.tool_lists: dict[str, list[dict]] = {}  # connection -> tools it lists
-        self.tool_failures: dict[str, str] = {}  # connection -> why it cannot list them
-        self.listed: list[dict] = []  # every list_tools call
-
-    async def ensure_runtime(self, runtime):
-        self.runtimes_ensured.append(runtime)
-        return RuntimeMount(runtime, "0.1.0", f"exradius-runtime-{runtime}-0.1.0-test")
-
-    async def start_runner(self, *, image, run_id, paths, env, runtime, service_network=None, git_env=None,
-                           memory=None, caches=()):
-        assert paths.project.is_dir()
-        cid = f"c{len(self.started)}"
-        env = {**env, **(git_env or {})}  # what the container sees
-        self.started.append({"image": image, "run_id": run_id, "env": env, "paths": paths, "runtime": runtime,
-                             "service_network": service_network, "memory": memory, "caches": list(caches)})
-        self._pending[cid] = (self.behaviours.pop(0), uuid.UUID(run_id), env)
-        return cid
-
-    async def image_exists(self, tag):
-        return tag in self.images
-
-    async def build_image(self, context, *, dockerfile, tag, labels=None):
-        with tarfile.open(fileobj=io.BytesIO(context)) as archive:
-            files = {m.name for m in archive.getmembers()}
-        self.builds.append({"dockerfile": dockerfile, "tag": tag, "files": files})
-        if not self.build_ok:
-            return False, "Step 1/1 : FROM nothing\npull access denied for nothing\n"
-        self.images.add(tag)
-        return True, "Successfully built\n"
-
-    async def run_setup_command(self, *, image, run_id, paths, env, command, service_network=None, memory=None,
-                                caches=()):
-        self.setup_commands.append(command)
-        self.setup_limits.append((memory, list(caches)))
-        self.setup_images.append(image)
-        self.setup_networks.append(service_network)
-        return ContainerExit(self.setup_exit, "setup output\nboom" if self.setup_exit else "ok")
-
-    async def list_tools(self, *, image, run_id, paths, env, spec, runtime, service_network=None, memory=None,
-                         caches=(), timeout=60):
-        self.listed.append({"image": image, "run_id": run_id, "spec": spec, "runtime": runtime,
-                            "service_network": service_network, "env": env})
-        name = spec["name"]
-        if name in self.tool_failures:
-            return ListedTools(None, self.tool_failures[name], "npm ERR! 404 @acme/docs-mcp")
-        return ListedTools(self.tool_lists.get(name, [{"name": "search", "description": "Search."}]), None, "")
-
-    async def wait(self, container_id):
-        behaviour, run_id, env = self._pending.pop(container_id)
-        return ContainerExit(await behaviour(run_id, env), "runner log line")
-
-    async def stop_run_containers(self, run_id):
-        self.stopped.append(run_id)
-
-    async def list_run_containers(self, run_id):
-        return list(self.existing.get(run_id, []))
-
-    async def remove_containers(self, container_ids):
-        self.removed.extend(container_ids)
-        for run_id, containers in self.existing.items():
-            self.existing[run_id] = [c for c in containers if c.id not in container_ids]
-
-    async def run_network(self, run_id):
-        name = run_network_name(run_id)
-        return name if name in self.networks else None
-
-    async def create_run_network(self, run_id):
-        self.networks.add(run_network_name(run_id))
-        self.service_log.append(("network", run_id))
-        return run_network_name(run_id)
-
-    async def start_service(self, *, run_id, network, service, timeout=120):
-        assert network == run_network_name(run_id) and network in self.networks
-        running = self.services.setdefault(run_id, {})
-        if service.name in running:
-            return ServiceStarted(service.name, f"s-{service.name}", 0.0, "already running")
-        if service.name in self.service_failures:
-            raise ServiceFailed(f"service {service.name} ({service.image}) {self.service_failures[service.name]}\nlog tail")
-        running[service.name] = service
-        self.service_log.append(("start", service.name))
-        return ServiceStarted(service.name, f"s-{service.name}", 0.5, "running")
-
-    async def remove_run_services(self, run_id):
-        removed = self.services.pop(run_id, {})
-        self.networks.discard(run_network_name(run_id))
-        self.service_log.append(("remove", run_id))
-        return len(removed)
-
-    async def service_run_ids(self):
-        return set(self.services) | {n.removeprefix("exradius-run-") for n in self.networks}
-
-    async def inspect_clones(self, *, image, run_id, paths):
-        self.inspected.append(run_id)
-        return ContainerExit(0, self.inspect_output)
-
-    def leave_running(self, run_id: uuid.UUID, container_id: str, behaviour: Behaviour, kind: str = "run"):
-        """A container that outlived its worker; waiting on it runs ``behaviour``."""
-        self.existing.setdefault(str(run_id), []).append(RunContainer(container_id, kind, True))
-        self._pending[container_id] = (behaviour, run_id, {})
+from tests.fakes import FakeCluster, runner
 
 
 @pytest.fixture
-def containers():
-    return FakeContainers()
+def cluster(sessions):
+    fake = FakeCluster()
+    fake.sessions = sessions
+    return fake
 
 
 @pytest.fixture
@@ -166,11 +33,13 @@ def published():
 
 
 @pytest.fixture
-def manager(settings, sessions, store, containers, published):
+def manager(settings, sessions, store, cluster, published):
     async def emit(events):
         published.extend(e.envelope for e in events)
 
-    return RunManager(settings, sessions, store, containers, emit)
+    manager = RunManager(settings, sessions, store, cluster, emit)
+    cluster.manager = manager
+    return manager
 
 
 def states(published) -> list[str]:
@@ -190,37 +59,10 @@ async def submit_task(accept, published, task_id="T-1", **extra) -> uuid.UUID:
     return intake.run_id
 
 
-def runner(sessions, *, status="completed", summary="All fixed.", question=None, answer_early=False,
-           error=None, exit_code=0, check=None, strict=True) -> Behaviour:
-    """Simulate what the runner reports over the internal API."""
-
-    async def behaviour(run_id: uuid.UUID, env: dict) -> int:
-        async with sessions() as session:
-            run = await session.get(Run, run_id)
-            if strict:
-                assert run.token_hash == hash_token(env["EXRADIUS_RUN_TOKEN"])
-                assert run.state == State.RUNNING
-            if check:
-                check(run, env)
-            seq = await session.scalar(select(TranscriptChunk.seq).where(TranscriptChunk.run_id == run_id).order_by(TranscriptChunk.seq.desc())) or 0
-            session.add(TranscriptChunk(run_id=run_id, seq=seq + 1, payload={"type": "AssistantMessage", "n": seq + 1}))
-            if question:
-                request = InfoRequest(run_id=run_id, question=question)
-                session.add(request)
-                await session.flush()
-                if answer_early:
-                    request.answer = "early answer"
-                    request.answered_at = request.created_at
-            if status:
-                run.reported_status = status
-                run.runtime_session_id = "sess-1"
-                run.summary = summary
-                run.output = {"fixed": True} if status == "completed" else None
-                run.error = error
-            await session.commit()
-        return exit_code
-
-    return behaviour
+async def execute(manager, cluster, run_id) -> None:
+    """``execute`` returns when the run waits or ends; then every simulated pod settles."""
+    await asyncio.wait_for(manager.execute(run_id), 10)
+    await asyncio.wait_for(cluster.idle(), 10)
 
 
 async def set_config(configured, extra: str) -> str:
@@ -237,7 +79,13 @@ async def add_store(sessions, box, name: str, **values: str) -> None:
         await session.commit()
 
 
-async def test_completed_run(manager, sessions, store, containers, published, settings, configured, box, accept):
+async def answer(sessions, store, task_id, request_id, text="eu-west-1", attachments=()):
+    body = json.dumps({"version": 1, "task_id": task_id, "request_id": request_id, "answer": text,
+                       "attachments": list(attachments)}).encode()
+    return await accept_answer(sessions, store, body)
+
+
+async def test_completed_run(manager, sessions, store, cluster, published, settings, configured, box, accept):
     commit = await set_config(configured, (
         "secret_store: billing\n"
         "env:\n  LOG_LEVEL: debug\n  DB_URL: postgres://app:${secret:DB_PASSWORD}@db/app\n"
@@ -245,8 +93,8 @@ async def test_completed_run(manager, sessions, store, containers, published, se
     await add_store(sessions, box, "billing", DB_PASSWORD="hunter2", OTHER="x")
 
     run_id = await submit_task(accept, published)
-    containers.behaviours.append(runner(sessions))
-    await manager.execute(run_id)
+    cluster.behaviours.append(runner(sessions))
+    await execute(manager, cluster, run_id)
 
     assert states(published) == ["queued", "preparing", "running", "completed"]
     [result] = results(published)
@@ -259,19 +107,35 @@ async def test_completed_run(manager, sessions, store, containers, published, se
     transcript = store.objects[f"runs/{run_id}/transcript.jsonl"][0].decode().splitlines()
     assert json.loads(transcript[0])["type"] == "AssistantMessage"
 
-    env = containers.started[0]["env"]
+    [env] = cluster.envs
     assert env["ANTHROPIC_API_KEY"] == "sk-test"
     assert env["LOG_LEVEL"] == "debug" and env["DB_URL"] == "postgres://app:hunter2@db/app"
     assert "DB_PASSWORD" not in env and "OTHER" not in env  # used by reference only
     assert env["GIT_AUTHOR_NAME"] == "Bug Fixer Bot" and env["EXRADIUS_AGENT"] == "bug-fixer"
-    assert env["EXRADIUS_API_URL"] == settings.run_api_url and env["EXRADIUS_RUN_ID"] == str(run_id)
-    assert containers.started[0]["image"] == settings.project_default_image
-    assert containers.started[0]["runtime"].volume == "exradius-runtime-claude_code-0.1.0-test"
+    assert env["EXRADIUS_ID"] == str(run_id)
+
+    [created] = cluster.created
+    name = f"run-{run_id}"
+    assert created["metadata"]["name"] == name and created["metadata"]["namespace"] == settings.runs_namespace
+    assert created["metadata"]["labels"] == {
+        "exradius.dev/run": name, "exradius.dev/purpose": "task", "exradius.dev/project": "billing-platform",
+    }
+    assert created["metadata"]["annotations"] == {"exradius.dev/task-id": "T-1"}
+    spec = created["spec"]
+    assert spec["workstation"]["image"] == settings.project_default_image
+    assert spec["runtime"] == {"name": "claude_code", "image": settings.runtime_image_claude_code,
+                               "env": [{"name": "ANTHROPIC_API_KEY", "secretKey": "provider.ANTHROPIC_API_KEY"}]}
+    # The spec is secret-free: values that hold a secret are Secret keys.
+    assert spec["workstation"]["env"] == [
+        {"name": "LOG_LEVEL", "value": "debug"}, {"name": "DB_URL", "secretKey": "env.DB_URL"},
+    ]
+    assert "hunter2" not in json.dumps(spec) and "sk-test" not in json.dumps(spec)
 
     async with sessions() as session:
         run = await session.get(Run, run_id)
         assert run.state == State.COMPLETED and run.ended_at is not None
         assert run.token_hash is None  # revoked
+        assert run.run_object == name
         assert run.config_commit == commit
         assert run.config["env"]["DB_URL"] == "postgres://app:${secret:DB_PASSWORD}@db/app"  # as written
         assert run.agent_snapshot == {
@@ -279,191 +143,352 @@ async def test_completed_run(manager, sessions, store, containers, published, se
             "identity": {"name": "Bug Fixer Bot", "email": "bug-fixer@agents.example"}, "connections": ["docs"],
         }
         assert (await session.get(Task, "T-1")).state == State.COMPLETED
-    assert not containers.started[0]["paths"].root.exists()  # run directory deleted
+    assert cluster.deleted == [name] and name not in cluster.runs  # pod, workspace and Secret go with it
+    assert cluster.secrets == {}
 
 
-async def test_config_is_read_in_preparing(manager, sessions, store, containers, published, configured, accept):
+async def test_secret_is_owned_by_the_run_and_holds_the_token(
+        manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    seen = {}
+
+    async def check(rid, env):
+        name = f"run-{rid}"
+        secret = cluster.secrets[name]
+        seen["owner"] = secret["metadata"]["ownerReferences"]
+        seen["uid"] = cluster.runs[name]["metadata"]["uid"]
+        async with sessions() as session:
+            seen["token_ok"] = (await session.get(Run, rid)).token_hash == hash_token(env["EXRADIUS_RUN_TOKEN"])
+        return await runner(sessions)(rid, env)
+
+    cluster.behaviours.append(check)
+    await execute(manager, cluster, run_id)
+    assert seen["owner"] == [{"apiVersion": "exradius.dev/v1alpha1", "kind": "Run", "name": f"run-{run_id}",
+                              "uid": seen["uid"]}]
+    assert seen["token_ok"]
+
+
+async def test_config_is_read_in_preparing(manager, sessions, store, cluster, published, configured, accept):
     """A config that stops running between intake and preparing fails the run with the reason."""
     run_id = await submit_task(accept, published)
     await set_config(configured, "env:\n  X: ${secret:GONE}\nsecret_store: nowhere\n")
-    await manager.execute(run_id)
-    assert containers.started == []
+    await execute(manager, cluster, run_id)
+    assert cluster.created == []
     [result] = results(published)
-    assert result["state"] == "failed" and result["error"] == "PreparationError: secret store nowhere does not exist"
+    assert result["state"] == "failed" and result["error"] == "secret store nowhere does not exist"
 
 
-async def test_agent_removed_before_preparing(manager, sessions, store, containers, published, configured, accept):
+async def test_agent_removed_before_preparing(manager, sessions, store, cluster, published, configured, accept):
     run_id = await submit_task(accept, published, agent="scout")
     commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG.replace("  scout:\n    role: You investigate.\n", "")})
-    await manager.execute(run_id)
+    await execute(manager, cluster, run_id)
     [result] = results(published)
-    assert result["error"] == "PreparationError: agent 'scout' is no longer defined in project 'billing-platform'"
+    assert result["error"] == "agent 'scout' is no longer defined in project 'billing-platform'"
 
 
-async def test_workstation_is_built_from_the_config_repository(
-    manager, sessions, store, containers, published, configured, accept
-):
-    await set_config(configured, "workstation:\n  dockerfile: docker/Dockerfile\n  setup: [make deps]\n")
-    commit_config(configured["remote"], {"docker/Dockerfile": "FROM ubuntu:24.04\n", "docker/tools.sh": "echo\n"})
+async def test_a_dockerfile_workstation_is_not_runnable_yet(
+        manager, sessions, store, cluster, published, configured, accept):
     run_id = await submit_task(accept, published)
-    containers.behaviours.append(runner(sessions))
-    await manager.execute(run_id)
-
-    [build] = containers.builds
-    assert build["dockerfile"] == "Dockerfile" and {"Dockerfile", "tools.sh"} <= build["files"]
-    assert build["tag"].startswith("exradius/billing-platform/workstation:") and len(build["tag"].rsplit(":", 1)[1]) == 12
-    assert containers.started[0]["image"] == build["tag"]
-    assert containers.setup_images == [build["tag"]]
-    async with sessions() as session:
-        [row] = (await session.scalars(select(ImageBuild))).all()
-        assert (row.name, row.state, row.image) == ("workstation", "succeeded", build["tag"])
-
-    # Same context: no second build, even though the commit changed.
-    commit_config(configured["remote"], {"README": "unrelated\n"})
-    run_id = await submit_task(accept, published, task_id="T-2")
-    containers.behaviours.append(runner(sessions))
-    await manager.execute(run_id)
-    assert len(containers.builds) == 1 and containers.started[1]["image"] == build["tag"]
-
-
-async def test_failed_build_fails_the_run(manager, sessions, store, containers, published, configured, accept):
-    await set_config(configured, "workstation:\n  dockerfile: Dockerfile\n")
-    commit_config(configured["remote"], {"Dockerfile": "FROM nothing\n"})
-    containers.build_ok = False
-    run_id = await submit_task(accept, published)
-    await manager.execute(run_id)
+    await set_config(configured, "workstation:\n  dockerfile: docker/Dockerfile\n")
+    commit_config(configured["remote"], {"docker/Dockerfile": "FROM ubuntu:24.04\n"})
+    await execute(manager, cluster, run_id)
+    assert cluster.created == []
     [result] = results(published)
-    assert result["state"] == "failed"
-    assert result["error"].startswith("PreparationError: building workstation from Dockerfile failed:\n")
-    assert "pull access denied" in result["error"]
-    async with sessions() as session:
-        assert (await session.scalar(select(ImageBuild))).state == "failed"
+    assert result["error"] == "workstation.dockerfile needs image builds, not available yet"
 
 
-async def test_repositories_and_attachments_are_prepared(
-    manager, sessions, store, containers, published, configured, remote_repo, accept
-):
-    await set_config(configured, f"repositories:\n  - {{name: app, url: {remote_repo}, branch: feature}}\n")
-
-async def test_info_request_waits_and_resumes(manager, sessions, store, containers, published, configured, accept):
+async def test_repositories_and_setup_go_into_the_spec(
+        manager, sessions, store, cluster, published, configured, box, accept):
+    await set_config(configured, (
+        "secret_store: billing\n"
+        "resources: {memory: 6g}\n"
+        "workstation:\n  image: acme/node:22\n  setup: [npm ci, make check]\n"
+        "repositories:\n"
+        "  - {name: app, url: 'https://git.example/acme/app.git', branch: feature, credential: '${secret:GIT}', push: true}\n"
+        "  - {name: docs, url: 'https://git.example/acme/docs.git'}\n"
+    ))
+    await add_store(sessions, box, "billing", GIT="ghp_token")
     run_id = await submit_task(accept, published)
-    containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Which region?"))
-    await manager.execute(run_id)
+    cluster.behaviours.append(runner(sessions))
+    await execute(manager, cluster, run_id)
+
+    spec = cluster.created[0]["spec"]
+    assert spec["workstation"]["image"] == "acme/node:22"
+    assert spec["workstation"]["setup"] == ["npm ci", "make check"]
+    assert spec["workstation"]["memory"] == "6Gi"
+    assert spec["repositories"] == [
+        {"folder": "app", "url": "https://git.example/acme/app.git", "push": True, "branch": "feature",
+         "credentialKey": "repo.0"},
+        {"folder": "docs", "url": "https://git.example/acme/docs.git", "push": False},
+    ]
+    assert spec["git"]["setupEnv"] == [{"name": "GIT_CONFIG_COUNT", "value": "1"},
+                                       {"name": "GIT_CONFIG_KEY_0", "value": "safe.directory"},
+                                       {"name": "GIT_CONFIG_VALUE_0", "value": "*"}]
+    git_env = {e["name"]: e.get("value", e.get("secretKey")) for e in spec["git"]["env"]}
+    assert git_env["EXRADIUS_GIT_CREDENTIAL_0"] == "push.0"
+    assert git_env["GIT_CONFIG_GLOBAL"] == "/exradius/state/git/config"
+    assert "core.hooksPath" in git_env.values() and "/opt/exradius/runtime/git-hooks" in git_env.values()
+    [env] = cluster.envs
+    assert env["EXRADIUS_GIT_CREDENTIAL_0"] == "ghp_token"
+    assert "ghp_token" not in json.dumps(spec)
+
+
+async def test_url_attachments_are_stored_before_the_run(
+        manager, sessions, store, cluster, published, configured, accept, monkeypatch):
+    async def fetch(url):
+        assert url == "https://files.example/log.txt"
+        return b"stack trace"
+
+    monkeypatch.setattr(manager, "_fetch", fetch)
+    run_id = await submit_task(accept, published, attachments=[
+        {"name": "log.txt", "content_type": "text/plain", "url": "https://files.example/log.txt"}])
+    cluster.behaviours.append(runner(sessions))
+    await execute(manager, cluster, run_id)
+    async with sessions() as session:
+        task = await session.get(Task, "T-1")
+        [attachment] = task.attachments
+    assert attachment.object_key and store.objects[attachment.object_key][0] == b"stack trace"
+
+
+async def test_info_request_waits_in_the_pod_and_resumes_there(
+        manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    cluster.behaviours.append(runner(sessions, status="waiting_for_input", question="Which region?"))
+    await asyncio.wait_for(manager.execute(run_id), 10)  # returns: the run waits, its slot is free
 
     assert states(published)[-1] == "waiting_for_input"
     [info] = [e for e in published if e.type == "info_request"]
     assert info.payload["question"] == "Which region?"
     assert results(published) == []
-    paths = containers.started[0]["paths"]
-    assert paths.root.exists()  # kept while waiting
-
+    name = f"run-{run_id}"
+    assert cluster.runs[name]["status"]["phase"] == "Running"  # the pod keeps running
     async with sessions() as session:
-        assert (await session.get(Run, run_id)).token_hash is None  # no container, no token
+        assert (await session.get(Run, run_id)).token_hash is not None  # the token lives with the Run
 
-    answer = json.dumps({"version": 1, "task_id": "T-1", "request_id": info.payload["request_id"],
-                         "answer": "eu-west-1"}).encode()
-    intake = await accept_answer(sessions, store, answer)
+    intake = await answer(sessions, store, "T-1", info.payload["request_id"])
     assert intake.run_id == run_id
 
     def check(run, env):
         assert run.resume_request_ids == [info.payload["request_id"]]
 
-    containers.behaviours.append(runner(sessions, check=check))
-    await manager.resume(run_id)
+    cluster.behaviours.append(runner(sessions, check=check))
+    await asyncio.wait_for(manager.resume(run_id), 10)
+    await cluster.idle()
 
     assert states(published) == [
         "queued", "preparing", "running", "waiting_for_input", "resuming", "running", "completed",
     ]
     assert results(published)[0]["state"] == "completed"
-    assert not paths.root.exists()
-    async with sessions() as session:
-        chunks = (await session.scalars(select(TranscriptChunk.seq).where(TranscriptChunk.run_id == run_id))).all()
-        assert sorted(chunks) == [1, 2]  # one transcript across both containers
+    assert len(cluster.created) == 1 and len(cluster.envs) == 1  # one pod for both sessions
+    assert cluster.deleted == [name]
+    assert not [p for p in cluster.patches if "podGeneration" in p[1]]
 
 
-async def test_answer_before_container_exit_resumes_immediately(
-    manager, sessions, store, containers, published, configured, accept):
+async def test_answer_before_the_waiting_state_resumes_at_once(
+        manager, sessions, store, cluster, published, configured, accept):
+    resumed = []
+    manager.resume_later = lambda run_id: resumed.append(run_id) or cluster.pods.append(
+        asyncio.ensure_future(manager.resume(run_id)))
     run_id = await submit_task(accept, published)
-    containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?", answer_early=True))
-    containers.behaviours.append(runner(sessions))
-    await manager.execute(run_id)
+    cluster.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?", answer_early=True))
+    cluster.behaviours.append(runner(sessions))
+    await execute(manager, cluster, run_id)
+    assert resumed == [run_id]
     assert states(published)[-4:] == ["waiting_for_input", "resuming", "running", "completed"]
 
 
-async def test_setup_command_failure_fails_the_run(manager, sessions, store, containers, published, configured, accept):
+async def test_a_waiting_runs_lost_pod_is_recreated_on_the_same_workspace(
+        manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    cluster.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?"))
+    await asyncio.wait_for(manager.execute(run_id), 10)
+    name = f"run-{run_id}"
+
+    # The pod is deleted by hand while the run waits: nothing happens until the answer.
+    cluster._stop[name].set()
+    await asyncio.wait_for(cluster.idle(), 10)
+    cluster.set_status(name, phase="Failed", reason="PodLost", message="the run's pod was deleted")
+    await manager.settle(run_id)
+    assert states(published)[-1] == "waiting_for_input"
+
+    async with sessions() as session:
+        request = await session.scalar(select(InfoRequest))
+    await answer(sessions, store, "T-1", str(request.id))
+
+    def check(run, env):
+        assert run.state == State.RUNNING and run.resume_request_ids == [str(request.id)]
+
+    cluster.behaviours.append(runner(sessions, check=check))
+    await asyncio.wait_for(manager.resume(run_id), 10)
+    await cluster.idle()
+
+    assert (name, {"podGeneration": 1}) in cluster.patches
+    assert states(published)[-3:] == ["resuming", "running", "completed"]
+    assert len(cluster.created) == 1  # the same Run, PVC and Secret: a new pod only
+
+
+async def test_setup_failure_fails_the_run_with_the_steps_log(
+        manager, sessions, store, cluster, published, configured, accept):
     await set_config(configured, "workstation:\n  setup: [make deps]\n")
-    containers.setup_exit = 2
+    cluster.prepare_failure = {"container": "setup-0", "name": "Setup: make deps", "exitCode": 2,
+                               "log": "setup output\nboom"}
     run_id = await submit_task(accept, published)
-    await manager.execute(run_id)
-
-    assert containers.setup_commands == ["make deps"]
-    assert containers.started == []
-    assert states(published)[-1] == "failed"
+    await execute(manager, cluster, run_id)
+    assert states(published) == ["queued", "preparing", "failed"]
     [result] = results(published)
-    assert result["state"] == "failed" and "make deps" in result["error"] and "boom" in result["error"]
+    assert result["error"] == "setup command 'make deps' exited with 2:\nsetup output\nboom"
 
 
-async def test_runner_crash_without_outcome(manager, sessions, store, containers, published, configured, accept):
+async def test_setup_killed_under_a_declared_limit(manager, sessions, store, cluster, published, configured, accept):
+    await set_config(configured, "resources: {memory: 2g}\nworkstation:\n  setup: [make deps]\n")
+    cluster.prepare_failure = {"container": "setup-0", "name": "Setup: make deps", "exitCode": 137,
+                               "reason": "OOMKilled", "log": "Killed"}
     run_id = await submit_task(accept, published)
-    containers.behaviours.append(runner(sessions, status=None, exit_code=137))
-    await manager.execute(run_id)
+    await execute(manager, cluster, run_id)
     [result] = results(published)
-    assert result["state"] == "failed" and "137" in result["error"]
+    assert result["error"] == "setup command 'make deps' exceeded its declared memory (2g) and was killed (exit 137):\nKilled"
 
 
-async def test_runtime_failure_is_reported(manager, sessions, store, containers, published, configured, accept):
+async def test_clone_failure_names_the_repository(manager, sessions, store, cluster, published, configured, accept):
+    cluster.prepare_failure = {"container": "clone-0", "name": "Clone app (main)", "exitCode": 1,
+                               "log": "git clone failed: Repository not found"}
     run_id = await submit_task(accept, published)
-    containers.behaviours.append(runner(sessions, status="failed", error="invalid api key", exit_code=1))
-    await manager.execute(run_id)
+    await execute(manager, cluster, run_id)
+    [result] = results(published)
+    assert result["error"] == "clone app (main) failed:\ngit clone failed: Repository not found"
+
+
+async def test_runner_crash_without_outcome(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    cluster.behaviours.append(runner(sessions, status=None, exit_code=1))
+    await execute(manager, cluster, run_id)
+    [result] = results(published)
+    assert result["state"] == "failed"
+    assert result["error"] == "runner exited with code 1 without reporting an outcome:\nrunner log line"
+
+
+async def test_exit_137_under_a_declared_limit_names_it(manager, sessions, store, cluster, published, configured, accept):
+    await set_config(configured, "resources: {memory: 4g}\n")
+    run_id = await submit_task(accept, published)
+    cluster.behaviours.append(runner(sessions, status=None, exit_code=137))
+    await execute(manager, cluster, run_id)
+    [result] = results(published)
+    assert result["error"].startswith("the run exceeded its declared memory (4g) and was killed (exit 137)")
+
+
+async def test_runtime_failure_is_reported(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    cluster.behaviours.append(runner(sessions, status="failed", error="invalid api key", exit_code=1))
+    await execute(manager, cluster, run_id)
     [result] = results(published)
     assert result["state"] == "failed" and result["error"] == "invalid api key"
 
 
-async def test_cancel_waiting_run_frees_directory(manager, sessions, store, containers, published, configured, accept):
+async def test_delivery_warnings_reach_the_result(manager, sessions, store, cluster, published, configured, accept):
     run_id = await submit_task(accept, published)
-    containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?"))
-    await manager.execute(run_id)
-    paths = containers.started[0]["paths"]
+    cluster.behaviours.append(runner(sessions, warnings=["app: 1 commit on main was not pushed"]))
+    await execute(manager, cluster, run_id)
+    [result] = results(published)
+    assert result["warnings"] == ["app: 1 commit on main was not pushed"]
+
+
+async def test_cancel_a_waiting_run(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    cluster.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?"))
+    await asyncio.wait_for(manager.execute(run_id), 10)
 
     await manager.cancel(run_id)
+    await asyncio.wait_for(cluster.idle(), 10)
+    assert (f"run-{run_id}", {"cancel": True}) in cluster.patches
     assert states(published)[-1] == "cancelled"
     [result] = results(published)
     assert result["state"] == "cancelled" and result["error"] is None
-    assert not paths.root.exists()
+    assert cluster.deleted == [f"run-{run_id}"]
 
     await manager.cancel(run_id)  # idempotent
     assert len(results(published)) == 1
 
 
-async def test_cancel_while_running(manager, sessions, store, containers, published, configured, accept):
+async def test_cancel_while_running_waits_for_the_pod(manager, sessions, store, cluster, published, configured, accept):
     run_id = await submit_task(accept, published)
-    base = runner(sessions, strict=False)
 
     async def cancelled_mid_run(rid, env):
-        await manager.cancel(rid)  # admin cancels; the worker stops the container
-        await base(rid, env)  # the runner still reports before it dies
-        return 137
+        await manager.cancel(rid)  # the operator deletes the pod; the runner reports first
+        async with sessions() as session:
+            run = await session.get(Run, rid)
+            assert run.state == State.CANCELLED and run.ended_at is None  # not finalised yet
+            run.delivery_warnings = ["app: uncommitted changes in 2 files were discarded with the task directory"]
+            await session.commit()
+        return 143
 
-    containers.behaviours.append(cancelled_mid_run)
-    await manager.execute(run_id)
-
-    assert containers.stopped == [str(run_id)]
+    cluster.behaviours.append(cancelled_mid_run)
+    await execute(manager, cluster, run_id)
     assert states(published) == ["queued", "preparing", "running", "cancelled"]
-    assert [r["state"] for r in results(published)] == ["cancelled"]  # exactly one result
+    [result] = results(published)  # exactly one result
+    assert result["state"] == "cancelled"
+    assert result["warnings"] == ["app: uncommitted changes in 2 files were discarded with the task directory"]
 
 
-async def test_execute_ignores_runs_that_are_not_queued(manager, sessions, store, containers, published, configured, accept):
+async def test_cancel_in_preparing_before_the_run_exists(manager, sessions, store, cluster, published, configured, accept):
     run_id = await submit_task(accept, published)
     await manager.cancel(run_id)
-    await manager.execute(run_id)
-    assert containers.started == []
+    await execute(manager, cluster, run_id)
+    assert cluster.created == []
     assert [r["state"] for r in results(published)] == ["cancelled"]
 
 
-async def test_resumable_runs(manager, sessions, store, containers, published, configured, accept):
+async def test_waiting_for_cluster_capacity(manager, sessions, store, cluster, published, configured, accept):
+    cluster.auto = False
     run_id = await submit_task(accept, published)
-    containers.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?"))
-    await manager.execute(run_id)
+    task = asyncio.create_task(manager.execute(run_id))
+    while f"run-{run_id}" not in cluster.secrets:
+        await asyncio.sleep(0.01)
+    name = f"run-{run_id}"
+    cluster.set_status(name, phase="Pending", conditions=[
+        {"type": "Scheduled", "status": "False", "reason": "Unschedulable",
+         "message": "0/1 nodes are available: 1 Insufficient memory."}])
+    await manager.settle(run_id)
+    async with sessions() as session:
+        run = await session.get(Run, run_id)
+        assert run.state == State.PREPARING and run.waiting_for == "capacity"
+    assert states(published) == ["queued", "preparing"]  # no event for it
+
+    cluster.set_status(name, phase="Running", conditions=[], workstation={"state": "running"})
+    await manager.settle(run_id)
+    async with sessions() as session:
+        run = await session.get(Run, run_id)
+        assert run.state == State.RUNNING and run.waiting_for is None
+    cluster.set_status(name, phase="Failed", reason="Error", workstation={"state": "terminated", "exitCode": 1, "log": "x"})
+    await manager.settle(run_id)
+    await asyncio.wait_for(task, 5)
+    assert results(published)[0]["state"] == "failed"
+
+
+async def test_a_run_deleted_by_hand_fails(manager, sessions, store, cluster, published, configured, accept):
+    cluster.auto = False
+    run_id = await submit_task(accept, published)
+    task = asyncio.create_task(manager.execute(run_id))
+    while f"run-{run_id}" not in cluster.secrets:
+        await asyncio.sleep(0.01)
+    await cluster.delete_run(f"run-{run_id}")
+    await manager.on_event("DELETED", {"metadata": {"name": f"run-{run_id}"}})
+    await asyncio.wait_for(task, 5)
+    [result] = results(published)
+    assert result["state"] == "failed" and result["error"] == "the run's Kubernetes object disappeared"
+
+
+async def test_execute_ignores_runs_that_are_not_queued(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    await manager.cancel(run_id)
+    await execute(manager, cluster, run_id)
+    assert cluster.created == []
+    assert [r["state"] for r in results(published)] == ["cancelled"]
+
+
+async def test_resumable_runs(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    cluster.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?"))
+    await asyncio.wait_for(manager.execute(run_id), 10)
     assert await manager.resumable_runs() == []
     async with sessions() as session:
         request = await session.scalar(select(InfoRequest))
@@ -473,7 +498,7 @@ async def test_resumable_runs(manager, sessions, store, containers, published, c
 
 
 async def test_result_links_artifacts_by_signed_http_url(
-    manager, sessions, store, containers, published, settings, configured, accept):
+        manager, sessions, store, cluster, published, settings, configured, accept):
     settings.public_api_url = "https://exradius.example.com/"
     run_id = await submit_task(accept, published)
     base = runner(sessions)
@@ -484,8 +509,8 @@ async def test_result_links_artifacts_by_signed_http_url(
             await session.commit()
         return await base(rid, env)
 
-    containers.behaviours.append(with_artifact)
-    await manager.execute(run_id)
+    cluster.behaviours.append(with_artifact)
+    await execute(manager, cluster, run_id)
     [result] = results(published)
     async with sessions() as session:
         artifact = await session.scalar(select(Artifact))
@@ -497,3 +522,23 @@ async def test_result_links_artifacts_by_signed_http_url(
         "url": f"https://exradius.example.com{path}?sig={downloads.sign(settings, path)}",
     }
     assert result["transcript_url"].startswith(f"https://exradius.example.com/api/runs/{run_id}/transcript?sig=")
+
+
+async def test_two_runs_of_a_project_run_in_parallel(manager, sessions, store, cluster, published, configured, accept):
+    first = await submit_task(accept, published, task_id="T-1")
+    second = await submit_task(accept, published, task_id="T-2")
+    gate = asyncio.Event()
+    seen = []
+
+    async def together(rid, env):
+        seen.append(rid)
+        if len(seen) == 2:
+            gate.set()
+        await asyncio.wait_for(gate.wait(), 5)  # both pods are running at once
+        return await runner(sessions)(rid, env)
+
+    cluster.behaviours += [together, together]
+    await asyncio.wait_for(asyncio.gather(manager.execute(first), manager.execute(second)), 10)
+    await cluster.idle()
+    assert sorted(seen) == sorted([first, second])
+    assert [r["state"] for r in results(published)] == ["completed", "completed"]

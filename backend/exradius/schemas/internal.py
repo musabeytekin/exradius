@@ -21,6 +21,16 @@ class AttachmentPath(BaseModel):
     path: str
     """Relative to the working directory, e.g. ``.exradius/attachments/stack.txt``."""
     content_type: str
+    id: str | None = None
+    """For ``GET /attachments/{id}``: a task attachment's id, or ``<request id>.<n>``."""
+
+
+class AttachmentItem(BaseModel):
+    """A task attachment as the pod's ``prepare`` step fetches it."""
+
+    id: str
+    name: str
+    content_type: str
 
 
 class DeliveredAnswer(BaseModel):
@@ -82,7 +92,43 @@ class ResultSubmission(BaseModel):
 
 
 class OutcomeReport(BaseModel):
-    status: Literal["completed", "waiting_for_input", "failed"]
+    status: Literal["completed", "waiting_for_input", "failed", "cancelled"]
     session_id: str | None = None
     final_message: str | None = None
+    error: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    """The delivery check's findings (docs/kubernetes.md §8.5)."""
+
+
+class Reported(BaseModel):
+    """What the runner reports while it stays alive (docs/kubernetes.md §8.2)."""
+
+    status: Literal["waiting", "resumed"]
+
+
+class AnswersResponse(BaseModel):
+    """``GET /answers?wait=``: the run's state, with the answers to resume with once the run
+    is ``resuming``."""
+
+    state: str
+    answers: list[DeliveredAnswer] = Field(default_factory=list)
+
+
+class VerifySpec(BaseModel):
+    """The connections a verify Run lists the tools of (docs/agent-routing.md §3.1)."""
+
+    connections: list[ConnectionSpecModel] = Field(default_factory=list)
+
+
+class ToolReport(BaseModel):
+    name: str
+    ok: bool
+    tools: list[dict[str, Any]] | None = None
+    error: str | None = None
+    log: str = ""
+
+
+class ProbeReport(BaseModel):
+    ok: bool
+    detail: str | None = None
     error: str | None = None

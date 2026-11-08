@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from exradius import config_repo
+from exradius import capabilities, config_repo
 from exradius.config_repo import ConfigReadError, ProjectConfigSnapshot
 from exradius.crypto import SecretBox
 from exradius.models import GitCredential, Project, SecretStore, SecretStoreEntry
@@ -27,14 +27,14 @@ async def host_auth(session: AsyncSession, box: SecretBox, url: str) -> str | No
     return config_repo.host_auth(row.kind, box.decrypt(row.value_encrypted)) if row else None
 
 
-async def read_config(session: AsyncSession, box: SecretBox, data_dir: Path, project: Project) -> ProjectConfigSnapshot:
+async def read_config(session: AsyncSession, box: SecretBox, cache_dir: Path, project: Project) -> ProjectConfigSnapshot:
     """Read the config afresh. A repository, branch or file that cannot be read gives a
     snapshot with that error and no commit."""
     auth = await host_auth(session, box, project.config_url)
     try:
         return await asyncio.to_thread(
             config_repo.read_snapshot,
-            data_dir,
+            cache_dir,
             project.id,
             project.config_url,
             branch=project.config_branch,
@@ -88,12 +88,16 @@ class Health:
     required_keys: list[str] = field(default_factory=list)
     missing_keys: list[str] = field(default_factory=list)
     """``required_keys`` minus the store's keys (all of them when it does not exist)."""
+    unsupported: list[str] = field(default_factory=list)
+    """What the config needs that this version cannot run yet (``capabilities.py``)."""
 
     @property
     def reason(self) -> str | None:
         """Why tasks for the project are refused, in the documented words (§3)."""
         if self.errors:
             return f"config error: {self.errors[0]}"
+        if self.unsupported:
+            return self.unsupported[0]
         if not self.required_keys:
             return None
         if not self.store_exists:
@@ -109,8 +113,9 @@ class Health:
 
     @property
     def status(self) -> str:
-        """``ok``, ``config_errors`` or ``missing_secrets``, for the panel."""
-        if self.errors:
+        """``ok``, ``config_errors`` or ``missing_secrets``, for the panel; a config this
+        version cannot run counts as ``config_errors``."""
+        if self.errors or self.unsupported:
             return "config_errors"
         return "ok" if self.runnable else "missing_secrets"
 
@@ -132,6 +137,7 @@ async def assess(session: AsyncSession, project: Project, snapshot: ProjectConfi
         store_exists=keys is not None,
         required_keys=list(snapshot.required_keys),
         missing_keys=[k for k in snapshot.required_keys if k not in (keys or set())],
+        unsupported=capabilities.unsupported(snapshot.config),
     )
 
 

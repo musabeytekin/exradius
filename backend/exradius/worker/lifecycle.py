@@ -75,7 +75,7 @@ def transition(
     check_transition(previous, new)
     run.state = new
     run.task.state = new
-    run.waiting_for = None  # a run that changes state no longer waits for memory
+    run.waiting_for = None  # a run that changes state no longer waits for cluster capacity
     # ended_at is set by finalisation (worker/runs.py), which also guards it.
     if new == State.PREPARING and run.started_at is None:
         run.started_at = utcnow()

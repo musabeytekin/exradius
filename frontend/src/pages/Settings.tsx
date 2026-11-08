@@ -25,8 +25,8 @@ export function SettingsPage() {
   const installation: [string, string, ReactNode][] = s ? [
     ["Public API URL", "Base of the signed artifact and transcript links in task.result.", <Mono key="u">{s.public_api_url}</Mono>],
     ["Public broker address", "Where integrations connect to publish tasks and read events.", i ? <Mono key="b">{i.broker.host}:{i.broker.port}{i.broker.vhost === "/" ? "" : `/${i.broker.vhost}`}</Mono> : <span key="b" className="text-xs text-subtle">not reported by the API</span>],
-    ["Data directory", "Host directory for run directories, git mirrors and stored objects.", s.data_dir ? <Mono key="d">{s.data_dir}</Mono> : <span key="d" className="text-xs text-subtle">not reported by the API</span>],
-    ["Worker concurrency", "Runs each worker executes at once.", concurrency.length ? <Mono key="c">{concurrency.join(", ")}</Mono> : <span key="c" className="text-xs text-subtle">no live worker</span>],
+    ["Operator", "Turns runs into pods. Seen through its leader Lease.", !s.operator ? <span key="o" className="text-xs text-subtle">not reported by a worker</span> : <Chip key="o" tone={s.operator.alive ? "ok" : "err"} dot title={s.operator.detail ?? undefined}>{s.operator.alive ? `running${s.operator.holder ? ` (${s.operator.holder})` : ""}` : "not running"}</Chip>],
+    ["Worker concurrency", "Runs each worker has in flight at once.", concurrency.length ? <Mono key="c">{concurrency.join(", ")}</Mono> : <span key="c" className="text-xs text-subtle">no live worker</span>],
   ] : [];
 
   return (
@@ -76,7 +76,7 @@ export function SettingsPage() {
               ) : (
                 <Table.Root>
                   <Table.Head>
-                    <tr><Table.Th>Host</Table.Th><Table.Th>Version</Table.Th><Table.Th>Slots</Table.Th><Table.Th>Docker</Table.Th><Table.Th>{s.workers.some((x) => x.runtimes) ? "Runtimes" : "Runner image"}</Table.Th><Table.Th className="text-right">Last seen</Table.Th></tr>
+                    <tr><Table.Th>Host</Table.Th><Table.Th>Version</Table.Th><Table.Th>Slots</Table.Th><Table.Th>Runtimes</Table.Th><Table.Th className="text-right">Last seen</Table.Th></tr>
                   </Table.Head>
                   <tbody>
                     {s.workers.map((wk) => (
@@ -84,16 +84,11 @@ export function SettingsPage() {
                         <Table.Td><Mono className="text-xs">{wk.hostname}</Mono></Table.Td>
                         <Table.Td><Mono className="text-xs text-muted">{wk.version ?? "—"}</Mono></Table.Td>
                         <Table.Td className="tabular">{wk.concurrency}</Table.Td>
-                        <Table.Td><Chip tone={wk.docker_ok ? "ok" : "err"} dot title={wk.docker_detail ?? undefined}>{wk.docker_ok ? "reachable" : "unreachable"}</Chip></Table.Td>
                         <Table.Td>
-                          {wk.runtimes ? (
-                            <span className="flex flex-wrap items-center gap-1">
-                              {wk.runtimes.map((r) => <Chip key={r.name} mono tone={r.ready ? "neutral" : "err"} dot={!r.ready} title={r.error ?? r.image ?? undefined}>{r.name}{r.version ? ` ${r.version}` : ""}{r.ready ? "" : " not ready"}</Chip>)}
-                              {!wk.runtimes.length && <span className="text-xs text-subtle">none</span>}
-                            </span>
-                          ) : (
-                            <span className="flex items-center gap-2"><Mono className="text-xs">{wk.runner_image ?? "—"}</Mono>{wk.runner_image_ok === false && <Chip tone="err">missing</Chip>}</span>
-                          )}
+                          <span className="flex flex-wrap items-center gap-1">
+                            {(wk.runtimes ?? []).map((r) => <Chip key={r.name} mono tone={r.ready ? "neutral" : "err"} dot={!r.ready} title={r.error ?? r.image ?? undefined}>{r.name}{r.version ? ` ${r.version}` : ""}{r.ready ? "" : " not ready"}</Chip>)}
+                            {!wk.runtimes?.length && <span className="text-xs text-subtle">none</span>}
+                          </span>
                         </Table.Td>
                         <Table.Td className="text-right text-xs text-subtle">{relativeTime(wk.last_seen_at)}</Table.Td>
                       </Table.Row>

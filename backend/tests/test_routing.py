@@ -74,7 +74,7 @@ def router(openai):
 @pytest.fixture
 def route(sessions, store, box, settings, router):
     async def _accept(body: dict):
-        return await accept_task(sessions, store, json.dumps(body).encode(), box=box, data_dir=settings.data_dir,
+        return await accept_task(sessions, store, json.dumps(body).encode(), box=box, cache_dir=settings.cache_dir,
                                  router=router)
     return _accept
 
@@ -117,7 +117,7 @@ async def test_the_only_agent_needs_no_key(route, sessions, settings, tmp_path, 
                              credential_encrypted="x", settings={}, is_default=True))
         await session.commit()
     single = BASE_CONFIG.split("  scout:")[0]
-    await add_project(sessions, settings.data_dir, make_config_repo(tmp_path / "single", {"exradius.yaml": single}))
+    await add_project(sessions, settings.cache_dir, make_config_repo(tmp_path / "single", {"exradius.yaml": single}))
     intake = await route(task())
     run, row = await _run(sessions, intake.run_id)
     assert (row.agent, run.routing["method"]) == ("bug-fixer", "only_agent")

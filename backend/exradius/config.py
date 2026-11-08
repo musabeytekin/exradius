@@ -5,6 +5,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,11 +18,16 @@ class Settings(BaseSettings):
 
     # Infrastructure
     database_url: str = "postgresql+asyncpg://exradius:exradius@localhost:5432/exradius"
+    """``postgresql://`` (CloudNativePG's ``uri``) is accepted and means asyncpg."""
     broker_url: str = "amqp://guest:guest@localhost:5672/"
+    broker_username: str | None = None
+    broker_password: str | None = None
+    """When set, they replace the user info of ``broker_url`` (quoted as needed), so the
+    RabbitMQ operator's generated credentials can come from its Secret as they are."""
 
-    # Object store for transcripts, artifacts and attachments. "filesystem" (default)
-    # keeps objects under <data_dir>/objects/<bucket>/; "s3" uses any S3 API.
-    object_store: Literal["filesystem", "s3"] = "filesystem"
+    # Object store for transcripts, artifacts and attachments: any S3 API (SeaweedFS in a
+    # local install, S3 in AWS). The filesystem and in-memory stores are for tests.
+    object_store: Literal["s3"] = "s3"
     s3_endpoint_url: str | None = None
     """``None`` means AWS S3; set it for another S3-compatible service."""
     s3_access_key: str | None = None
@@ -60,46 +66,63 @@ class Settings(BaseSettings):
     # API server
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    """The admin, integration, hook and download API."""
+    internal_port: int = 8001
+    """``/internal/*`` only: what run pods reach (docs/kubernetes.md §9)."""
+
+    cache_dir: Path = Path("/var/cache/exradius")
+    """Config-repository mirrors of this pod (an ``emptyDir``; re-fetched after a restart)."""
 
     # Worker
-    data_dir: Path = Path("/var/lib/exradius")
-    """Where the worker keeps ``runs/`` and ``mirrors/`` (path inside the worker)."""
-    host_data_dir: Path | None = None
-    """The same directory as the Docker daemon sees it. Defaults to ``data_dir``."""
     worker_concurrency: int = 4
-    """Prefetch count of the task consumer: how many runs one worker executes at once."""
-    run_memory_budget: str | None = None
-    """Memory the runs and verifications of this worker may reserve together, as a Docker
-    size (``24g``). Default: the Docker daemon's ``MemTotal`` less 1 GiB, read at start."""
+    """Prefetch count of the task consumer: how many Runs one worker has in flight."""
     runtime_image_claude_code: str = Field(default_factory=lambda: f"exradius-runtime-claude-code:{package_version()}")
-    """Image holding the Claude Code runtime bundle (deploy/runtime-claude-code.Dockerfile)."""
+    """Image holding the Claude Code runtime bundle, mounted into run pods as an image volume
+    (deploy/runtime-claude-code.Dockerfile)."""
     project_default_image: str = Field(default_factory=lambda: f"exradius-project-default:{package_version()}")
-    """Image of run containers of projects without an image, and of provider probes."""
-    runtime_mount: str = "/opt/exradius/runtime"
-    """Where run containers see the runtime bundle (read-only)."""
-    run_network: str | None = "exradius-runs"
-    """Network every run, setup and probe container joins: the API's alias is there and
-    nothing else of the stack is (never the stack network: its ``postgres`` would shadow a
-    service of the same name). ``None`` uses Docker's default bridge."""
-    run_api_url: str = "http://exradius-api:8000"
-    """``EXRADIUS_API_URL`` given to run containers (the API's alias on ``run_network``)."""
-    run_user: str = "1000:1000"
-    run_state_mount: str = "/exradius/state"
-    docker_url: str | None = None
-    """Docker daemon URL; ``None`` uses the environment (``DOCKER_HOST`` or the local socket)."""
+    """Workstation image of projects without an image, and of provider probes."""
+    namespace: str = "exradius"
+    """The stack's namespace (the worker's own, from the downward API)."""
+    runs_namespace: str = "exradius-runs"
+    """Where the worker creates Run objects and per-run Secrets."""
+    operator_lease: str = "exradius-operator"
+    """The operator's leader-election Lease in ``namespace``, read for the status page."""
+    kube_api_url: str | None = None
+    """The Kubernetes API; ``None`` is the in-cluster address (``KUBERNETES_SERVICE_HOST``)."""
 
-    @field_validator("s3_endpoint_url", "s3_access_key", "s3_secret_key", "run_memory_budget", mode="before")
+    @field_validator(
+        "s3_endpoint_url", "s3_access_key", "s3_secret_key", "broker_username", "broker_password", "kube_api_url",
+        mode="before",
+    )
     @classmethod
     def _empty_is_unset(cls, value: str | None) -> str | None:
         return value or None
 
+    @field_validator("database_url")
+    @classmethod
+    def _asyncpg(cls, value: str) -> str:
+        for prefix in ("postgresql://", "postgres://"):
+            if value.startswith(prefix):
+                return "postgresql+asyncpg://" + value.removeprefix(prefix)
+        return value
+
+    @property
+    def effective_broker_url(self) -> str:
+        """``broker_url`` with ``broker_username``/``broker_password`` in its user info."""
+        if self.broker_username is None and self.broker_password is None:
+            return self.broker_url
+        parts = urlsplit(self.broker_url)
+        user = quote(self.broker_username if self.broker_username is not None else unquote(parts.username or ""), safe="")
+        password = self.broker_password if self.broker_password is not None else unquote(parts.password or "")
+        host = parts.hostname or "localhost"
+        if ":" in host:
+            host = f"[{host}]"
+        netloc = f"{user}:{quote(password, safe='')}@{host}" + (f":{parts.port}" if parts.port else "")
+        return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
     def runtime_image(self, runtime: str) -> str:
         """The bundle image of a runtime (``EXRADIUS_RUNTIME_IMAGE_<NAME>``)."""
         return getattr(self, f"runtime_image_{runtime}")
-
-    @property
-    def objects_dir(self) -> Path:
-        return self.data_dir / "objects"
 
     @property
     def download_signing_key(self) -> bytes:
@@ -111,10 +134,6 @@ class Settings(BaseSettings):
         return hashlib.sha256(b"exradius-download:" + self.secret_key.encode()).digest()
 
     @property
-    def effective_host_data_dir(self) -> Path:
-        return self.host_data_dir or self.data_dir
-
-    @property
     def effective_session_secret(self) -> str:
         if self.session_secret:
             return self.session_secret
@@ -123,11 +142,6 @@ class Settings(BaseSettings):
         import hashlib
 
         return hashlib.sha256(b"exradius-session:" + self.secret_key.encode()).hexdigest()
-
-    @property
-    def run_uid_gid(self) -> tuple[int, int]:
-        uid, _, gid = self.run_user.partition(":")
-        return int(uid), int(gid or uid)
 
 
 @lru_cache

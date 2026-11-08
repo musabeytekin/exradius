@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from exradius import downloads
 from exradius.api.app import create_app
 from exradius.crypto import hash_token
-from exradius.models import Artifact, GitCredential, InfoRequest, Project, Run, SecretStoreEntry, Task, TranscriptChunk
+from exradius.models import Artifact, GitCredential, InfoRequest, Project, Run, SecretStoreEntry, Task, TranscriptChunk, utcnow
 from tests.conftest import commit_config, make_config_repo
 
 
@@ -25,6 +25,8 @@ class FakeControl:
         self.published: list[tuple[str, dict]] = []
         self.directory: list[dict] = []
         """``directory.changed`` notices, as published."""
+        self.reported: list[str] = []
+        """Run ids of ``run_reported`` nudges."""
         self.healthy = True
 
     async def publish(self, queue: str, body: dict) -> None:
@@ -49,6 +51,11 @@ class FakeControl:
         if not self.healthy:
             raise ConnectionError("broker down")
         self.provider_tests.append(test_id)
+
+    async def run_reported(self, run_id: str) -> None:
+        if not self.healthy:
+            raise ConnectionError("broker down")
+        self.reported.append(run_id)
 
     async def check(self) -> tuple[bool, str]:
         return (True, "connected") if self.healthy else (False, "ConnectionError: broker down")
@@ -182,7 +189,7 @@ def test_projects_are_added_by_url(admin, tmp_path):
 
 
 def admin_data_dir(admin) -> Path:
-    return admin.app.state.exradius.settings.data_dir
+    return admin.app.state.exradius.settings.cache_dir
 
 
 def test_a_file_with_errors_still_creates_the_project(admin, tmp_path):
@@ -456,11 +463,17 @@ def test_internal_resume_spec(client, admin, sync_db, tmp_path):
     assert spec["mode"] == "resume" and spec["session_id"] == "sess-1"
     [answer] = spec["answers"]
     assert answer["answer"] == "eu-west-1"
-    assert answer["attachments"] == [{"path": f".exradius/attachments/{request.id}/log.txt", "content_type": "text/plain"}]
+    assert answer["attachments"] == [{"path": f".exradius/attachments/{request.id}/log.txt", "content_type": "text/plain",
+                                      "id": f"{request.id}.0"}]
 
 
 def test_token_is_rejected_once_run_ended(client, admin, sync_db, tmp_path):
     _, run_id = make_run(admin, sync_db, tmp_path, state="completed")
+    # Valid until finalize: a cancelled runner still sends its delivery check.
+    assert client.get(f"/internal/runs/{run_id}/spec", headers={"Authorization": "Bearer tok"}).status_code == 200
+    run = sync_db.get(Run, uuid.UUID(run_id))
+    run.ended_at = utcnow()
+    sync_db.commit()
     assert client.get(f"/internal/runs/{run_id}/spec", headers={"Authorization": "Bearer tok"}).status_code == 401
 
 

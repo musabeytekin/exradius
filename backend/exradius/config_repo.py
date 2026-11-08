@@ -5,8 +5,8 @@ git host (§6), resolves the branch head, finds ``exradius.yaml`` (at the root, 
 ``.exradius/``), parses and validates it and returns a ``ProjectConfigSnapshot``. It is
 synchronous (git subprocesses); callers use ``asyncio.to_thread``.
 
-The mirror is ``<data_dir>/config-repos/<project id>.git``, shared by the API and the
-workers under the same file lock as code mirrors. Builds read their context from it too
+The mirror is ``<cache_dir>/config-repos/<project id>.git`` in the reading pod's own cache
+(an ``emptyDir``: re-fetched after a restart). Builds read their context from it too
 (``tree_hash``, ``archive``).
 """
 
@@ -27,7 +27,8 @@ from urllib.parse import urlsplit
 
 from exradius.models import utcnow
 from exradius.schemas.project_config import CONFIG_FILES, ParseResult, ProjectConfig, load_yaml, parse_config, yaml_error
-from exradius.worker import prepare
+from exradius import capabilities
+from exradius.git import GitError, git, sync_mirror
 
 READ_TIMEOUT = 60
 """Seconds for each network git command (fetch, ls-remote)."""
@@ -97,8 +98,8 @@ class ProjectConfigSnapshot:
         return cls(commit=None, read_at=utcnow(), config=None, errors=[message])
 
 
-def mirror_path(data_dir: Path, project_id: uuid.UUID) -> Path:
-    return data_dir / "config-repos" / f"{project_id}.git"
+def mirror_path(cache_dir: Path, project_id: uuid.UUID) -> Path:
+    return cache_dir / "config-repos" / f"{project_id}.git"
 
 
 def git_host(url: str) -> str | None:
@@ -121,7 +122,7 @@ def host_auth(kind: str, value: str) -> str:
 
 
 def _git(mirror: Path, *args: str) -> str:
-    return prepare.git(*args, cwd=mirror)
+    return git(*args, cwd=mirror)
 
 
 def _rev(commit: str, path: str) -> str:
@@ -155,7 +156,7 @@ def make_lookup(mirror: Path, commit: str):
 
 
 def read_snapshot(
-    data_dir: Path,
+    cache_dir: Path,
     project_id: uuid.UUID,
     url: str,
     *,
@@ -165,17 +166,17 @@ def read_snapshot(
 ) -> ProjectConfigSnapshot:
     """Fetch and read the config. Raises ``ConfigReadError`` when there is no file to read;
     a file that does not validate gives a snapshot with errors."""
-    mirror = mirror_path(data_dir, project_id)
+    mirror = mirror_path(cache_dir, project_id)
     try:
-        prepare.sync_mirror(mirror, url, auth, timeout=READ_TIMEOUT)
+        sync_mirror(mirror, url, auth, timeout=READ_TIMEOUT)
         if branch is None:
             head = _git(mirror, "symbolic-ref", "HEAD").strip()
             branch = head.removeprefix("refs/heads/")
-    except prepare.PreparationError as exc:
+    except GitError as exc:
         raise ConfigReadError(f"could not read the config repository: {exc}") from exc
     try:
         commit = _git(mirror, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}").strip()
-    except prepare.PreparationError as exc:
+    except GitError as exc:
         raise ConfigReadError(f"branch {branch!r} does not exist in the config repository") from exc
     return read_at_commit(mirror, commit, branch=branch, path=path)
 
@@ -191,7 +192,7 @@ def read_at_commit(mirror: Path, commit: str, *, branch: str | None, path: str |
         raise ConfigReadError(f"{found} is not a regular file (commit {commit[:12]})")
     try:
         text = _git(mirror, "cat-file", "blob", f"{commit}:{found}")
-    except prepare.PreparationError as exc:
+    except GitError as exc:
         raise ConfigReadError(str(exc)) from exc
     config_dir = posixpath.dirname(found)
     result: ParseResult = parse_config(text, config_dir=config_dir, lookup=lookup)
@@ -201,7 +202,7 @@ def read_at_commit(mirror: Path, commit: str, *, branch: str | None, path: str |
         read_at=utcnow(),
         config=result.config,
         errors=result.errors,
-        warnings=[*result.warnings, *bridge_warnings],
+        warnings=[*result.warnings, *capabilities.warnings(result.config), *bridge_warnings],
         required_keys=result.required_keys,
         store=result.store,
         branch=branch,
@@ -286,7 +287,7 @@ def build_context(mirror: Path, commit: str, context: str, dockerfile: str) -> t
         cwd=mirror, capture_output=True, check=False,
     )
     if archive.returncode != 0:
-        raise prepare.PreparationError(f"git archive of {context or '.'} failed: {archive.stderr.decode(errors='replace').strip()}")
+        raise GitError(f"git archive of {context or '.'} failed: {archive.stderr.decode(errors='replace').strip()}")
     inside = dockerfile.removeprefix(context + "/") if context else dockerfile
     if context and not dockerfile.startswith(context + "/"):
         inside = BUILD_DOCKERFILE
@@ -306,5 +307,5 @@ def build_context(mirror: Path, commit: str, context: str, dockerfile: str) -> t
 def _git_bytes(mirror: Path, *args: str) -> bytes:
     result = subprocess.run(["git", *args], cwd=mirror, capture_output=True, check=False)
     if result.returncode != 0:
-        raise prepare.PreparationError(f"git {' '.join(args)} failed: {result.stderr.decode(errors='replace').strip()}")
+        raise GitError(f"git {' '.join(args)} failed: {result.stderr.decode(errors='replace').strip()}")
     return result.stdout

@@ -1,207 +1,244 @@
-"""Worker crash recovery: startup reconciliation and the orphaned directory sweep."""
+"""Crash recovery on Kubernetes (docs/kubernetes.md §4): a starting worker compares the Runs
+with Postgres; the sweep settles every unfinished run from its Run as it is now."""
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from datetime import timedelta
 
 import pytest
+from sqlalchemy import select
 
-from exradius.models import InfoRequest, Run, utcnow
+from exradius.models import InfoRequest, ProjectVerification, ProviderTest, Run, utcnow
 from exradius.states import State
-from exradius.worker import prepare
+from exradius.worker import run_objects
+from exradius.worker.runs import ABANDONED_AFTER
+from tests.fakes import runner
 from tests.test_run_manager import (  # noqa: F401 - fixtures
-    containers,
+    cluster,
     manager,
     published,
     results,
-    runner,
     states,
     submit_task,
 )
 
-DEAD = "dead-worker"
-ALIVE = "live-worker"
+
+async def leave_running(manager, cluster, sessions, run_id, status="running", **status_fields) -> str:
+    """A run in ``status`` whose Run exists, as a dead worker left it (no pod simulation)."""
+    cluster.auto = False
+    task = asyncio.create_task(manager.execute(run_id))
+    name = f"run-{run_id}"
+    while name not in cluster.secrets:
+        await asyncio.sleep(0.01)
+    if status == "running":
+        cluster.set_status(name, phase="Running", workstation={"state": "running"}, **status_fields)
+        await manager.settle(run_id)
+    task.cancel()  # the worker dies
+    await asyncio.gather(task, return_exceptions=True)
+    manager._released.clear()
+    return name
 
 
-async def is_alive(worker_id: str) -> bool:
-    return worker_id == ALIVE
-
-
-async def leave_run(accept, sessions, published, manager, state: State, task_id="T-1", owner=DEAD,
-                    container_id: str | None = "c-old", reported: str | None = None) -> tuple[uuid.UUID, prepare.RunPaths]:
-    """A run as a crashed worker leaves it: mid-flight state, directory on disk."""
-    run_id = await submit_task(accept, published, task_id=task_id)
-    paths = prepare.create_run_directory(manager.settings.data_dir, str(run_id))
-    (paths.project / "work.txt").write_text("uncommitted")
-    prepare.write_attachments(paths.attachments, [("a.txt", b"x")])
-    prepare.seal_read_only(paths.attachments)
-    async with sessions() as session:
-        run = await session.get(Run, run_id)
-        run.state = run.task.state = state
-        run.worker_id = owner
-        run.container_id = container_id
-        run.directory = str(paths.root)
-        run.reported_status = reported
-        run.token_hash = "abc"
-        await session.commit()
-    return run_id, paths
-
-
-async def run_row(sessions, run_id) -> Run:
+async def run_state(sessions, run_id) -> Run:
     async with sessions() as session:
         return await session.get(Run, run_id)
 
 
-@pytest.fixture(autouse=True)
-def as_restarted_worker(manager):
-    manager.worker_id = "new-worker"
+async def test_a_run_with_its_run_object_is_settled(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    name = await leave_running(manager, cluster, sessions, run_id)
+    await runner(sessions)(run_id, {})  # the runner reported while no worker was there
+    cluster.set_status(name, phase="Succeeded", workstation={"state": "terminated", "exitCode": 0})
 
-
-@pytest.mark.parametrize("state", [State.PREPARING, State.RUNNING, State.RESUMING])
-async def test_run_without_container_is_failed_and_cleaned_up(
-    manager, sessions, store, containers, published, configured, state, accept):
-    run_id, paths = await leave_run(accept, sessions, published, manager, state)
-    assert await manager.reconcile(is_alive) == []
-
-    run = await run_row(sessions, run_id)
-    assert run.state == State.FAILED and run.ended_at is not None and run.token_hash is None
-    assert run.error == f"worker restarted while the run was {state}"
-    assert states(published)[-1] == "failed"
-    [result] = results(published)
-    assert result["state"] == "failed" and result["error"] == run.error
-    assert not paths.root.exists()
-
-
-async def test_live_runner_container_is_reattached(manager, sessions, store, containers, published, configured, accept):
-    run_id, paths = await leave_run(accept, sessions, published, manager, State.RUNNING, container_id="c-old")
-    containers.leave_running(run_id, "c-old", runner(sessions, strict=False))
-
-    to_attach = await manager.reconcile(is_alive)
-    assert to_attach == [(run_id, "c-old")]
-    assert (await run_row(sessions, run_id)).state == State.RUNNING  # not failed
-    assert (await run_row(sessions, run_id)).worker_id == "new-worker"  # claimed
-
-    await manager.reattach(run_id, "c-old")
+    await manager.recover()
     assert states(published)[-1] == "completed"
-    assert [r["state"] for r in results(published)] == ["completed"]
-    assert results(published)[0]["summary"] == "All fixed."
-    assert not paths.root.exists()
-
-
-async def test_container_started_but_not_recorded_is_reattached(
-    manager, sessions, store, containers, published, configured, accept):
-    """The worker died after starting the runner but before moving the run to running."""
-    run_id, _ = await leave_run(accept, sessions, published, manager, State.PREPARING, container_id=None)
-    containers.leave_running(run_id, "c-new", runner(sessions, strict=False))
-    assert await manager.reconcile(is_alive) == [(run_id, "c-new")]
-    await manager.reattach(run_id, "c-new")
-    assert states(published)[-2:] == ["running", "completed"]
     assert results(published)[0]["state"] == "completed"
+    assert name in cluster.deleted
 
 
-async def test_reattached_run_can_go_on_to_wait(manager, sessions, store, containers, published, configured, accept):
-    run_id, paths = await leave_run(accept, sessions, published, manager, State.RUNNING, container_id="c-old")
-    containers.leave_running(run_id, "c-old", runner(sessions, strict=False, status="waiting_for_input", question="Q?"))
-    for rid, cid in await manager.reconcile(is_alive):
-        await manager.reattach(rid, cid)
+async def test_recover_holds_no_slot_for_a_run_it_finished(manager, sessions, store, cluster, published, configured,
+                                                          accept):
+    run_id = await submit_task(accept, published)
+    name = await leave_running(manager, cluster, sessions, run_id)
+    await runner(sessions)(run_id, {})
+    cluster.set_status(name, phase="Succeeded", workstation={"state": "terminated", "exitCode": 0})
+    assert await manager.recover() == []
+
+
+async def test_a_live_run_is_kept_and_holds_a_slot(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    name = await leave_running(manager, cluster, sessions, run_id)
+    held = await manager.recover()
+    assert held == [run_id]
+    assert (await run_state(sessions, run_id)).state == State.RUNNING
+    assert name in cluster.runs and cluster.deleted == []
+
+
+async def test_a_run_whose_object_is_gone_fails(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    name = await leave_running(manager, cluster, sessions, run_id)
+    del cluster.runs[name]
+    await manager.recover()
+    [result] = results(published)
+    assert result["state"] == "failed" and result["error"] == "the run's Kubernetes object disappeared"
+
+
+async def preparing_without_run(manager, sessions, run_id, started_ago: float = 0) -> None:
+    """A run moved to preparing by a worker that died before it created the Run."""
+    await manager._move(run_id, State.PREPARING, expect={State.QUEUED})
+    async with sessions() as session:
+        run = await session.get(Run, run_id)
+        run.started_at = utcnow() - timedelta(seconds=started_ago)
+        await session.commit()
+
+
+async def test_preparing_without_a_run_fails_when_no_other_worker_lives(
+        manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    await preparing_without_run(manager, sessions, run_id)
+    await manager.recover()
+    [result] = results(published)
+    assert result["error"] == "the worker restarted while preparing the run"
+
+
+async def test_preparing_without_a_run_is_left_to_a_live_worker_while_young(
+        manager, sessions, store, cluster, published, configured, accept):
+    async def alive():
+        return True
+
+    manager.other_workers_alive = alive
+    run_id = await submit_task(accept, published)
+    await preparing_without_run(manager, sessions, run_id, started_ago=60)
+    await manager.recover()
+    await manager.sweep()
+    assert (await run_state(sessions, run_id)).state == State.PREPARING
+    assert results(published) == []
+
+    async with sessions() as session:  # older than any preparation takes
+        run = await session.get(Run, run_id)
+        run.started_at = utcnow() - timedelta(seconds=ABANDONED_AFTER + 60)
+        await session.commit()
+    await manager.sweep()
+    assert results(published)[0]["error"] == "the worker restarted while preparing the run"
+
+
+async def test_this_workers_own_preparation_is_not_abandoned(
+        manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    await preparing_without_run(manager, sessions, run_id)
+    manager._hold_from_now(run_id)  # this process is preparing it
+    await manager.sweep()
+    assert (await run_state(sessions, run_id)).state == State.PREPARING
+    manager._released.clear()
+
+
+async def test_a_run_object_of_a_finished_run_is_deleted(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    cluster.behaviours.append(runner(sessions))
+    await manager.execute(run_id)
+    await cluster.idle()
+    name = f"run-{run_id}"
+    stray = {"apiVersion": "exradius.dev/v1alpha1", "kind": "Run", "metadata": {"name": name}, "spec": {}, "status": {}}
+    cluster.runs[name] = stray  # finalize could not delete it
+    unknown = f"run-{uuid.uuid4()}"
+    cluster.runs[unknown] = {**stray, "metadata": {"name": unknown}}
+    await manager.recover()
+    assert name not in cluster.runs and unknown not in cluster.runs
+
+
+async def test_waiting_runs_are_left_alone(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    cluster.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?"))
+    await manager.execute(run_id)
+    name = f"run-{run_id}"
+    cluster._stop[name].set()  # the pod dies while the run waits
+    await cluster.idle()
+    held = await manager.recover()
+    assert held == []  # a waiting run holds no slot
+    assert (await run_state(sessions, run_id)).state == State.WAITING_FOR_INPUT
+    assert name in cluster.runs
+
+
+async def test_a_cancelled_run_that_was_not_finalised_is_finalised(
+        manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    name = await leave_running(manager, cluster, sessions, run_id)
+    await manager._move(run_id, State.CANCELLED, reason="cancelled by admin")  # then the worker died
+    cluster.set_status(name, phase="Failed", reason="Cancelled")
+    await manager.recover()
+    assert [r["state"] for r in results(published)] == ["cancelled"]
+    assert name in cluster.deleted
+
+
+async def test_double_settle_is_harmless(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    name = await leave_running(manager, cluster, sessions, run_id)
+    await runner(sessions)(run_id, {})
+    cluster.set_status(name, phase="Succeeded", workstation={"state": "terminated", "exitCode": 0})
+    obj = await cluster.get_run(name)
+    await asyncio.gather(manager.settle(run_id, obj), manager.settle(run_id, obj), manager.settle(run_id))
+    await manager.sweep()
+    assert states(published).count("completed") == 1
+    assert len(results(published)) == 1
+
+
+async def test_sweep_picks_up_a_lost_nudge(manager, sessions, store, cluster, published, configured, accept):
+    """The runner reported waiting; the run_reported message never arrived."""
+    run_id = await submit_task(accept, published)
+    await leave_running(manager, cluster, sessions, run_id)
+    await runner(sessions, status="waiting_for_input", question="Q?")(run_id, {})
+    await manager.sweep()
     assert states(published)[-1] == "waiting_for_input"
-    assert [e.payload["question"] for e in published if e.type == "info_request"] == ["Q?"]
-    assert paths.root.exists() and results(published) == []
+    assert [e.type for e in published].count("info_request") == 1
 
 
-async def test_setup_containers_of_a_dead_run_are_removed(manager, sessions, store, containers, published, configured, accept):
-    run_id, paths = await leave_run(accept, sessions, published, manager, State.PREPARING, container_id=None)
-    containers.leave_running(run_id, "c-setup", runner(sessions), kind="setup")
-    assert await manager.reconcile(is_alive) == []
-    assert containers.removed == ["c-setup"]
-    assert (await run_row(sessions, run_id)).state == State.FAILED
-    assert not paths.root.exists()
-
-
-async def test_reported_outcome_is_honoured_when_container_is_gone(
-    manager, sessions, store, containers, published, configured, accept):
-    """The worker died after the container exited but before acting on its outcome."""
-    run_id, _ = await leave_run(accept, sessions, published, manager, State.RUNNING, reported="completed")
-    assert await manager.reconcile(is_alive) == []
-    assert (await run_row(sessions, run_id)).state == State.COMPLETED
-    assert [r["state"] for r in results(published)] == ["completed"]
-
-
-async def test_runs_of_live_workers_are_left_alone(manager, sessions, store, containers, published, configured, accept):
-    run_id, paths = await leave_run(accept, sessions, published, manager, State.PREPARING, owner=ALIVE, container_id=None)
-    assert await manager.reconcile(is_alive) == []
-    run = await run_row(sessions, run_id)
-    assert run.state == State.PREPARING and run.worker_id == ALIVE
-    assert paths.root.exists() and results(published) == []
-
-
-async def test_two_restarting_workers_recover_a_run_once(manager, sessions, store, containers, published, configured, accept):
-    run_id, _ = await leave_run(accept, sessions, published, manager, State.RUNNING, container_id="c-old")
-    containers.leave_running(run_id, "c-old", runner(sessions, strict=False))
-    assert await manager.reconcile(is_alive) == [(run_id, "c-old")]
-
-    # A second worker restarting now sees the run claimed by the first, which is alive.
-    async def first_worker_is_alive(worker_id: str) -> bool:
-        return worker_id == "new-worker"
-
-    manager.worker_id = "other-new-worker"
-    assert await manager.reconcile(first_worker_is_alive) == []
-    assert (await run_row(sessions, run_id)).worker_id == "new-worker"
-
-
-async def test_double_settle_is_harmless(manager, sessions, store, containers, published, configured, accept):
-    """Two workers waiting on the same container: only the first acts on its exit."""
-    run_id, _ = await leave_run(accept, sessions, published, manager, State.RUNNING, container_id="c-old",
-                                reported="waiting_for_input")
-    await manager._settle(run_id, "c-old", wait=False)
-    await manager._settle(run_id, "c-old", wait=False)
-    assert states(published).count("waiting_for_input") == 1
-
-
-async def test_waiting_runs_are_left_alone(manager, sessions, store, containers, published, configured, accept):
-    run_id, paths = await leave_run(accept, sessions, published, manager, State.WAITING_FOR_INPUT, container_id=None)
-    assert await manager.reconcile(is_alive) == []
-    assert await manager.sweep_orphans() == []
-    assert (await run_row(sessions, run_id)).state == State.WAITING_FOR_INPUT
-    assert paths.root.exists() and (paths.project / "work.txt").read_text() == "uncommitted"
-
-
-async def test_sweep_removes_orphans_and_keeps_live_runs(manager, sessions, store, containers, published, configured, accept):
-    waiting_id, waiting = await leave_run(
-        accept, sessions, published, manager, State.WAITING_FOR_INPUT, task_id="W", container_id=None
-    )
-    finished_id, finished = await leave_run(accept, sessions, published, manager, State.RUNNING, task_id="F")
+async def test_waiting_run_with_answer_is_still_resumable(manager, sessions, store, cluster, published, configured, accept):
+    run_id = await submit_task(accept, published)
+    cluster.behaviours.append(runner(sessions, status="waiting_for_input", question="Q?"))
+    await manager.execute(run_id)
     async with sessions() as session:
-        run = await session.get(Run, finished_id)
-        run.state = run.task.state = State.COMPLETED
+        request = await session.scalar(select(InfoRequest))
+        request.answer, request.answered_at = "A", utcnow()
         await session.commit()
-    data = manager.settings.data_dir
-    stray = prepare.create_run_directory(data, str(uuid.uuid4()))  # no row at all
-    prepare.write_attachments(stray.attachments, [("a.txt", b"x")])
-    prepare.seal_read_only(stray.attachments)  # read-only dirs must not stop the sweep
-    junk = data / "runs" / "not-a-run-id"
-    junk.mkdir()
-    (data / "runs" / "stray-file").write_text("left alone")
-    mirror = data / "mirrors" / "billing" / "app.git"
-    mirror.mkdir(parents=True)
-
-    removed = await manager.sweep_orphans()
-    assert sorted(removed) == sorted([str(finished_id), stray.root.name, "not-a-run-id"])
-    assert waiting.root.exists()
-    assert not finished.root.exists() and not stray.root.exists() and not junk.exists()
-    assert (data / "runs" / "stray-file").exists() and mirror.exists()
-
-
-async def test_sweep_without_runs_directory(manager):
-    assert await manager.sweep_orphans() == []
-
-
-async def test_waiting_run_with_answer_is_still_resumable(manager, sessions, store, containers, published, configured, accept):
-    run_id, _ = await leave_run(accept, sessions, published, manager, State.WAITING_FOR_INPUT, container_id=None)
-    async with sessions() as session:
-        session.add(InfoRequest(run_id=run_id, question="Q?", answer="A", answered_at=utcnow()))
-        await session.commit()
-    assert await manager.reconcile(is_alive) == []
+    await manager.recover()
     assert await manager.resumable_runs() == [run_id]
 
 
+async def test_stray_verify_and_probe_runs_are_deleted(settings, sessions, store, cluster, configured):
+    from exradius.worker.main import Worker
+
+    worker = Worker(settings, cluster=cluster)
+    try:
+        async with sessions() as session:
+            open_one = ProjectVerification(project_id=configured["project"].id, state="running", steps=[])
+            done_one = ProjectVerification(project_id=configured["project"].id, state="passed", steps=[])
+            test = ProviderTest(provider_id=configured["provider"].id, state="failed", fingerprint="x")
+            session.add_all([open_one, done_one, test])
+            await session.commit()
+        names = [run_objects.run_name("verify", open_one.id), run_objects.run_name("verify", done_one.id),
+                 run_objects.run_name("probe", test.id)]
+        for name in names:
+            cluster.runs[name] = {"metadata": {"name": name}, "spec": {}, "status": {}}
+        await worker._delete_stray_runs()
+        assert list(cluster.runs) == [names[0]]  # only the open verification keeps its Run
+    finally:
+        await worker.engine.dispose()
+
+
+@pytest.mark.parametrize("kind", ["DELETED", "MODIFIED"])
+async def test_watch_events_settle_task_runs_only(manager, sessions, store, cluster, published, configured, accept, kind):
+    run_id = await submit_task(accept, published)
+    name = await leave_running(manager, cluster, sessions, run_id)
+    await manager.on_event(kind, {"metadata": {"name": f"verify-{uuid.uuid4()}"}})  # not a task Run: ignored
+    assert (await run_state(sessions, run_id)).state == State.RUNNING
+    if kind == "DELETED":
+        del cluster.runs[name]
+        await manager.on_event(kind, {"metadata": {"name": name}})
+        assert results(published)[0]["error"] == "the run's Kubernetes object disappeared"
+    else:
+        await runner(sessions)(run_id, {})
+        cluster.set_status(name, phase="Succeeded", workstation={"state": "terminated", "exitCode": 0})
+        await manager.on_event(kind, await cluster.get_run(name))
+        assert results(published)[0]["state"] == "completed"

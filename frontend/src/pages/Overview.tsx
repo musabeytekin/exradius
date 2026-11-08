@@ -50,9 +50,8 @@ interface StatusItem { key: string; label: string; tone: Tone; value: ReactNode;
 function statusItems(s: SystemStatus, kinds: ProviderKindSpec[], declared: Runtime[] | undefined): StatusItem[] {
   const workers = s.workers;
   const slots = workers.reduce((n, w) => n + w.concurrency, 0);
-  const dockerBad = workers.filter((w) => !w.docker_ok);
-  const imageBad = workers.filter((w) => w.runner_image_ok === false);
   const rts = workerRuntimes(workers, declared);
+  const op = s.operator;
   return [
     {
       key: "database", label: "Database", tone: s.database.ok ? "ok" : "err",
@@ -69,19 +68,15 @@ function statusItems(s: SystemStatus, kinds: ProviderKindSpec[], declared: Runti
       key: "workers", label: "Workers", tone: workers.length ? "ok" : "err",
       value: workers.length ? `${workers.length} live` : "none",
       sub: workers.length ? `${slots} slot${slots === 1 ? "" : "s"}` : undefined,
-      fix: workers.length ? undefined : <>No worker has sent a heartbeat in 60 s. Start one: <code>docker compose up -d worker</code>.</>,
+      fix: workers.length ? undefined : <>No worker has sent a heartbeat in 60 s: check the <code>exradius-worker</code> pods.</>,
     },
     {
-      key: "docker", label: "Docker", tone: !workers.length ? "neutral" : dockerBad.length ? "err" : "ok",
-      value: !workers.length ? "unknown" : dockerBad.length ? "unreachable" : "reachable",
-      fix: dockerBad.length ? <>Worker {dockerBad[0].hostname}: {dockerBad[0].docker_detail}. Mount <code>/var/run/docker.sock</code> into the worker.</> : undefined,
+      key: "operator", label: "Operator", tone: !op ? "neutral" : op.alive ? "ok" : "err",
+      value: !op ? "unknown" : op.alive ? "running" : "not running",
+      sub: op?.alive && op.renewed_at ? `lease renewed ${relativeTime(op.renewed_at)}` : undefined,
+      fix: op && !op.alive ? <>{op.detail ?? "The operator's leader Lease is not renewed"}: runs cannot start. Check the <code>exradius-operator</code> pods.</> : undefined,
     },
-    rts ? runtimesItem(rts) : {
-      key: "image", label: "Runner image", tone: !workers.length ? "neutral" : imageBad.length ? "err" : "ok",
-      value: <Mono className="text-[12.5px]" title={workers[0]?.runner_image}>{workers[0]?.runner_image ?? "unknown"}</Mono>,
-      sub: imageBad.length ? "missing" : workers.length ? "present" : undefined,
-      fix: imageBad.length ? <>Image <code>{imageBad[0].runner_image}</code> is missing on the worker's daemon.</> : undefined,
-    },
+    runtimesItem(rts),
     providerItem(s, kinds),
   ];
 }

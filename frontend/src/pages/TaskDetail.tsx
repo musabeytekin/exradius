@@ -96,7 +96,7 @@ function Header({ taskId, task, state, feedStatus }: { taskId: string; task?: Ta
       meta={
         <>
           {state && <StateChip state={state} />}
-          {task?.waiting_for === "memory" && state === task.state && <span className="text-xs text-muted">waiting for memory</span>}
+          {task?.waiting_for === "capacity" && state === task.state && <span className="text-xs text-muted">waiting for cluster capacity</span>}
           {task && (
             <>
               {project ? (
@@ -126,7 +126,7 @@ function Header({ taskId, task, state, feedStatus }: { taskId: string; task?: Ta
             onClick={async () => {
               const ok = await confirm({
                 title: `Cancel ${taskId}?`,
-                description: state === "waiting_for_input" ? "The paused run is ended and its directory removed. A result with state cancelled is published." : "The worker stops the run container. Uncommitted work in the run directory is lost. A result with state cancelled is published.",
+                description: state === "waiting_for_input" ? "The paused run's pod is stopped and its workspace removed. A result with state cancelled is published." : "The run's pod is stopped. Uncommitted work in its workspace is lost. A result with state cancelled is published.",
                 confirmLabel: "Cancel task",
               });
               if (ok) cancel.mutate();
@@ -183,7 +183,7 @@ function Body({ task, state, live, feed, result }: { task: TaskDetail; state: Ta
               loading={feed.loading}
               infoRequests={task.info_requests}
               downloadUrl={task.run_id ? api.runTranscriptUrl(task.run_id) : null}
-              emptyHint={state === "queued" ? (task.waiting_for === "memory" ? "Queued: waiting for memory." : "Queued: waiting for a free worker slot.") : state === "preparing" ? "Preparing: reading the config, building images, cloning and running setup." : undefined}
+              emptyHint={state === "queued" ? "Queued: waiting for a free worker slot." : state === "preparing" ? (task.waiting_for === "capacity" ? "Preparing: waiting for cluster capacity." : "Preparing: reading the config, cloning and running setup.") : undefined}
             />
           </Tabs.Content>
           <Tabs.Content value="input" className="pt-4"><TaskInput task={task} /></Tabs.Content>
@@ -352,7 +352,7 @@ function RunCard({ task }: { task: TaskDetail }) {
             ["Run", <span className="flex items-center gap-1"><Mono className="text-xs" title={run.id}>{shortId(run.id)}</Mono><CopyButton text={run.id} label="" /></span>],
             ["Started", run.started_at ? <Tooltip content={absoluteTime(run.started_at)}><span>{relativeTime(run.started_at)}</span></Tooltip> : "—"],
             ["Duration", duration(between(run.started_at, run.ended_at))],
-            ["Container", run.container_id ? <Mono className="text-xs" title={run.container_id}>{run.container_id.slice(0, 12)}</Mono> : "—"],
+            ["Run object", run.run_object ? <Mono className="text-xs" title={run.run_object}>{shortId(run.run_object.replace(/^run-/, ""))}</Mono> : "—"],
             ["Session", run.runtime_session_id ? <Mono className="text-xs" title={run.runtime_session_id}>{shortId(run.runtime_session_id)}</Mono> : "—"],
             ...(run.config_commit ? [["Config", <Mono className="text-xs" title={run.config_commit}>{shortCommit(run.config_commit)}</Mono>] as [string, ReactNode]] : []),
           ]}

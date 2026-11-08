@@ -279,11 +279,14 @@ export const ALL_STATES: TaskState[] = [
 export interface TaskSummary {
   task_id: string; project: string; agent: string; state: TaskState;
   received_at: string; run_id: Uuid | null;
-  /** `memory` while the run waits for its memory reservation (it stays queued). */
+  /** `capacity` while the run's pod waits for room in the cluster (it stays preparing). */
   waiting_for?: string | null;
 }
 export interface Run {
-  id: Uuid; state: TaskState; container_id: string | null; runtime_session_id: string | null;
+  id: Uuid; state: TaskState;
+  /** The run's Kubernetes Run object (`run-<id>`), deleted when the run ends. */
+  run_object?: string | null;
+  runtime_session_id: string | null;
   started_at: string | null; ended_at: string | null; error: string | null;
   summary: string | null; output: unknown;
   /** The environment section the run was given, when the API exposes it. */
@@ -347,20 +350,19 @@ export interface Published { queue: string; message: Record<string, unknown> }
 export interface Check { ok: boolean; detail: string | null }
 export interface Worker {
   id: string; hostname: string; started_at: string; last_seen_at: string; concurrency: number;
-  docker_ok: boolean; docker_detail: string | null;
-  /** Runtime bundles extracted on the worker (docs/runtime-bundles.md §3). Absent on older workers. */
-  runtimes?: WorkerRuntime[];
-  /** Older workers only; replaced by `runtimes`. */
-  runner_image?: string; runner_image_ok?: boolean;
+  /** The runtime bundles the worker is configured with (docs/kubernetes.md §15). */
+  runtimes: WorkerRuntime[];
   version: string | null;
 }
+/** The operator as the workers see its leader Lease (docs/kubernetes.md §15). */
+export interface OperatorStatus { alive: boolean; holder?: string | null; renewed_at?: string | null; detail?: string | null }
 export interface WorkerRuntime { name: string; version: string | null; ready: boolean; image?: string | null; error?: string | null }
 export interface SystemStatus {
   database: Check; broker: Check; workers: Worker[];
+  /** `null` while no live worker reported it. */
+  operator?: OperatorStatus | null;
   provider?: ProviderStatus;
   public_api_url: string; version: string;
-  /** Not in the contract yet; shown when an API reports it. */
-  data_dir?: string | null;
 }
 export interface ProviderStatus {
   configured: boolean; count: number;

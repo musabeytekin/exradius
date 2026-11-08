@@ -28,14 +28,14 @@ def db_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def settings(db_path: Path, tmp_path: Path) -> Settings:
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
     return Settings(
         database_url=f"sqlite+aiosqlite:///{db_path}",
         secret_key=generate_secret_key(),
         admin_username="admin",
         admin_password="correct horse",
-        data_dir=data_dir,
+        cache_dir=cache_dir,
         broker_url="amqp://unused/",
     )
 
@@ -106,11 +106,11 @@ def commit_config(remote: Path, files: dict[str, str | None], message: str = "co
     return git("rev-parse", "HEAD", cwd=work).strip()
 
 
-async def add_project(sessions, data_dir: Path, remote: Path, **fields) -> Project:
+async def add_project(sessions, cache_dir: Path, remote: Path, **fields) -> Project:
     """A project row for ``remote`` with its config read (as ``POST /api/projects`` does)."""
     project = Project(config_url=str(remote), **fields)
     project.id = project.id or uuid.uuid4()
-    snapshot = read_snapshot(data_dir, project.id, project.config_url,
+    snapshot = read_snapshot(cache_dir, project.id, project.config_url,
                              branch=project.config_branch, path=project.config_path)
     project.slug = fields.get("slug") or (snapshot.config.project.slug if snapshot.config else "broken")
     remember(project, snapshot)
@@ -134,7 +134,7 @@ async def configured(sessions, box, settings, config_remote):
                             credential_encrypted=box.encrypt("sk-test"), settings={}, is_default=True)
         session.add(provider)
         await session.commit()
-    project = await add_project(sessions, settings.data_dir, config_remote)
+    project = await add_project(sessions, settings.cache_dir, config_remote)
     return {"project": project, "provider": provider, "remote": config_remote}
 
 
@@ -171,6 +171,6 @@ def accept(sessions, store, box, settings):
     """``accept_task`` as the worker calls it."""
 
     async def _accept(body: bytes):
-        return await accept_task(sessions, store, body, box=box, data_dir=settings.data_dir)
+        return await accept_task(sessions, store, body, box=box, cache_dir=settings.cache_dir)
 
     return _accept

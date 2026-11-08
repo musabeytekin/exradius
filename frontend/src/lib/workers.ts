@@ -2,12 +2,8 @@ import type { Runtime, Worker } from "./types";
 
 export interface RuntimeSummary { name: string; label: string; versions: string[]; ready: boolean; notReadyOn: string[]; errors: string[] }
 
-/**
- * Runtimes across live workers: one entry per runtime name, ready only when every worker
- * that reports it has it ready. `null` when no worker reports runtimes (an older worker).
- */
-export function workerRuntimes(workers: Worker[], declared: Runtime[] | undefined): RuntimeSummary[] | null {
-  if (!workers.some((w) => Array.isArray(w.runtimes))) return null;
+/** Runtimes across live workers: one entry per runtime name, ready only when every worker that reports it has it ready. */
+export function workerRuntimes(workers: Worker[], declared: Runtime[] | undefined): RuntimeSummary[] {
   const by = new Map<string, RuntimeSummary>();
   for (const w of workers) {
     for (const r of w.runtimes ?? []) {
@@ -24,9 +20,7 @@ export function workerRuntimes(workers: Worker[], declared: Runtime[] | undefine
   return [...by.values()];
 }
 
-/** A worker needs attention when Docker or a runtime (or, on older workers, the runner image) is not ready. */
+/** A worker needs attention when it reports no runtime, or one that is not ready. */
 export function workerHealthy(w: Worker): boolean {
-  if (!w.docker_ok) return false;
-  if (Array.isArray(w.runtimes)) return w.runtimes.length > 0 && w.runtimes.every((r) => r.ready);
-  return w.runner_image_ok !== false;
+  return (w.runtimes ?? []).length > 0 && w.runtimes.every((r) => r.ready);
 }

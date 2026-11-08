@@ -5,7 +5,7 @@ import { AgentCard } from "./TaskDetail";
 
 const T = "2026-11-08T17:10:03Z";
 const run = (r: Partial<Run>): Run => ({
-  id: "r1", state: "running", container_id: null, runtime_session_id: null, started_at: T, ended_at: null,
+  id: "r1", state: "running", run_object: null, runtime_session_id: null, started_at: T, ended_at: null,
   error: null, summary: null, output: null, ...r,
 });
 const task = (r: Run | null): TaskDetail => ({
