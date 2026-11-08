@@ -2,7 +2,8 @@
 
 ```python
 kit = Kit(tracker, KitSettings.from_env(), software="exradius-jira 0.2.0")
-await kit.run()                    # starts the tracker, Exradius, the reconcile, the events
+await kit.start()                  # the tracker, the directory, the broker, the reconcile
+await kit.listen()                 # Exradius's events and the status heartbeat
 await kit.handed_over(ref)         # from the bridge's webhook listener
 await kit.commented(ref)
 ```
@@ -191,11 +192,16 @@ class Kit:
         for ref in await self.tracker.assigned_to_bot():
             await self._locked(ref, "reconcile", self.flow.reconcile)
 
-    async def run(self) -> None:
-        await self.start()
+    async def listen(self) -> None:
+        """After ``start``: consume Exradius's events and report the status every 5 minutes."""
         await self.broker.consume(self.on_event)
         self._heartbeat = asyncio.create_task(self._beat())
         log.info("bridge %s is running for %s", self.tracker.bridge, self.tracker.instance)
+
+    async def run(self) -> None:
+        """``start``, ``listen``, then run until cancelled."""
+        await self.start()
+        await self.listen()
         await asyncio.Event().wait()
 
     async def close(self) -> None:
