@@ -10,6 +10,7 @@ project's variables, never the runner's.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,11 @@ INTERPRETER_VARIABLES = (
 RUN_TOKEN = "EXRADIUS_RUN_TOKEN"
 """Given to the container for the runner alone; neither the agent nor MCP servers see it."""
 
+KUBELET_VARIABLES = re.compile(r"^KUBERNETES_(SERVICE_(HOST|PORT|PORT_HTTPS)|PORT(_\d+_(TCP|UDP|SCTP)(_PROTO|_PORT|_ADDR)?)?)$")
+"""The API server's address, which the kubelet adds to every container whatever
+``enableServiceLinks`` says. Not the project's: the agent does not get them (they give no
+access anyway: run pods have no ServiceAccount token)."""
+
 RUNTIME_DIR = "EXRADIUS_RUNTIME_DIR"
 """Set by the bundle's launcher (``bin/exradius-runner``); not part of the container's
 environment."""
@@ -35,8 +41,8 @@ environment."""
 @dataclass(frozen=True)
 class RunnerEnvironment:
     container: dict[str, str]
-    """The environment as the container received it, without the run token: what the
-    agent's session starts from."""
+    """The environment as the container received it, without the run token and the
+    kubelet's API server variables: what the agent's session starts from."""
     run_token: str | None
     runtime_dir: Path | None
     """The bundle directory, or ``None`` outside a bundle (tests, development)."""
@@ -48,7 +54,7 @@ def isolate(environ: MutableMapping[str, str] | None = None) -> RunnerEnvironmen
     environ = os.environ if environ is None else environ
     runtime_dir = environ.pop(RUNTIME_DIR, None)
     run_token = environ.pop(RUN_TOKEN, None)
-    container = dict(environ)
+    container = {k: v for k, v in environ.items() if not KUBELET_VARIABLES.match(k)}
     for name in INTERPRETER_VARIABLES:
         environ.pop(name, None)
     return RunnerEnvironment(

@@ -180,7 +180,10 @@ func (b Pods) Pod(run *v1.Run) *corev1.Pod {
 				RunAsNonRoot:        ptr.To(true),
 				FSGroup:             ptr.To(c.RunGID),
 				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
-				SeccompProfile:      &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+				// Only the run gid and fsGroup: not the groups the image's /etc/group gives
+				// its own user of that uid (Ubuntu's uid 1000 is in sudo and adm).
+				SupplementalGroupsPolicy: ptr.To(corev1.SupplementalGroupsPolicyStrict),
+				SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
 			NodeSelector: c.NodeSelector,
 			Tolerations:  c.Tolerations,

@@ -265,6 +265,7 @@ spec:
     runAsUser: 1000
     seccompProfile:
       type: RuntimeDefault
+    supplementalGroupsPolicy: Strict
   serviceAccountName: exradius-run
   terminationGracePeriodSeconds: 30
   volumes:

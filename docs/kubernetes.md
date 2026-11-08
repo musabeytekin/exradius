@@ -390,8 +390,13 @@ The operator writes these and the Run spec cannot change them:
 - `readOnlyRootFilesystem: true`;
 - `allowPrivilegeEscalation: false`, capabilities drop `ALL`, seccomp `RuntimeDefault`;
 - `automountServiceAccountToken: false`;
-- `enableServiceLinks: false`, so Kubernetes injects no `*_SERVICE_HOST` variables and the
-  environment stays the project's;
+- `enableServiceLinks: false`, so Kubernetes injects no `*_SERVICE_HOST` variables for the
+  namespace's Services. The kubelet still adds the API server's own `KUBERNETES_SERVICE_*` and
+  `KUBERNETES_PORT*` to every container; the runner drops them from the agent's environment,
+  so it stays the project's;
+- `supplementalGroupsPolicy: Strict`, so the run user gets only the run gid and `fsGroup`,
+  not the groups the image's `/etc/group` gives its own user of that uid (Ubuntu's uid 1000
+  is in `sudo` and `adm`);
 - `terminationGracePeriodSeconds: 30` (cancel, §8.4);
 - `runtimeClassName` from values (`runs.runtimeClassName`), empty for the cluster default;
 - `hostUsers: false` when `runs.userNamespaces: true` (phase 5). With it, a service's root is an
@@ -1009,3 +1014,12 @@ Details the earlier sections left open or got wrong, decided while building phas
 - **Tilt** disables its Docker build cache pruning (by default it deletes every build cache
   older than six hours, other projects' too). A Python change rebuilds the bundle, because
   run pods mount it, and rolls the worker; the api is updated in place.
+- **The kubelet's API server variables.** `enableServiceLinks: false` does not remove
+  `KUBERNETES_SERVICE_HOST` and the other `KUBERNETES_SERVICE_*`/`KUBERNETES_PORT*`
+  variables: the kubelet adds them to every container (checked on kind). The runner's
+  `isolate()` leaves them out of the agent's environment; setup commands still see them.
+  They give no access: run pods have no ServiceAccount token, and NetworkPolicy blocks the
+  API server from phase 4.
+- **Supplementary groups.** containerd gives the run uid the groups the image's own
+  `/etc/group` lists for that uid (`sudo`, `adm` on Ubuntu images), before the generated
+  `/etc/group` is mounted. `supplementalGroupsPolicy: Strict` (§7.8) prevents that.

@@ -43,6 +43,18 @@ def test_isolate_cleans_only_the_runners_process():
     assert env.run_token == "tok" and env.runtime_dir == Path("/opt/exradius/runtime")
 
 
+def test_the_kubelets_api_server_variables_do_not_reach_the_agent():
+    """The kubelet adds them to every container, enableServiceLinks or not (docs/kubernetes.md §23)."""
+    kubelet = {
+        "KUBERNETES_SERVICE_HOST": "10.96.0.1", "KUBERNETES_SERVICE_PORT": "443",
+        "KUBERNETES_SERVICE_PORT_HTTPS": "443", "KUBERNETES_PORT": "tcp://10.96.0.1:443",
+        "KUBERNETES_PORT_443_TCP": "tcp://10.96.0.1:443", "KUBERNETES_PORT_443_TCP_ADDR": "10.96.0.1",
+        "KUBERNETES_PORT_443_TCP_PORT": "443", "KUBERNETES_PORT_443_TCP_PROTO": "tcp",
+    }
+    env = isolate({**PROJECT_ENV, **kubelet, "KUBERNETES_NAMESPACE": "the project's own"})
+    assert env.container == {**PROJECT_ENV, "KUBERNETES_NAMESPACE": "the project's own"}
+
+
 @pytest.fixture
 def fake_bundle(tmp_path):
     """A bundle directory whose ``bin/claude`` records the environment it was started with."""
