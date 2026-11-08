@@ -1,0 +1,35 @@
+[project]
+name = "exradius-github"
+version = "0.1.0"
+description = "Connects GitHub issues to Exradius"
+requires-python = ">=3.14"
+dependencies = [
+    "aio-pika>=9.4",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "pyjwt[crypto]>=2.9",
+    "starlette>=0.40",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+exradius-github = "exradius_github.main:run"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "exradius_github"
+module-root = ""
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
