@@ -74,7 +74,7 @@ class Tracker(Protocol):
     async def start(self) -> None: ...                     # check credentials; raise TrackerProblem
     async def item(self, ref: ItemRef) -> Item: ...        # read one work item
     async def download(self, attachment: AttachmentInfo) -> bytes: ...
-    async def post(self, ref: ItemRef, message: Message) -> None: ...
+    async def post(self, ref: ItemRef, message: Message) -> datetime | None: ...  # the comment's time
     async def attach(self, ref: ItemRef, name: str, content_type: str, data: bytes) -> None: ...
     async def hand_back(self, ref: ItemRef) -> None: ...   # to the reporter, if still with the bot
     async def load_state(self, ref: ItemRef) -> dict | None: ...
@@ -93,7 +93,7 @@ The data types, all in `exradius_bridge_kit.tracker`:
 | `Comment` | `author`, `created`, `body` (Markdown) |
 | `AttachmentInfo` | `id`, `name`, `content_type`, `size`, `created` |
 | `Reply` | `author`, `created`, `body` (Markdown, the bot's mention removed), `attachments` (added since the question) |
-| `Message` | a list of parts: `Text(markdown)` and `Mention(person)`; the tracker renders them in its own format |
+| `Message` | blocks: `Paragraph` (the kit's own words: `Span` text with bold or italic, and `Mention(person)`) and `Markdown` (the agent's text); the tracker renders them in its own format, and `plain()` gives Markdown |
 
 `replies` returns only comments that count as answers: written by a person (not the bot)
 after `since`, and addressed to the bot the tracker's way (in Jira, an ADF mention of the
@@ -149,7 +149,8 @@ On `task.info_request`:
 >
 > Mention me in your reply to answer.
 
-The state becomes `waiting` with the `request_id` and the time of the question. On
+The state becomes `waiting` with the `request_id` and the time of the question, as the
+tracker gave it to the comment (so replies are compared by the tracker's clock). On
 `commented` while waiting, the kit asks `replies(ref, since=asked_at)` and publishes the
 first reply on `exradius.answers`: its Markdown, and its attachments within the size cap
 (§7). The state becomes `active`. Comments while nothing waits are ignored in v1.
