@@ -1,0 +1,282 @@
+---
+metadata:
+  labels:
+    exradius.dev/project: saleor
+    exradius.dev/purpose: verify
+    exradius.dev/run: verify-9a1b
+  name: verify-9a1b
+  namespace: exradius-runs
+  ownerReferences:
+  - apiVersion: exradius.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Run
+    name: verify-9a1b
+    uid: uid-9a1b
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+status: {}
+---
+metadata:
+  labels:
+    exradius.dev/pod-generation: "0"
+    exradius.dev/project: saleor
+    exradius.dev/purpose: verify
+    exradius.dev/run: verify-9a1b
+  name: verify-9a1b-0
+  namespace: exradius-runs
+  ownerReferences:
+  - apiVersion: exradius.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Run
+    name: verify-9a1b
+    uid: uid-9a1b
+spec:
+  automountServiceAccountToken: false
+  containers:
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - --verify
+    - 9a1b
+    env:
+    - name: HOME
+      value: /home/runner
+    - name: EXRADIUS_STATE_DIR
+      value: /exradius/state
+    - name: EXRADIUS_WORK_DIR
+      value: /work
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: verify-9a1b
+    - name: EXRADIUS_PURPOSE
+      value: verify
+    - name: EXRADIUS_ID
+      value: 9a1b
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: workstation
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /work
+      name: workspace
+      subPath: work
+    - mountPath: /work/.exradius/attachments
+      name: workspace
+      readOnly: true
+      subPath: work/.exradius/attachments
+    - mountPath: /home/runner
+      name: workspace
+      subPath: home
+    - mountPath: /tmp
+      name: workspace
+      subPath: tmp
+    - mountPath: /exradius/state
+      name: workspace
+      subPath: state
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+    - mountPath: /etc/passwd
+      name: identity
+      readOnly: true
+      subPath: passwd
+    - mountPath: /etc/group
+      name: identity
+      readOnly: true
+      subPath: group
+    workingDir: /work
+  enableServiceLinks: false
+  initContainers:
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - --prepare
+    - verify
+    - 9a1b
+    env:
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: verify-9a1b
+    - name: EXRADIUS_PURPOSE
+      value: verify
+    - name: EXRADIUS_ID
+      value: 9a1b
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: prepare
+    resources: {}
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /exradius/workspace
+      name: workspace
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - --clone
+    env:
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: verify-9a1b
+    - name: EXRADIUS_PURPOSE
+      value: verify
+    - name: EXRADIUS_ID
+      value: 9a1b
+    - name: HOME
+      value: /home/runner
+    - name: EXRADIUS_STATE_DIR
+      value: /exradius/state
+    - name: EXRADIUS_WORK_DIR
+      value: /work
+    - name: EXRADIUS_CLONE_FOLDER
+      value: saleor
+    - name: EXRADIUS_CLONE_URL
+      value: https://github.com/acme/saleor.git
+    - name: EXRADIUS_CLONE_BRANCH
+      value: main
+    - name: EXRADIUS_CLONE_INDEX
+      value: "0"
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: clone-0
+    resources: {}
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /work
+      name: workspace
+      subPath: work
+    - mountPath: /home/runner
+      name: workspace
+      subPath: home
+    - mountPath: /tmp
+      name: workspace
+      subPath: tmp
+    - mountPath: /exradius/state
+      name: workspace
+      subPath: state
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+    - mountPath: /etc/passwd
+      name: identity
+      readOnly: true
+      subPath: passwd
+    - mountPath: /etc/group
+      name: identity
+      readOnly: true
+      subPath: group
+    workingDir: /work
+  - command:
+    - /bin/sh
+    - -c
+    - uv sync
+    env:
+    - name: HOME
+      value: /home/runner
+    - name: EXRADIUS_STATE_DIR
+      value: /exradius/state
+    - name: EXRADIUS_WORK_DIR
+      value: /work
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: setup-0
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /work
+      name: workspace
+      subPath: work
+    - mountPath: /work/.exradius/attachments
+      name: workspace
+      readOnly: true
+      subPath: work/.exradius/attachments
+    - mountPath: /home/runner
+      name: workspace
+      subPath: home
+    - mountPath: /tmp
+      name: workspace
+      subPath: tmp
+    - mountPath: /exradius/state
+      name: workspace
+      subPath: state
+    - mountPath: /etc/passwd
+      name: identity
+      readOnly: true
+      subPath: passwd
+    - mountPath: /etc/group
+      name: identity
+      readOnly: true
+      subPath: group
+    workingDir: /work
+  restartPolicy: Never
+  securityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    runAsGroup: 1000
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  serviceAccountName: exradius-run
+  terminationGracePeriodSeconds: 30
+  volumes:
+  - name: workspace
+    persistentVolumeClaim:
+      claimName: verify-9a1b
+  - image:
+      pullPolicy: IfNotPresent
+      reference: kind-registry:5000/exradius-runtime-claude-code:0.2.0
+    name: runtime
+  - configMap:
+      defaultMode: 292
+      name: exradius-run-identity
+    name: identity
+status: {}

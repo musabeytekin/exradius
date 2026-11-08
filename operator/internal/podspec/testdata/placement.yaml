@@ -1,0 +1,219 @@
+---
+metadata:
+  labels:
+    exradius.dev/purpose: task
+    exradius.dev/run: run-5e5e
+  name: run-5e5e
+  namespace: exradius-runs
+  ownerReferences:
+  - apiVersion: exradius.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Run
+    name: run-5e5e
+    uid: uid-5e5e
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: gp3
+status: {}
+---
+metadata:
+  labels:
+    exradius.dev/pod-generation: "0"
+    exradius.dev/purpose: task
+    exradius.dev/run: run-5e5e
+  name: run-5e5e-0
+  namespace: exradius-runs
+  ownerReferences:
+  - apiVersion: exradius.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Run
+    name: run-5e5e
+    uid: uid-5e5e
+spec:
+  automountServiceAccountToken: false
+  containers:
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - 5e5e
+    env:
+    - name: HOME
+      value: /home/runner
+    - name: EXRADIUS_STATE_DIR
+      value: /exradius/state
+    - name: EXRADIUS_WORK_DIR
+      value: /work
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: run-5e5e
+    - name: EXRADIUS_PURPOSE
+      value: task
+    - name: EXRADIUS_ID
+      value: 5e5e
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: workstation
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /work
+      name: workspace
+      subPath: work
+    - mountPath: /work/.exradius/attachments
+      name: workspace
+      readOnly: true
+      subPath: work/.exradius/attachments
+    - mountPath: /home/runner
+      name: workspace
+      subPath: home
+    - mountPath: /tmp
+      name: workspace
+      subPath: tmp
+    - mountPath: /exradius/state
+      name: workspace
+      subPath: state
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+    - mountPath: /etc/passwd
+      name: identity
+      readOnly: true
+      subPath: passwd
+    - mountPath: /etc/group
+      name: identity
+      readOnly: true
+      subPath: group
+    workingDir: /work
+  enableServiceLinks: false
+  hostUsers: false
+  imagePullSecrets:
+  - name: registry
+  initContainers:
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - --prepare
+    - task
+    - 5e5e
+    env:
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: run-5e5e
+    - name: EXRADIUS_PURPOSE
+      value: task
+    - name: EXRADIUS_ID
+      value: 5e5e
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: prepare
+    resources: {}
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /exradius/workspace
+      name: workspace
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - --files
+    - 5e5e
+    env:
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: run-5e5e
+    - name: EXRADIUS_PURPOSE
+      value: task
+    - name: EXRADIUS_ID
+      value: 5e5e
+    - name: HOME
+      value: /tmp
+    - name: EXRADIUS_ATTACHMENTS_DIR
+      value: /exradius/attachments
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: files
+    resources: {}
+    restartPolicy: Always
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsGroup: 1000
+      runAsNonRoot: true
+      runAsUser: 1001
+    volumeMounts:
+    - mountPath: /exradius/attachments
+      name: workspace
+      subPath: work/.exradius/attachments
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+    - mountPath: /tmp
+      name: files-tmp
+  nodeSelector:
+    exradius.dev/pool: runs
+  restartPolicy: Never
+  runtimeClassName: gvisor
+  securityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    runAsGroup: 1000
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  serviceAccountName: exradius-run
+  terminationGracePeriodSeconds: 30
+  tolerations:
+  - effect: NoSchedule
+    key: exradius.dev/runs
+    operator: Exists
+  volumes:
+  - name: workspace
+    persistentVolumeClaim:
+      claimName: run-5e5e
+  - image:
+      pullPolicy: IfNotPresent
+      reference: kind-registry:5000/exradius-runtime-claude-code:0.2.0
+    name: runtime
+  - configMap:
+      defaultMode: 292
+      name: exradius-run-identity
+    name: identity
+  - emptyDir: {}
+    name: files-tmp
+status: {}

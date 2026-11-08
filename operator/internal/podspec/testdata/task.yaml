@@ -1,0 +1,499 @@
+---
+metadata:
+  labels:
+    exradius.dev/project: saleor
+    exradius.dev/purpose: task
+    exradius.dev/run: run-3f2c
+  name: run-3f2c
+  namespace: exradius-runs
+  ownerReferences:
+  - apiVersion: exradius.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Run
+    name: run-3f2c
+    uid: uid-3f2c
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+status: {}
+---
+metadata:
+  annotations:
+    exradius.dev/task-id: SAL-101
+  labels:
+    exradius.dev/pod-generation: "1"
+    exradius.dev/project: saleor
+    exradius.dev/purpose: task
+    exradius.dev/run: run-3f2c
+  name: run-3f2c-1
+  namespace: exradius-runs
+  ownerReferences:
+  - apiVersion: exradius.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Run
+    name: run-3f2c
+    uid: uid-3f2c
+spec:
+  automountServiceAccountToken: false
+  containers:
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - 3f2c
+    env:
+    - name: DJANGO_SETTINGS_MODULE
+      value: saleor.settings
+    - name: DATABASE_URL
+      valueFrom:
+        secretKeyRef:
+          key: env.DATABASE_URL
+          name: run-3f2c
+    - name: HOME
+      value: /home/runner
+    - name: EXRADIUS_STATE_DIR
+      value: /exradius/state
+    - name: EXRADIUS_WORK_DIR
+      value: /work
+    - name: GIT_AUTHOR_NAME
+      value: Developer
+    - name: EXRADIUS_GIT_CREDENTIAL_0
+      valueFrom:
+        secretKeyRef:
+          key: push.0
+          name: run-3f2c
+    - name: ANTHROPIC_API_KEY
+      valueFrom:
+        secretKeyRef:
+          key: provider.ANTHROPIC_API_KEY
+          name: run-3f2c
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: run-3f2c
+    - name: EXRADIUS_PURPOSE
+      value: task
+    - name: EXRADIUS_ID
+      value: 3f2c
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: workstation
+    resources:
+      limits:
+        memory: 6Gi
+      requests:
+        cpu: 500m
+        memory: 6Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /work
+      name: workspace
+      subPath: work
+    - mountPath: /work/.exradius/attachments
+      name: workspace
+      readOnly: true
+      subPath: work/.exradius/attachments
+    - mountPath: /home/runner
+      name: workspace
+      subPath: home
+    - mountPath: /tmp
+      name: workspace
+      subPath: tmp
+    - mountPath: /exradius/state
+      name: workspace
+      subPath: state
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+    - mountPath: /etc/passwd
+      name: identity
+      readOnly: true
+      subPath: passwd
+    - mountPath: /etc/group
+      name: identity
+      readOnly: true
+      subPath: group
+    workingDir: /work
+  enableServiceLinks: false
+  initContainers:
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - --prepare
+    - task
+    - 3f2c
+    env:
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: run-3f2c
+    - name: EXRADIUS_PURPOSE
+      value: task
+    - name: EXRADIUS_ID
+      value: 3f2c
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: prepare
+    resources: {}
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /exradius/workspace
+      name: workspace
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - --clone
+    env:
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: run-3f2c
+    - name: EXRADIUS_PURPOSE
+      value: task
+    - name: EXRADIUS_ID
+      value: 3f2c
+    - name: HOME
+      value: /home/runner
+    - name: EXRADIUS_STATE_DIR
+      value: /exradius/state
+    - name: EXRADIUS_WORK_DIR
+      value: /work
+    - name: EXRADIUS_CLONE_FOLDER
+      value: saleor
+    - name: EXRADIUS_CLONE_URL
+      value: https://github.com/acme/saleor.git
+    - name: EXRADIUS_CLONE_BRANCH
+      value: main
+    - name: EXRADIUS_CLONE_INDEX
+      value: "0"
+    - name: EXRADIUS_GIT_AUTH
+      valueFrom:
+        secretKeyRef:
+          key: repo.0
+          name: run-3f2c
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: clone-0
+    resources: {}
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /work
+      name: workspace
+      subPath: work
+    - mountPath: /home/runner
+      name: workspace
+      subPath: home
+    - mountPath: /tmp
+      name: workspace
+      subPath: tmp
+    - mountPath: /exradius/state
+      name: workspace
+      subPath: state
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+    - mountPath: /etc/passwd
+      name: identity
+      readOnly: true
+      subPath: passwd
+    - mountPath: /etc/group
+      name: identity
+      readOnly: true
+      subPath: group
+    workingDir: /work
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - --clone
+    env:
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: run-3f2c
+    - name: EXRADIUS_PURPOSE
+      value: task
+    - name: EXRADIUS_ID
+      value: 3f2c
+    - name: HOME
+      value: /home/runner
+    - name: EXRADIUS_STATE_DIR
+      value: /exradius/state
+    - name: EXRADIUS_WORK_DIR
+      value: /work
+    - name: EXRADIUS_CLONE_FOLDER
+      value: Dashboard.UI
+    - name: EXRADIUS_CLONE_URL
+      value: https://github.com/acme/dashboard.git
+    - name: EXRADIUS_CLONE_BRANCH
+    - name: EXRADIUS_CLONE_INDEX
+      value: "1"
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: clone-1
+    resources: {}
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /work
+      name: workspace
+      subPath: work
+    - mountPath: /home/runner
+      name: workspace
+      subPath: home
+    - mountPath: /tmp
+      name: workspace
+      subPath: tmp
+    - mountPath: /exradius/state
+      name: workspace
+      subPath: state
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+    - mountPath: /etc/passwd
+      name: identity
+      readOnly: true
+      subPath: passwd
+    - mountPath: /etc/group
+      name: identity
+      readOnly: true
+      subPath: group
+    workingDir: /work
+  - command:
+    - /bin/sh
+    - -c
+    - uv sync
+    env:
+    - name: DJANGO_SETTINGS_MODULE
+      value: saleor.settings
+    - name: DATABASE_URL
+      valueFrom:
+        secretKeyRef:
+          key: env.DATABASE_URL
+          name: run-3f2c
+    - name: HOME
+      value: /home/runner
+    - name: EXRADIUS_STATE_DIR
+      value: /exradius/state
+    - name: EXRADIUS_WORK_DIR
+      value: /work
+    - name: GIT_CONFIG_COUNT
+      value: "1"
+    - name: GIT_CONFIG_KEY_0
+      value: safe.directory
+    - name: GIT_CONFIG_VALUE_0
+      value: '*'
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: setup-0
+    resources:
+      limits:
+        memory: 6Gi
+      requests:
+        cpu: 500m
+        memory: 6Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /work
+      name: workspace
+      subPath: work
+    - mountPath: /work/.exradius/attachments
+      name: workspace
+      readOnly: true
+      subPath: work/.exradius/attachments
+    - mountPath: /home/runner
+      name: workspace
+      subPath: home
+    - mountPath: /tmp
+      name: workspace
+      subPath: tmp
+    - mountPath: /exradius/state
+      name: workspace
+      subPath: state
+    - mountPath: /etc/passwd
+      name: identity
+      readOnly: true
+      subPath: passwd
+    - mountPath: /etc/group
+      name: identity
+      readOnly: true
+      subPath: group
+    workingDir: /work
+  - command:
+    - /bin/sh
+    - -c
+    - make migrate
+    env:
+    - name: DJANGO_SETTINGS_MODULE
+      value: saleor.settings
+    - name: DATABASE_URL
+      valueFrom:
+        secretKeyRef:
+          key: env.DATABASE_URL
+          name: run-3f2c
+    - name: HOME
+      value: /home/runner
+    - name: EXRADIUS_STATE_DIR
+      value: /exradius/state
+    - name: EXRADIUS_WORK_DIR
+      value: /work
+    - name: GIT_CONFIG_COUNT
+      value: "1"
+    - name: GIT_CONFIG_KEY_0
+      value: safe.directory
+    - name: GIT_CONFIG_VALUE_0
+      value: '*'
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: setup-1
+    resources:
+      limits:
+        memory: 6Gi
+      requests:
+        cpu: 500m
+        memory: 6Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /work
+      name: workspace
+      subPath: work
+    - mountPath: /work/.exradius/attachments
+      name: workspace
+      readOnly: true
+      subPath: work/.exradius/attachments
+    - mountPath: /home/runner
+      name: workspace
+      subPath: home
+    - mountPath: /tmp
+      name: workspace
+      subPath: tmp
+    - mountPath: /exradius/state
+      name: workspace
+      subPath: state
+    - mountPath: /etc/passwd
+      name: identity
+      readOnly: true
+      subPath: passwd
+    - mountPath: /etc/group
+      name: identity
+      readOnly: true
+      subPath: group
+    workingDir: /work
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - --files
+    - 3f2c
+    env:
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: run-3f2c
+    - name: EXRADIUS_PURPOSE
+      value: task
+    - name: EXRADIUS_ID
+      value: 3f2c
+    - name: HOME
+      value: /tmp
+    - name: EXRADIUS_ATTACHMENTS_DIR
+      value: /exradius/attachments
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: files
+    resources: {}
+    restartPolicy: Always
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsGroup: 1000
+      runAsNonRoot: true
+      runAsUser: 1001
+    volumeMounts:
+    - mountPath: /exradius/attachments
+      name: workspace
+      subPath: work/.exradius/attachments
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+    - mountPath: /tmp
+      name: files-tmp
+  restartPolicy: Never
+  securityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    runAsGroup: 1000
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  serviceAccountName: exradius-run
+  terminationGracePeriodSeconds: 30
+  volumes:
+  - name: workspace
+    persistentVolumeClaim:
+      claimName: run-3f2c
+  - image:
+      pullPolicy: IfNotPresent
+      reference: kind-registry:5000/exradius-runtime-claude-code:0.2.0
+    name: runtime
+  - configMap:
+      defaultMode: 292
+      name: exradius-run-identity
+    name: identity
+  - emptyDir: {}
+    name: files-tmp
+status: {}

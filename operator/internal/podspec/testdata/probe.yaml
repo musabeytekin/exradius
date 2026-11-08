@@ -1,0 +1,110 @@
+---
+metadata:
+  labels:
+    exradius.dev/pod-generation: "0"
+    exradius.dev/purpose: probe
+    exradius.dev/run: probe-77aa
+  name: probe-77aa-0
+  namespace: exradius-runs
+  ownerReferences:
+  - apiVersion: exradius.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Run
+    name: probe-77aa
+    uid: uid-77aa
+spec:
+  automountServiceAccountToken: false
+  containers:
+  - command:
+    - /opt/exradius/runtime/bin/exradius-runner
+    - --probe
+    - claude_code
+    - --report
+    - 77aa
+    - --model
+    - claude-sonnet-5-5
+    env:
+    - name: HOME
+      value: /home/runner
+    - name: EXRADIUS_STATE_DIR
+      value: /exradius/state
+    - name: EXRADIUS_WORK_DIR
+      value: /home/runner
+    - name: CLAUDE_CODE_OAUTH_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: provider.CLAUDE_CODE_OAUTH_TOKEN
+          name: probe-77aa
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_RUN_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: probe-77aa
+    - name: EXRADIUS_PURPOSE
+      value: probe
+    - name: EXRADIUS_ID
+      value: 77aa
+    image: kind-registry:5000/exradius-project-default:0.2.0
+    imagePullPolicy: IfNotPresent
+    name: workstation
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /home/runner
+      name: home
+    - mountPath: /tmp
+      name: tmp
+    - mountPath: /exradius/state
+      name: state
+    - mountPath: /opt/exradius/runtime
+      name: runtime
+      readOnly: true
+    - mountPath: /etc/passwd
+      name: identity
+      readOnly: true
+      subPath: passwd
+    - mountPath: /etc/group
+      name: identity
+      readOnly: true
+      subPath: group
+    workingDir: /home/runner
+  enableServiceLinks: false
+  restartPolicy: Never
+  securityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    runAsGroup: 1000
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  serviceAccountName: exradius-run
+  terminationGracePeriodSeconds: 30
+  volumes:
+  - image:
+      pullPolicy: IfNotPresent
+      reference: kind-registry:5000/exradius-runtime-claude-code:0.2.0
+    name: runtime
+  - configMap:
+      defaultMode: 292
+      name: exradius-run-identity
+    name: identity
+  - emptyDir: {}
+    name: home
+  - emptyDir: {}
+    name: tmp
+  - emptyDir: {}
+    name: state
+status: {}
