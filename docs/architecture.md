@@ -93,6 +93,7 @@ Queue: `exradius.tasks`. Published by the user.
 
 - `task_id` is the idempotency key. A second task with the same id is acknowledged and dropped, with a `rejected` status event.
 - `project` and `agent` are slugs. Unknown slugs, or an agent not attached to the project, produce a `rejected` status event.
+- `agent` is optional (agreed 2026-11-08, `docs/agent-routing.md`). Without it, Exradius picks one of the project's agents at intake with OpenAI's Decisions API; the `queued` status event says which and how (`payload.routing`), and the envelope's `agent` is the chosen slug from then on.
 - `context` and `attachments` are handed to the agent verbatim: `context` is rendered into the prompt, attachments are written into a read-only `.exradius/attachments/` folder inside the project directory and their paths listed in the prompt.
 - The worker persists the task in Postgres **before** acknowledging the broker message.
 
@@ -170,6 +171,11 @@ Artifact `url` and `transcript_url` are HTTP download URLs served by the API ser
   belongs to no task.
 - **Directory:** `GET /api/integration/v1/directory`, the projects and their agents,
   authenticated by an integration token created in the panel.
+
+Revised later that day: each token is bound to a bridge, and the directory lists only the
+projects whose config repository has that bridge's file (`bridges/<name>.yaml`), with the
+file's content. Bridges report the problems they find through
+`PUT /api/integration/v1/status`, and the panel shows them.
 
 ## 5. Run lifecycle
 

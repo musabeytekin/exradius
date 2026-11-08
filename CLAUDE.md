@@ -13,7 +13,8 @@ exchange. Managing tickets, chat or CI is the job of an integration layer outsid
 The design lives in `docs/` and is the source of truth when code and prose disagree:
 `architecture.md` (system, message contracts, run lifecycle, state machine, §12 implementation
 notes, §13 operating rules), `config-repo.md` (the current project model), `environment-and-services.md`,
-`runtime-bundles.md`, `providers.md`, `agent-identity.md`, `onboarding.md` (panel). These are
+`runtime-bundles.md`, `providers.md`, `agent-identity.md`, `onboarding.md` (panel),
+`integration-api.md` (hook, directory, bridge files, bridge status), `agent-routing.md`. These are
 internal design notes: Exradius ships no user documentation, and the panel shows state, not help.
 The README's "Configuring a project and an agent" section predates the config-repo model
 (there are no `/api/agents`, `/api/projects/{id}/repositories` or `/api/secrets` routes any more).

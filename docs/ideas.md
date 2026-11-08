@@ -63,3 +63,12 @@ with the loop of improvements it drives. Settled so far:
   grader overlaps with harness-run checks above.
 - **Expected to expose:** UI bugs (no browser in the workstation), no base ref in the task
   envelope, no per-run usage or cost recorded.
+
+## MCP tool lists that change on their own
+
+Agent profiles for routing (`agent-routing.md` §3) carry each connection's tools from
+`tools/list`, stored by the last Verify. A connection's tools can change with no commit on our side: GitHub's MCP is a remote
+server (`api.githubcopilot.com/mcp/`), and the catalog's `npx -y` / `uvx` packages pull the
+latest version. The stored list then goes stale silently. Noted on 2026-11-08, to look at
+later. Ideas so far: show when the tools were fetched, refetch on every Verify, pin catalog
+package versions so a change needs a commit.

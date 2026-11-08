@@ -135,6 +135,34 @@ Rules:
   argument); there is no `entrypoint` key.
 - Unknown keys anywhere are errors (typos must not pass silently). `version` must be 1.
 
+### 2.1 Bridge files
+
+Added 2026-11-08 (`integration-api.md` §6). A bridge's configuration for this project, such
+as the Jira spaces whose issues belong to it, lives in the config repository next to the
+config file, in a file of its own. `exradius.yaml` stays Exradius's configuration only.
+
+```
+exradius.yaml
+bridges/
+  jira.yaml           # projects: [PLANE]
+  github.yaml
+```
+
+- **Where.** `bridges/` in the config file's directory: the repository root for
+  `exradius.yaml`, `.exradius/bridges/` for `.exradius/exradius.yaml`. Read at the same
+  commit as the config, on every read.
+- **Names.** `<name>.yaml` with `name` matching `[a-z][a-z0-9-]*`, the bridge's name (the
+  one integration tokens are bound to). Any other entry in `bridges/` is ignored with a
+  warning naming it.
+- **Content.** YAML whose top level is a mapping, at most 64 KiB. Nothing else is checked:
+  Exradius does not know any bridge's keys, does not resolve `${secret:...}` (secrets do
+  not belong in these files) and passes the content to the bridge as written. Each bridge
+  validates its own file and reports problems through its status (`integration-api.md` §7).
+- **Problems are warnings.** A file that is not valid YAML, is not a mapping, or is too
+  large is a warning on the project (`bridges/jira.yaml: not valid YAML: ...`), never an
+  error: the project stays runnable. Bridge files are read even when `exradius.yaml` has
+  errors.
+
 ## 3. Reading, validating, snapshotting
 
 `exradius/config_repo.py` (backend) does one thing: given a project row, refresh the
@@ -152,6 +180,7 @@ ProjectConfigSnapshot:
   warnings: list[str]
   required_keys: list[str]           # secret names referenced
   store: str | None
+  bridges: dict[str, BridgeFile]     # §2.1: name -> {config} or {error}
 ```
 
 The API stores the latest snapshot on the project (`projects.snapshot` JSON,
