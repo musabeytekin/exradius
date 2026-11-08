@@ -1,0 +1,13 @@
+# KEP-1755: where the local registry is. Tilt reads it, pushes to localhost:5001 and writes
+# kind-registry:5000 into the manifests, which the node pulls over kind's Docker network.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-registry-hosting
+  namespace: kube-public
+data:
+  localRegistryHosting.v1: |
+    host: "localhost:5001"
+    hostFromContainerRuntime: "kind-registry:5000"
+    hostFromClusterNetwork: "kind-registry:5000"
+    help: "https://kind.sigs.k8s.io/docs/user/local-registry/"

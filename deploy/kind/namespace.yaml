@@ -1,0 +1,15 @@
+# The release namespace, created before the chart is installed (the chart creates only the
+# runs and builds namespaces). The Secrets dev-up creates live here, so `tilt down` keeps it.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: exradius
+  annotations:
+    tilt.dev/down-policy: keep
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest

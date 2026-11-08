@@ -1,0 +1,102 @@
+{{- /* The api: admin API on 8000, the internal API for run pods on 8001 (docs/kubernetes.md
+§3, §9). Config-repository mirrors live in an emptyDir and are fetched again after a
+restart (§14). */ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exradius-api
+  labels:
+    {{- include "exradius.componentLabels" (list . "api") | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "exradius.selector" (list . "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "exradius.componentLabels" (list . "api") | nindent 8 }}
+    spec:
+      serviceAccountName: exradius-api
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "exradius.podSecurity" (list 1000 1000) | nindent 8 }}
+      initContainers:
+        - name: migrate
+          image: {{ include "exradius.image" (list . .Values.images.backend) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: [exradius, migrate]
+          workingDir: /opt/exradius
+          env:
+            {{- include "exradius.backendEnv" . | nindent 12 }}
+          securityContext:
+            {{- include "exradius.containerSecurity" .Values.api.readOnlyRootFilesystem | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      containers:
+        - name: api
+          image: {{ include "exradius.image" (list . .Values.images.backend) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: {{ include "exradius.backendCommand" (list . "exradius-api") }}
+          workingDir: /opt/exradius
+          env:
+            {{- include "exradius.backendEnv" . | nindent 12 }}
+            - name: EXRADIUS_ADMIN_USERNAME
+              value: {{ .Values.admin.username | quote }}
+            - name: EXRADIUS_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.admin.existingSecret }}
+                  key: {{ .Values.admin.key }}
+            - name: EXRADIUS_API_PORT
+              value: "8000"
+            - name: EXRADIUS_INTERNAL_PORT
+              value: "8001"
+          ports:
+            - {name: http, containerPort: 8000}
+            - {name: internal, containerPort: 8001}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+            failureThreshold: 6
+          {{- with .Values.api.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "exradius.containerSecurity" .Values.api.readOnlyRootFilesystem | nindent 12 }}
+          volumeMounts:
+            - {name: cache, mountPath: /var/cache/exradius}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: cache, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exradius-api
+  labels:
+    {{- include "exradius.componentLabels" (list . "api") | nindent 4 }}
+spec:
+  selector:
+    {{- include "exradius.selector" (list . "api") | nindent 4 }}
+  ports:
+    - {name: http, port: 8000, targetPort: http}
+---
+# The only port of the stack that run pods reach (NetworkPolicy from phase 4).
+apiVersion: v1
+kind: Service
+metadata:
+  name: exradius-api-internal
+  labels:
+    {{- include "exradius.componentLabels" (list . "api") | nindent 4 }}
+spec:
+  selector:
+    {{- include "exradius.selector" (list . "api") | nindent 4 }}
+  ports:
+    - {name: internal, port: 8001, targetPort: internal}

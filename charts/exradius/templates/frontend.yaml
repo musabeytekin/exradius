@@ -1,0 +1,61 @@
+{{- /* The admin panel: nginx serving the built frontend and proxying /api to the api. */ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exradius-frontend
+  labels:
+    {{- include "exradius.componentLabels" (list . "frontend") | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      {{- include "exradius.selector" (list . "frontend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "exradius.componentLabels" (list . "frontend") | nindent 8 }}
+    spec:
+      serviceAccountName: exradius-frontend
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          image: {{ include "exradius.image" (list . .Values.images.frontend) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            # Fully qualified: nginx's resolver applies no search domains.
+            - name: EXRADIUS_API_UPSTREAM
+              value: http://{{ include "exradius.serviceHost" (list . "exradius-api") }}:8000
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          {{- with .Values.frontend.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            # nginx writes its rendered config and temp files.
+            {{- include "exradius.containerSecurity" false | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exradius-frontend
+  labels:
+    {{- include "exradius.componentLabels" (list . "frontend") | nindent 4 }}
+spec:
+  selector:
+    {{- include "exradius.selector" (list . "frontend") | nindent 4 }}
+  ports:
+    - {name: http, port: 80, targetPort: http}

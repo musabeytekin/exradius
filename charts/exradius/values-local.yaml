@@ -1,0 +1,45 @@
+# A local kind cluster made by `make -C deploy/kind dev-up` (docs/kubernetes.md §17): the
+# images come from the kind registry, Postgres, RabbitMQ and SeaweedFS run in the cluster,
+# and everything is small. Tilt (the Tiltfile) installs the chart with these values and
+# replaces the images with the ones it builds.
+
+publicApiUrl: http://localhost:8100
+
+images:
+  registry: kind-registry:5000
+
+broker:
+  # Tilt forwards RabbitMQ to localhost:5673 (5672 is the v0.1.0 compose stack's).
+  publicHost: localhost
+  publicPort: 5673
+
+rabbitmq:
+  inCluster:
+    operator: true
+    storage: 1Gi
+    resources:
+      requests: {cpu: 100m, memory: 512Mi}
+      limits: {memory: 512Mi}
+
+postgres:
+  inCluster:
+    cloudnativepg: true
+    storage: 1Gi
+
+objectStore:
+  s3:
+    existingSecret: exradius-objectstore
+  inCluster:
+    seaweedfs: true
+    storage: 5Gi
+
+api:
+  # Tilt syncs Python files into the running containers.
+  readOnlyRootFilesystem: false
+worker:
+  readOnlyRootFilesystem: false
+  concurrency: 4
+
+runs:
+  defaults: {memoryRequest: 512Mi, cpuRequest: 250m}
+  workspace: {size: 10Gi}

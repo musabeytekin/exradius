@@ -1,0 +1,16 @@
+# The local cluster (docs/kubernetes.md §17): one node, Kubernetes 1.36 (image volumes,
+# native sidecars and user namespaces are GA; kind's node runs containerd 2.x). No host
+# ports: Tilt port-forwards the panel, the API and RabbitMQ, so nothing collides with the
+# v0.1.0 compose stack (8000, 3000, 5432, 5672, 15672) or 8080.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: exradius
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+# Registry hosts come from /etc/containerd/certs.d/<host>/hosts.toml, which dev-up writes
+# for localhost:5001 and kind-registry:5000.
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.cri.v1.images".registry]
+      config_path = "/etc/containerd/certs.d"

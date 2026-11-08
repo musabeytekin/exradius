@@ -1,0 +1,27 @@
+{{- /* Postgres through CloudNativePG (docs/kubernetes.md §14), which must be installed. It
+creates the Secret <name>-app whose key uri is the database URL. */ -}}
+{{- with .Values.postgres.inCluster }}
+{{- if .cloudnativepg }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "exradius.componentLabels" (list $ "postgres") | nindent 4 }}
+spec:
+  instances: {{ .instances }}
+  bootstrap:
+    initdb:
+      database: exradius
+      owner: exradius
+  storage:
+    size: {{ .storage }}
+    {{- with .storageClass }}
+    storageClass: {{ . }}
+    {{- end }}
+  {{- with .resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

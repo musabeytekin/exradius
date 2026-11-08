@@ -1,0 +1,9 @@
+apiVersion: v2
+name: exradius
+description: Exradius, a self-hosted execution harness for AI agents, on Kubernetes
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+home: https://github.com/musabeytekin/exradius
+sources:
+  - https://github.com/musabeytekin/exradius

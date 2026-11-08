@@ -1,0 +1,68 @@
+{{- /* The operator (docs/kubernetes.md §3, §5): turns Runs into pods. Holds nothing secret;
+its flags carry everything run pods get from values (operator/cmd). */ -}}
+{{- $runs := .Values.runs -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exradius-operator
+  labels:
+    {{- include "exradius.componentLabels" (list . "operator") | nindent 4 }}
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "exradius.selector" (list . "operator") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "exradius.componentLabels" (list . "operator") | nindent 8 }}
+    spec:
+      serviceAccountName: exradius-operator
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: {{ include "exradius.image" (list . .Values.images.operator) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - --runs-namespace={{ .Values.namespaces.runs }}
+            - --api-url={{ include "exradius.internalApiUrl" . }}
+            - --run-uid={{ int $runs.user.uid }}
+            - --run-gid={{ int $runs.user.gid }}
+            - --identity-configmap=exradius-run-identity
+            - --service-account=exradius-run
+            - --workspace-size={{ $runs.workspace.size }}
+            - --workspace-storage-class={{ $runs.workspace.storageClass }}
+            - --memory-request={{ $runs.defaults.memoryRequest }}
+            - --cpu-request={{ $runs.defaults.cpuRequest }}
+            - --runtime-class-name={{ $runs.runtimeClassName }}
+            - --user-namespaces={{ $runs.userNamespaces }}
+            - --node-selector={{ $runs.nodeSelector | default dict | toJson }}
+            - --tolerations={{ $runs.tolerations | default list | toJson }}
+            - --image-pull-secrets={{ join "," $runs.imagePullSecrets }}
+            - --workers={{ .Values.operator.workers }}
+            - --leader-elect={{ .Values.operator.leaderElect }}
+            - --leader-election-id=exradius-operator
+            - --leader-election-namespace={{ .Release.Namespace }}
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+          ports:
+            - {name: metrics, containerPort: 8080}
+            - {name: health, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 20
+          {{- with .Values.operator.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "exradius.containerSecurity" true | nindent 12 }}

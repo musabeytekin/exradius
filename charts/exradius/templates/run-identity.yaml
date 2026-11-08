@@ -1,0 +1,14 @@
+{{- /* /etc/passwd and /etc/group of run containers (docs/kubernetes.md §7.3): root, and
+runner with the run uid/gid and home /home/runner, whatever the project image defines. */ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exradius-run-identity
+  namespace: {{ .Values.namespaces.runs }}
+  labels:
+    {{- include "exradius.labels" . | nindent 4 }}
+data:
+  passwd: |
+    {{- include "exradius.passwd" . | nindent 4 }}
+  group: |
+    {{- include "exradius.group" . | nindent 4 }}

@@ -1,0 +1,138 @@
+# Exradius chart defaults (docs/kubernetes.md §16). Secrets are never values: each one is
+# named by an existingSecret and read from there.
+
+# Base URL of the API as consumers of task.result reach it (artifact and transcript links).
+publicApiUrl: http://localhost:8000
+clusterDomain: cluster.local
+
+images:
+  # Prefixed to every Exradius image: kind-registry:5000, <account>.dkr.ecr.<region>.amazonaws.com
+  registry: ""
+  # Tag of every Exradius image; empty: the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+  backend: exradius-backend
+  frontend: exradius-frontend
+  operator: exradius-operator
+
+runtime:
+  claudeCode:
+    # The Claude Code runtime bundle, mounted into run pods as an image volume.
+    # Empty: <images.registry>/exradius-runtime-claude-code:<tag>.
+    image: ""
+# The image of run pods of projects that name none, and of provider probes.
+# Empty: <images.registry>/exradius-project-default:<tag>.
+projectDefaultImage: ""
+
+secretKey:
+  # A Fernet key (exradius generate-key) that encrypts secrets at rest.
+  existingSecret: exradius-secret-key
+  key: secret-key
+admin:
+  username: admin
+  # Seeds the admin user at the first start; changed in the panel after that.
+  existingSecret: exradius-admin
+  key: password
+
+broker:
+  # amqp://host:5672/ of a broker outside the cluster. Empty with rabbitmq.inCluster.operator.
+  url: ""
+  # Secret with the broker's user name and password (in-cluster: <name>-default-user).
+  existingSecret: ""
+  usernameKey: username
+  passwordKey: password
+  # The broker as integrations reach it, shown on the integration page.
+  publicHost: localhost
+  publicPort: 5672
+
+rabbitmq:
+  inCluster:
+    # A RabbitmqCluster for the RabbitMQ Cluster Operator, which must be installed.
+    operator: true
+    name: exradius-rabbitmq
+    replicas: 1
+    storage: 10Gi
+    storageClass: ""
+    resources:
+      requests: {cpu: 200m, memory: 1Gi}
+      limits: {memory: 1Gi}
+
+postgres:
+  # Secret whose uriKey holds the database URL (postgresql://user:password@host:5432/db).
+  # Empty with inCluster.cloudnativepg: CloudNativePG's <name>-app Secret.
+  existingSecret: ""
+  uriKey: uri
+  inCluster:
+    # A CloudNativePG Cluster; the CloudNativePG operator must be installed.
+    cloudnativepg: true
+    name: exradius-postgres
+    instances: 1
+    storage: 10Gi
+    storageClass: ""
+    resources: {}
+
+objectStore:
+  kind: s3
+  bucket: exradius
+  region: us-east-1
+  s3:
+    # Empty: AWS S3 (or the in-cluster SeaweedFS below).
+    endpoint: ""
+    # Secret with an access key and a secret key. In-cluster SeaweedFS uses it too.
+    existingSecret: exradius-objectstore
+    accessKeyKey: accessKey
+    secretKeyKey: secretKey
+  inCluster:
+    seaweedfs: true
+    name: exradius-seaweedfs
+    image: chrislusf/seaweedfs:4.51
+    storage: 20Gi
+    storageClass: ""
+    resources: {}
+
+api:
+  replicas: 1
+  resources: {}
+  readOnlyRootFilesystem: true
+worker:
+  replicas: 1
+  # Runs in flight per worker; RabbitMQ keeps the backlog.
+  concurrency: 4
+  resources: {}
+  readOnlyRootFilesystem: true
+frontend:
+  replicas: 1
+  resources: {}
+operator:
+  replicas: 1
+  # Runs reconciled at once.
+  workers: 4
+  leaderElect: true
+  resources: {}
+
+namespaces:
+  # Create the runs and builds namespaces with their Pod Security labels. The release
+  # namespace itself is created by the installer, labelled for Pod Security "restricted".
+  create: true
+  runs: exradius-runs
+  builds: exradius-builds
+
+runs:
+  user: {uid: 1000, gid: 1000}
+  defaults: {memoryRequest: 1Gi, cpuRequest: 500m}
+  workspace: {storageClass: "", size: 50Gi}
+  runtimeClassName: ""
+  userNamespaces: false
+  nodeSelector: {}
+  tolerations: []
+  # Names of Secrets in the runs namespace for pulling private project images.
+  imagePullSecrets: []
+
+crds:
+  # The Run CRD, kept on uninstall (helm.sh/resource-policy: keep) and upgraded with the chart.
+  install: true
+
+dev:
+  # Set by the Tiltfile: the backend processes run under Tilt's restart wrapper, so a live
+  # update restarts them without a new image.
+  restartWrapper: false

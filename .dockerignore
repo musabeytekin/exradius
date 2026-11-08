@@ -2,7 +2,15 @@
 **/.venv
 **/__pycache__
 **/.pytest_cache
+**/node_modules
+frontend/dist
+operator/bin
+operator/testbin
+charts
+docs
+reports
+research_notes
+deploy/build
 deploy/.data
 deploy/.env
 .env
-docs

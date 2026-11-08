@@ -1,0 +1,66 @@
+{{- /* The worker: intake, the state machine, Runs and their Secrets (docs/kubernetes.md §3). */ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exradius-worker
+  labels:
+    {{- include "exradius.componentLabels" (list . "worker") | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "exradius.selector" (list . "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "exradius.componentLabels" (list . "worker") | nindent 8 }}
+    spec:
+      serviceAccountName: exradius-worker
+      enableServiceLinks: false
+      securityContext:
+        {{- include "exradius.podSecurity" (list 1000 1000) | nindent 8 }}
+      initContainers:
+        - name: migrate
+          image: {{ include "exradius.image" (list . .Values.images.backend) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: [exradius, migrate]
+          workingDir: /opt/exradius
+          env:
+            {{- include "exradius.backendEnv" . | nindent 12 }}
+          securityContext:
+            {{- include "exradius.containerSecurity" .Values.worker.readOnlyRootFilesystem | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      containers:
+        - name: worker
+          image: {{ include "exradius.image" (list . .Values.images.backend) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: {{ include "exradius.backendCommand" (list . "exradius-worker") }}
+          workingDir: /opt/exradius
+          env:
+            {{- include "exradius.backendEnv" . | nindent 12 }}
+            - name: EXRADIUS_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+            - name: EXRADIUS_RUNS_NAMESPACE
+              value: {{ .Values.namespaces.runs | quote }}
+            - name: EXRADIUS_OPERATOR_LEASE
+              value: exradius-operator
+            - name: EXRADIUS_WORKER_CONCURRENCY
+              value: {{ .Values.worker.concurrency | quote }}
+            - name: EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE
+              value: {{ include "exradius.runtimeImage" . | quote }}
+            - name: EXRADIUS_PROJECT_DEFAULT_IMAGE
+              value: {{ include "exradius.projectDefaultImage" . | quote }}
+          {{- with .Values.worker.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "exradius.containerSecurity" .Values.worker.readOnlyRootFilesystem | nindent 12 }}
+          volumeMounts:
+            - {name: cache, mountPath: /var/cache/exradius}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: cache, emptyDir: {}}
+        - {name: tmp, emptyDir: {}}

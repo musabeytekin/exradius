@@ -1,0 +1,96 @@
+{{- /* Object storage for the local install: SeaweedFS with its S3 API (docs/kubernetes.md
+§14). Master, volume server and filer listen on localhost only; only S3 (8333), with the
+objectStore.s3 credentials, is reachable from other pods. */ -}}
+{{- with .Values.objectStore.inCluster }}
+{{- if .seaweedfs }}
+{{- $secret := required "objectStore.s3.existingSecret is required for the in-cluster SeaweedFS" $.Values.objectStore.s3.existingSecret }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "exradius.componentLabels" (list $ "seaweedfs") | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "exradius.componentLabels" (list $ "seaweedfs") | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "exradius.selector" (list $ "seaweedfs") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "exradius.componentLabels" (list $ "seaweedfs") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "exradius.podSecurity" (list 1000 1000) | nindent 8 }}
+      containers:
+        - name: seaweedfs
+          image: {{ .image }}
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -c]
+          args:
+            - >-
+              printf '{"identities":[{"name":"exradius","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}'
+              "$S3_ACCESS_KEY" "$S3_SECRET_KEY" > /tmp/s3.json
+              && exec /usr/bin/weed -logtostderr=true server -dir=/data
+              -ip=127.0.0.1 -ip.bind=127.0.0.1 -master.volumeSizeLimitMB=128 -volume.max=0
+              -filer -s3 -s3.ip.bind=0.0.0.0 -s3.port=8333 -s3.config=/tmp/s3.json
+              -s3.port.iceberg=0 -s3.port.lance=0
+          env:
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ $secret }}, key: {{ $.Values.objectStore.s3.accessKeyKey }}}
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ $secret }}, key: {{ $.Values.objectStore.s3.secretKeyKey }}}
+          ports:
+            - {name: s3, containerPort: 8333}
+          readinessProbe:
+            tcpSocket: {port: s3}
+            periodSeconds: 5
+          {{- with .resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "exradius.containerSecurity" true | nindent 12 }}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .name }}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "exradius.componentLabels" (list $ "seaweedfs") | nindent 4 }}
+spec:
+  selector:
+    {{- include "exradius.selector" (list $ "seaweedfs") | nindent 4 }}
+  ports:
+    - {name: s3, port: 8333, targetPort: s3}
+{{- end }}
+{{- end }}

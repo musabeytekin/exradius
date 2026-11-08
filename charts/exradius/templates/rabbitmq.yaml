@@ -1,0 +1,47 @@
+{{- /* RabbitMQ through the RabbitMQ Cluster Operator (docs/kubernetes.md §14), which must be
+installed. It creates the Service <name> and the Secret <name>-default-user. The override
+makes the pods meet Pod Security "restricted". */ -}}
+{{- with .Values.rabbitmq.inCluster }}
+{{- if .operator }}
+apiVersion: rabbitmq.com/v1beta1
+kind: RabbitmqCluster
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "exradius.componentLabels" (list $ "rabbitmq") | nindent 4 }}
+spec:
+  replicas: {{ .replicas }}
+  {{- with .resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  persistence:
+    storage: {{ .storage }}
+    {{- with .storageClass }}
+    storageClassName: {{ . }}
+    {{- end }}
+  override:
+    statefulSet:
+      spec:
+        template:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+              seccompProfile:
+                type: RuntimeDefault
+            initContainers:
+              - name: setup-container
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  runAsNonRoot: true
+                  capabilities:
+                    drop: [ALL]
+            containers:
+              - name: rabbitmq
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  runAsNonRoot: true
+                  capabilities:
+                    drop: [ALL]
+{{- end }}
+{{- end }}
