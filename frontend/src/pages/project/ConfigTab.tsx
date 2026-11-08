@@ -2,11 +2,11 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
 import { HealthChip } from "@/components/HealthChip";
 import { Table } from "@/components/ui/controls";
-import { CopyButton } from "@/components/ui/data";
+import { CodeBlock, CopyButton } from "@/components/ui/data";
 import { Icon } from "@/components/ui/icons";
 import { Tooltip } from "@/components/ui/overlays";
 import { Banner, Button, Card, CardHeader, Chip, Mono } from "@/components/ui/primitives";
-import { absoluteTime, bytes, relativeTime } from "@/lib/format";
+import { absoluteTime, bytes, pretty, relativeTime } from "@/lib/format";
 import {
   agentsOf, catalogKeyNames, commitOf, configOf, connectionsOf, errorsOf, projectHealth, rawOf, readAtOf,
   readErrorOf, readyLabel, servicesOf, shortCommit, storeNameOf, warningsOf,
@@ -16,7 +16,7 @@ import { cn } from "@/lib/cn";
 import { useConfirm } from "@/lib/confirm";
 import { qk, useCatalog } from "@/lib/queries";
 import { toast } from "@/lib/toast";
-import type { CatalogEntry, ConfigAgent, ConfigConnection, Project } from "@/lib/types";
+import type { BridgeFile, CatalogEntry, ConfigAgent, ConfigConnection, Project } from "@/lib/types";
 
 export function ConfigTab({ project }: { project: Project }) {
   const qc = useQueryClient();
@@ -217,8 +217,52 @@ export function ConfigView({ project, catalog, onReread, rereading, onReplaceHoo
         </>
       )}
 
+      <BridgeFiles project={project} />
+
       {raw && <RawFile text={raw} path={project.config_path} />}
     </div>
+  );
+}
+
+/** `bridges/<name>.yaml` (read even when `exradius.yaml` has errors) and what bridges reported. */
+function BridgeFiles({ project }: { project: Project }) {
+  const files = project.bridges ?? [];
+  const problems = project.bridge_problems ?? [];
+  if (!files.length && !problems.length) return null;
+  return (
+    <Section title="Bridge files" count={files.length}>
+      {problems.length > 0 && (
+        <ul aria-label="Reported by bridges" className="flex flex-col gap-1 border-b border-border px-4 py-3 last:border-b-0">
+          {problems.map((p, i) => (
+            <li key={i} className="flex items-start gap-2 text-xs">
+              <Icon name="alert" size={13} className="mt-0.5 shrink-0 text-warn" />
+              <Mono className="shrink-0 text-xs">{p.bridge}</Mono>
+              <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-fg">{p.message}</span>
+              <Tooltip content={absoluteTime(p.reported_at)}><span className="shrink-0 text-subtle">{relativeTime(p.reported_at)}</span></Tooltip>
+            </li>
+          ))}
+        </ul>
+      )}
+      {files.length > 0 && (
+        <ul className="divide-y divide-border">
+          {files.map((f) => <BridgeFileRow key={f.name} f={f} />)}
+        </ul>
+      )}
+    </Section>
+  );
+}
+
+function BridgeFileRow({ f }: { f: BridgeFile }) {
+  const path = `bridges/${f.name}.yaml`;
+  return (
+    <li aria-label={path} className="flex flex-col gap-1.5 px-4 py-3">
+      <Mono className="font-medium">{path}</Mono>
+      {f.error ? (
+        <p className="whitespace-pre-wrap break-words font-mono text-xs text-err">{f.error}</p>
+      ) : (
+        <CodeBlock lang="json" code={pretty(f.config ?? {})} maxHeight={320} />
+      )}
+    </li>
   );
 }
 

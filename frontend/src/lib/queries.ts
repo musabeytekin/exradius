@@ -9,11 +9,14 @@ export const qk = {
   projects: ["projects"] as const,
   project: (id: string) => ["projects", id] as const,
   verifications: (pid: string) => ["projects", pid, "verifications"] as const,
+  projectAgents: (pid: string) => ["projects", pid, "agents"] as const,
   catalog: ["catalog"] as const,
   stores: ["stores"] as const,
   storeKeys: (id: string) => ["stores", id, "keys"] as const,
   gitCredentials: ["git-credentials"] as const,
   integrationTokens: ["integration-tokens"] as const,
+  bridges: ["bridges"] as const,
+  routing: ["routing"] as const,
   providers: ["providers"] as const,
   tasks: (filters: Record<string, unknown>) => ["tasks", filters] as const,
   allTasks: ["tasks"] as const,
@@ -57,4 +60,7 @@ export const useStoreKeys = (id: string | null | undefined) =>
   useQuery({ queryKey: qk.storeKeys(id ?? "-"), queryFn: () => api.stores.keys(id!), enabled: !!id });
 export const useGitCredentials = () => useQuery({ queryKey: qk.gitCredentials, queryFn: api.gitCredentials.list });
 export const useIntegrationTokens = () => useQuery({ queryKey: qk.integrationTokens, queryFn: api.integrationTokens.list });
+// Bridges report every 5 minutes; `reporting` turns false 15 minutes after the last report.
+export const useBridges = () => useQuery({ queryKey: qk.bridges, queryFn: api.bridges.list, refetchInterval: 60_000 });
+export const useRouting = () => useQuery({ queryKey: qk.routing, queryFn: api.routing.get });
 export const useProviders = () => useQuery({ queryKey: qk.providers, queryFn: api.providers.list });

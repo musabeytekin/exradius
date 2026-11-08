@@ -133,6 +133,30 @@ describe("config view", () => {
     expect(screen.queryByRole("button", { name: "Replace" })).toBeNull();
   });
 
+  it("lists bridge files with their content or error, and what bridges reported", () => {
+    wrap(<ConfigView project={{
+      ...WITH_ERRORS,
+      bridges: [
+        { name: "github", config: null, error: "bridges/github.yaml: not valid YAML: line 3: mapping values are not allowed here" },
+        { name: "jira", config: { projects: ["PLANE"] }, error: null },
+      ],
+      bridge_problems: [{ bridge: "jira", message: "bridges/jira.yaml: projects: PLANE is also claimed by bank", reported_at: new Date(Date.now() - 300_000).toISOString() }],
+    }} />);
+    // Read even when exradius.yaml has errors.
+    const files = section("Bridge files");
+    expect(within(files).getByRole("listitem", { name: "bridges/jira.yaml" }).querySelector("pre")?.textContent).toBe(JSON.stringify({ projects: ["PLANE"] }, null, 2));
+    expect(within(files).getByRole("listitem", { name: "bridges/github.yaml" })).toHaveTextContent("mapping values are not allowed here");
+    const reported = within(files).getByRole("list", { name: "Reported by bridges" });
+    expect(reported).toHaveTextContent("jira");
+    expect(reported).toHaveTextContent("PLANE is also claimed by bank");
+    expect(reported).toHaveTextContent("5m ago");
+  });
+
+  it("has no bridge files section without files or reports", () => {
+    wrap(<ConfigView project={{ ...HAPPY, bridges: [], bridge_problems: [] }} />);
+    expect(screen.queryByRole("heading", { name: /^Bridge files/ })).toBeNull();
+  });
+
   it("says when nothing is declared", () => {
     wrap(<ConfigView project={HAPPY} catalog={CATALOG} />);
     const ws = section("Workstation");

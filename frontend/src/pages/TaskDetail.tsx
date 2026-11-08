@@ -19,7 +19,7 @@ import { absoluteTime, between, bytes, clockTime, duration, pretty, relativeTime
 import { shortCommit } from "@/lib/projectConfig";
 import { qk, useProjects } from "@/lib/queries";
 import { toast } from "@/lib/toast";
-import { TERMINAL_STATES, type Artifact, type InfoRequest, type ResultPayload, type StatusPayload, type TaskDetail, type TaskState } from "@/lib/types";
+import { TERMINAL_STATES, type Artifact, type InfoRequest, type ResultPayload, type RunRouting, type StatusPayload, type TaskDetail, type TaskState } from "@/lib/types";
 import { useTaskFeed, type FeedEvent, type FeedStatus } from "@/lib/useTaskFeed";
 
 export function TaskDetailPage() {
@@ -362,26 +362,62 @@ function RunCard({ task }: { task: TaskDetail }) {
   );
 }
 
-function AgentCard({ task }: { task: TaskDetail }) {
+export function AgentCard({ task }: { task: TaskDetail }) {
   const a = task.run?.agent_snapshot;
-  if (!a) return null;
-  const identity = [a.identity?.name, a.identity?.email ? `<${a.identity.email}>` : null].filter(Boolean).join(" ");
+  const routing = task.run?.routing;
+  if (!a && !routing) return null;
+  const identity = [a?.identity?.name, a?.identity?.email ? `<${a.identity.email}>` : null].filter(Boolean).join(" ");
+  const name = a?.name || a?.slug;
+  const items: [string, ReactNode][] = [
+    ["Name", name && name !== task.agent ? <span>{name} <Mono className="text-xs text-muted">{task.agent}</Mono></span> : <Mono className="text-xs">{task.agent}</Mono>],
+    ...(routing ? [["Picked", <Picked routing={routing} />] as [string, ReactNode]] : []),
+  ];
+  if (a) {
+    items.push(
+      ["Model", a.model ? <Mono className="text-xs">{a.model}</Mono> : <span className="text-subtle">runtime default</span>],
+      ...(a.provider ? [["Provider", <Mono className="text-xs">{a.provider}</Mono>] as [string, ReactNode]] : []),
+      ["Identity", identity ? <Mono className="break-all text-xs">{identity}</Mono> : <span className="text-subtle">default</span>],
+      ...(a.connections?.length ? [["Connections", <span className="flex flex-wrap gap-1">{a.connections.map((c) => <Chip key={c} mono>{c}</Chip>)}</span>] as [string, ReactNode]] : []),
+    );
+  }
   return (
     <Card>
       <CardHeader title="Agent" />
       <div className="p-4">
-        <KeyValue
-          className="text-xs"
-          items={[
-            ["Name", <span>{a.name || a.slug || task.agent} <Mono className="text-xs text-muted">{task.agent}</Mono></span>],
-            ["Model", a.model ? <Mono className="text-xs">{a.model}</Mono> : <span className="text-subtle">runtime default</span>],
-            ...(a.provider ? [["Provider", <Mono className="text-xs">{a.provider}</Mono>] as [string, ReactNode]] : []),
-            ["Identity", identity ? <Mono className="break-all text-xs">{identity}</Mono> : <span className="text-subtle">default</span>],
-            ...(a.connections?.length ? [["Connections", <span className="flex flex-wrap gap-1">{a.connections.map((c) => <Chip key={c} mono>{c}</Chip>)}</span>] as [string, ReactNode]] : []),
-          ]}
-        />
+        <KeyValue className="text-xs" items={items} />
       </div>
     </Card>
+  );
+}
+
+const PICKED: Record<RunRouting["method"], string> = {
+  named: "named by the task",
+  only_agent: "the project's only agent",
+  decided: "picked automatically",
+};
+const percent = (p: number) => `${Math.round(p * 100)}%`;
+
+function Picked({ routing }: { routing: RunRouting }) {
+  const decided = routing.method === "decided";
+  const probabilities = decided ? Object.entries(routing.probabilities ?? {}).sort(([, x], [, y]) => y - x) : [];
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="flex flex-wrap items-center gap-1.5">
+        <span>{PICKED[routing.method] ?? routing.method}</span>
+        {decided && routing.confidence != null && <span className="tabular text-muted" aria-label="Confidence">{percent(routing.confidence)}</span>}
+        {decided && routing.guess && <Chip tone="warn">guess</Chip>}
+      </span>
+      {probabilities.length > 0 && (
+        <ul aria-label="Probabilities" className="flex flex-col gap-0.5">
+          {probabilities.map(([slug, p]) => (
+            <li key={slug} className="flex items-center justify-between gap-3">
+              <Mono className={slug === routing.agent ? "text-xs" : "text-xs text-muted"}>{slug}</Mono>
+              <span className="tabular text-muted">{percent(p)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

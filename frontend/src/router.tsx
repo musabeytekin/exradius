@@ -62,7 +62,7 @@ const projectsRoute = createRoute({
   component: ProjectsPage,
 });
 
-export const PROJECT_TABS = ["config", "secrets", "verify", "tasks"] as const;
+export const PROJECT_TABS = ["config", "agents", "secrets", "verify", "tasks"] as const;
 export type ProjectTab = (typeof PROJECT_TABS)[number];
 
 const projectRoute = createRoute({

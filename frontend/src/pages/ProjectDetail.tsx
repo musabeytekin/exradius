@@ -17,6 +17,7 @@ import { qk, useProject, useStoreKeys, useStores } from "@/lib/queries";
 import { toast } from "@/lib/toast";
 import type { Project } from "@/lib/types";
 import type { ProjectTab } from "@/router";
+import { AgentsTab } from "./project/AgentsTab";
 import { ConfigTab } from "./project/ConfigTab";
 import { SecretsTab } from "./project/SecretsTab";
 import { VerifyTab } from "./project/VerifyTab";
@@ -135,6 +136,7 @@ export function ProjectDetailPage() {
       <Tabs.Root value={tab} onValueChange={(t) => navigate({ to: "/projects/$projectId", params: { projectId }, search: { tab: t as ProjectTab }, replace: true })}>
         <Tabs.List className="mb-5">
           <Tabs.Trigger value="config" attention={!!p && (errorsOf(p).length > 0 || health?.health === "unreadable")}>Config</Tabs.Trigger>
+          <Tabs.Trigger value="agents">Agents</Tabs.Trigger>
           <Tabs.Trigger value="secrets" attention={health?.health === "missing_secrets"}>Secrets</Tabs.Trigger>
           <Tabs.Trigger value="verify" attention={verifyState === "failed"}>Verify</Tabs.Trigger>
           <Tabs.Trigger value="tasks">Tasks</Tabs.Trigger>
@@ -142,6 +144,7 @@ export function ProjectDetailPage() {
         {p ? (
           <>
             <Tabs.Content value="config"><ConfigTab project={p} /></Tabs.Content>
+            <Tabs.Content value="agents"><AgentsTab project={p} /></Tabs.Content>
             <Tabs.Content value="secrets"><SecretsTab project={p} /></Tabs.Content>
             <Tabs.Content value="verify"><VerifyTab project={p} /></Tabs.Content>
             <Tabs.Content value="tasks"><ProjectTasks project={p} /></Tabs.Content>

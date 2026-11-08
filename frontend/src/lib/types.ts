@@ -109,7 +109,14 @@ export interface Project {
   /** The config hook URL and its last accepted call (integration-api.md §2). */
   hook_url?: string | null;
   hook_last_at?: string | null;
+  /** The config's `bridges/<name>.yaml` files (integration-api.md §6). */
+  bridges?: BridgeFile[] | null;
+  /** What bridges last reported about this project (integration-api.md §7). */
+  bridge_problems?: BridgeProjectProblem[] | null;
 }
+/** A bridge file: its content parsed from YAML, or why it could not be read. */
+export interface BridgeFile { name: string; config: Record<string, unknown> | null; error: string | null }
+export interface BridgeProjectProblem { bridge: string; message: string; reported_at: string }
 export type Freshness = "current" | "stale" | "failed" | "running" | "never";
 export interface VerificationSummary {
   id: Uuid; state: Verification["state"]; commit: string | null; ended_at: string | null; diagnosis: string | null;
@@ -141,8 +148,65 @@ export interface SecretStoreKey { key: string; updated_at?: string | null }
 export type GitCredentialKind = "token" | "basic";
 export interface GitCredential { id: Uuid; host: string; kind: GitCredentialKind; created_at?: string }
 /** A bearer token for /api/integration/v1 (integration-api.md §5); the value is only in the create answer. */
-export interface IntegrationToken { id: Uuid; name: string; created_at: string; last_used_at: string | null; revoked_at: string | null }
+export interface IntegrationToken {
+  id: Uuid; name: string;
+  /** The bridge the token is bound to. Absent on older APIs. */
+  bridge?: string;
+  created_at: string; last_used_at: string | null; revoked_at: string | null;
+}
 export interface IntegrationTokenCreated extends IntegrationToken { token: string }
+export interface IntegrationTokenIn { bridge: string; name?: string | null }
+/** A bridge as `GET /api/bridges` returns it: from its tokens, its files and its last report (§7). */
+export interface Bridge {
+  bridge: string;
+  /** Tokens bound to it that are not revoked. */
+  tokens: number;
+  /** Slugs of the projects whose config has its file. */
+  projects: string[];
+  reported_at: string | null;
+  /** A report in the last 15 minutes. */
+  reporting: boolean;
+  software: string | null; started_at: string | null;
+  problems: BridgeProblem[];
+}
+/** `project` null: about the bridge as a whole. */
+export interface BridgeProblem { project: string | null; message: string }
+
+// --- Agent routing (docs/agent-routing.md) ---
+
+export interface RoutingTest { ok: boolean; at: string; ms: number | null; detail: string }
+export interface RoutingSettings {
+  key_set: boolean; key_set_at: string | null; last_test: RoutingTest | null;
+  model: string; guess_below: number;
+}
+/** What routing sees of an agent (§3). */
+export interface AgentProfile { slug: string; name: string; role: string | null; connections: ProfileConnection[] }
+export interface ProfileConnection {
+  name: string;
+  /** `catalog <key>`, `custom stdio` or `custom http`. */
+  kind: string;
+  /** null when not listed for the connection as the config writes it now; `tools_note` says why. */
+  tools: ProfileTool[] | null;
+  tools_listed_at?: string | null;
+  tools_note?: string | null;
+}
+export interface ToolAnnotations {
+  title?: string | null; readOnlyHint?: boolean | null; destructiveHint?: boolean | null;
+  idempotentHint?: boolean | null; openWorldHint?: boolean | null;
+  [k: string]: unknown;
+}
+export interface ProfileTool { name: string; description?: string | null; annotations?: ToolAnnotations | null }
+/** `runs.routing` (§8): the decision's fields only for `decided`. */
+export interface RunRouting {
+  method: "named" | "only_agent" | "decided";
+  agent: string;
+  decided_at?: string | null;
+  confidence?: number | null;
+  guess?: boolean;
+  probabilities?: Record<string, number> | null;
+  model?: string | null; ms?: number | null;
+  input_tokens?: number | null; cached_tokens?: number | null;
+}
 export interface GitCredentialIn { host: string; kind: GitCredentialKind; value: string }
 
 /** What a run recorded of its agent (runs.agent_snapshot, §8). */
@@ -229,6 +293,8 @@ export interface Run {
   config_commit?: string | null;
   agent_snapshot?: AgentSnapshot | null;
   waiting_for?: string | null;
+  /** How the agent was picked; null for runs from before routing. */
+  routing?: RunRouting | null;
 }
 export interface TaskAttachment { id: Uuid; name: string; content_type: string; object_key: string | null; source_url: string | null }
 export interface InfoRequest {
@@ -240,7 +306,9 @@ export interface Artifact { id: Uuid; name: string; content_type: string; object
 
 /** The outbound envelope (architecture §4.3); stored as `EventOut.payload`. */
 export interface Envelope<P = Record<string, unknown>> {
-  version: number; task_id: string; run_id: string | null; project: string; agent: string;
+  version: number; task_id: string; run_id: string | null; project: string;
+  /** null on a rejection of a task that named no agent. */
+  agent: string | null;
   correlation: unknown; timestamp: string; type: "status" | "info_request" | "result"; payload: P;
 }
 export interface StatusPayload { state: TaskState; previous: TaskState | null; reason: string | null }
@@ -268,7 +336,10 @@ export type SdkMessage = { type: string } & Record<string, unknown>;
 
 export interface AttachmentIn { name: string; content_type: string; url?: string; content_base64?: string }
 export interface TaskMessage {
-  version?: 1; task_id: string; project: string; agent: string; instructions: string;
+  version?: 1; task_id: string; project: string;
+  /** Omitted: Exradius picks one of the project's agents. */
+  agent?: string | null;
+  instructions: string;
   context: unknown; attachments: AttachmentIn[]; correlation?: unknown;
 }
 export interface Published { queue: string; message: Record<string, unknown> }

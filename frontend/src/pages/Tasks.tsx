@@ -114,7 +114,7 @@ export function TasksPage() {
   );
 }
 
-function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProject?: string; initialAgent?: string; onClose: () => void }) {
+export function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProject?: string; initialAgent?: string; onClose: () => void }) {
   const navigate = useNavigate();
   const projects = useProjects();
   const [projectSlug, setProjectSlug] = useState<string | null>(initialProject ?? null);
@@ -125,8 +125,9 @@ function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProj
   const configured = agentsOf(configOf(project));
   const agentOptions: [string, ConfigAgent][] = configured.length ? configured : (project?.agents ?? []).map((slug) => [slug, {}]);
   const health = project ? projectHealth(project) : null;
+  // null: no agent in the message, Exradius picks one.
   const [agentSlug, setAgentSlug] = useState<string | null>(initialAgent ?? null);
-  const agentEntry = agentOptions.find(([slug]) => slug === agentSlug) ?? (agentOptions.length === 1 ? agentOptions[0] : undefined);
+  const agentEntry = agentOptions.find(([slug]) => slug === agentSlug);
   const agent = agentEntry ? { slug: agentEntry[0], name: agentEntry[1].name || agentEntry[0] } : undefined;
   // The ticket key: typed by the user, never invented (branch names start from it).
   const [taskId, setTaskId] = useState("");
@@ -147,7 +148,7 @@ function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProj
   const preview: TaskMessage = {
     task_id: effectiveId,
     project: project?.slug ?? "",
-    agent: agent?.slug ?? "",
+    ...(agent ? { agent: agent.slug } : {}),
     instructions,
     context: contextParsed.ok ? contextParsed.value : "…invalid JSON…",
     attachments: files.map((f) => ({ name: f.name, content_type: f.type || "application/octet-stream", content_base64: "…" })),
@@ -161,7 +162,7 @@ function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProj
     },
     onError: (e) => toast.err("Could not publish the task", e),
   });
-  const ready = !!project && !!agent && !!effectiveId.trim() && !!instructions.trim() && contextParsed.ok;
+  const ready = !!project && agentOptions.length > 0 && !!effectiveId.trim() && !!instructions.trim() && contextParsed.ok;
 
   return (
     <Dialog
@@ -192,6 +193,7 @@ function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProj
             <Field label="Project">
               <PickList
                 mono
+                aria-label="Project"
                 value={project?.slug ?? null}
                 placeholder="Choose a project"
                 onChange={(v) => {
@@ -204,8 +206,10 @@ function SendTaskDialog({ initialProject, initialAgent, onClose }: { initialProj
             <Field label="Agent" warning={project && !detail.isLoading && !agentOptions.length ? "The project's config defines no agents." : undefined}>
               <PickList
                 mono
+                aria-label="Agent"
                 value={agent?.slug ?? null}
-                placeholder={project ? "Choose an agent" : "Pick a project first"}
+                noneLabel={project ? "Pick automatically" : undefined}
+                placeholder="Pick a project first"
                 disabled={!project}
                 onChange={setAgentSlug}
                 options={agentOptions.map(([slug, a]) => ({ value: slug, label: slug, description: a.name || undefined }))}

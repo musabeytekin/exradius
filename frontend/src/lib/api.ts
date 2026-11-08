@@ -151,6 +151,8 @@ export const api = {
     verify: (id: string) => post<{ verification_id: string }>(`/projects/${id}/verify`),
     verifications: (id: string, limit = 5) => get<T.Verification[]>(`/projects/${id}/verifications`, { limit }),
     verification: (id: string, vid: string) => get<T.Verification>(`/projects/${id}/verifications/${vid}`),
+    /** Each agent as routing sees it; empty when the config has errors. */
+    agents: (id: string) => get<T.AgentProfile[]>(`/projects/${id}/agents`),
   },
   catalog: {
     list: () => get<T.CatalogEntry[]>("/catalog"),
@@ -174,8 +176,18 @@ export const api = {
   integrationTokens: {
     list: () => get<T.IntegrationToken[]>("/integration-tokens"),
     /** The answer is the only time the token is shown. */
-    create: (name: string) => post<T.IntegrationTokenCreated>("/integration-tokens", { name }),
+    create: (b: T.IntegrationTokenIn) => post<T.IntegrationTokenCreated>("/integration-tokens", b),
     revoke: (id: string) => del(`/integration-tokens/${id}`),
+  },
+  bridges: {
+    list: () => get<T.Bridge[]>("/bridges"),
+  },
+  routing: {
+    get: () => get<T.RoutingSettings>("/routing"),
+    /** Write-only: the key is never returned. */
+    setKey: (key: string) => put<T.RoutingSettings>("/routing/key", { key }),
+    removeKey: () => del("/routing/key"),
+    test: () => post<T.RoutingTest>("/routing/test"),
   },
   providers: {
     list: () => get<T.Provider[]>("/providers"),
