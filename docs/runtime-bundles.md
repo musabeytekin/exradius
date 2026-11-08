@@ -1,6 +1,7 @@
 # Runtime bundles
 
-Status: agreed design, 2026-11-05. Companion to `architecture.md` and `providers.md`.
+Status: agreed design, 2026-11-05; §2.2, §2.4, §2.5 and §4 rewritten for Kubernetes on
+2026-11-08 (`kubernetes.md` §7.2, §7.3). Companion to `architecture.md` and `providers.md`.
 Supersedes the "project images must be built FROM exradius-runner" rule in
 `architecture.md` §5.2 and §10.
 
@@ -37,17 +38,25 @@ Claude Agent SDK, and launches `bin/claude` from the bundle by path. No Node any
 Bundles are built in the release pipeline and published as an image
 (`exradius-runtime-claude-code:<version>`) whose only content is the bundle directory.
 
-### 2.2 The worker mounts it
+### 2.2 The pod mounts it
 
-At start, and when it first sees a runtime version it has not extracted, the worker
-creates a Docker volume `exradius-runtime-<runtime>-<version>`, copies the bundle into it
-from the bundle image, and marks it ready. Every run container of that runtime gets the
-volume mounted read-only at `/opt/exradius/runtime`. The entrypoint is
-`/opt/exradius/runtime/bin/exradius-runner`.
+The bundle image (`exradius-runtime-claude-code:<version>`) is mounted into every run pod as
+an **image volume** at `/opt/exradius/runtime`, read-only, in the `prepare`, `clone-*` and
+`files` containers and in the workstation, but not in setup containers (they do not need it).
+The operator writes the mount; the Run spec names only the image
+(`spec.runtime.image`, from the worker's `EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE`). The
+workstation's command is `/opt/exradius/runtime/bin/exradius-runner <run id>`.
 
-The volume is per version, so a worker on a newer version never changes what a running
-container sees. Old volumes are removed when no run references them and they are not the
-current version.
+A rebuilt bundle is a new image digest, so a running pod never sees it change; there is
+nothing to extract and nothing to clean up. Image volumes need containerd 2.1 or later on the
+nodes (GA in Kubernetes 1.36); kind has it. For a cloud node image without it, values
+`runs.bundleMount: copy` is planned for phase 6 (`kubernetes.md` §7.2): an init container
+that copies the bundle into an `emptyDir`.
+
+The bundle also carries `git-hooks/`: the hooks dispatcher under every standard hook name
+(`run-environment.md` §3), written at build time by `python -m exradius.runner.gitconfig`.
+`core.hooksPath` points there through command-line git config, and the mount is read-only,
+so the agent cannot edit it.
 
 ### 2.3 The project image is any Linux image
 
@@ -59,8 +68,8 @@ current version.
   curl, ca-certificates and build-essential. Nothing inherits from it; it is a default,
   not a base.
 - The `exradius.runner` image label and the "must be built FROM exradius-runner" rule are
-  removed. `GET /api/system/images` returns every image on the daemon (tag, size,
-  created) as suggestions; it no longer filters by label.
+  removed. Images are pulled by the cluster's nodes; there is no daemon whose images the
+  panel could suggest.
 - Setup commands run in the project image as before, without the runtime mounted (they
   do not need it).
 
@@ -68,21 +77,22 @@ current version.
 
 The bundle is world-readable and executable, so the unprivileged run user can execute it
 regardless of the project image's own users. `CLAUDE_CONFIG_DIR` still points into the
-state mount.
+state directory (`/exradius/state/claude`).
 
-The home, `/home/runner`, and `/tmp` are the run's `runs/<run_id>/home` and `tmp`
-directories on disk, bind-mounted (exec allowed) into setup, run and resume containers alike
-and owned by the run user (`tmp` with mode 1777). Package manager caches (`~/.cache/yarn`,
-`~/.npm`, `~/.m2`, `~/go/pkg/mod`), the archives Yarn Berry stages in `/tmp`, and build
-output therefore take disk, not memory, and a cache filled by a setup command is still there
-for the agent and after a resume. Both are removed with the rest of the run directory. The
-provider probe has no run directory and keeps tmpfs for both.
+The home, `/home/runner`, and `/tmp` are the `home` and `tmp` directories of the run's
+workspace PVC, mounted by subPath into setup containers and the workstation alike and owned
+by the run user (`tmp` with mode 1777; `prepare` creates both). Package manager caches
+(`~/.cache/yarn`, `~/.npm`, `~/.m2`, `~/go/pkg/mod`), the archives Yarn Berry stages in
+`/tmp`, and build output therefore take disk, not memory, and a cache filled by a setup
+command is still there for the agent and after a resume. Both go with the PVC when the Run is
+deleted. The provider probe has no workspace and uses `emptyDir`s.
 
 Project images often have their own passwd entry for uid 1000 with another home (Ubuntu's
 `ubuntu:x:1000:1000::/home/ubuntu`), and tools that read the home from passwd rather than
-`$HOME` (Java's `user.home`, and so Maven's `~/.m2`) then look in the wrong place. The worker
-therefore writes `runs/<run_id>/etc/passwd` and `etc/group` and bind-mounts them read-only
-over `/etc/passwd` and `/etc/group` in setup and run containers:
+`$HOME` (Java's `user.home`, and so Maven's `~/.m2`) then look in the wrong place. The chart
+therefore creates one ConfigMap in `exradius-runs`, `exradius-run-identity`, with `passwd`
+and `group`, and the operator mounts each by subPath, read-only, over `/etc/passwd` and
+`/etc/group` in `clone-*`, `setup-*` and the workstation:
 
 ```
 root:x:0:0:root:/root:/bin/sh
@@ -90,9 +100,10 @@ runner:x:<uid>:<gid>::/home/runner:/bin/bash
 ```
 
 and `root:x:0:` and `runner:x:<gid>:` in the group file. The run still uses the configured uid
-and gid (`EXRADIUS_RUN_USER`, default `1000:1000`); only the names and the home change, and
+and gid (values `runs.user`, default `1000:1000`); only the names and the home change, and
 other users of the image disappear for the run. With the stock `maven:3-eclipse-temurin-21`
-image, `user.home` is `/home/ubuntu` without the mount and `/home/runner` with it.
+image, `user.home` is `/home/ubuntu` without the mount and `/home/runner` with it. Services
+(phase 3) keep their image's users.
 
 Every session gets the settings Exradius needs (`includeCoAuthoredBy: false` and empty
 `attribution.commit` and `attribution.pr`) as the SDK's `settings` option, which the CLI
@@ -104,16 +115,17 @@ is the agent's own user settings; nothing is written there any more.
 
 ### 2.5 The api and worker services
 
-Unchanged: they keep their own image (`exradius-backend`), which no longer needs Node or
-the Agent SDK. The worker image needs the Docker SDK and git only. `deploy/runner.Dockerfile`
-is replaced by `deploy/backend.Dockerfile`, `deploy/runtime-claude-code.Dockerfile`
-(builds the bundle) and `deploy/project-default.Dockerfile`.
+They keep their own image (`exradius-backend`), which has no Node, no Agent SDK and no Docker
+SDK: the worker talks to the Kubernetes API over HTTPS and never to a container runtime. It
+needs git (config-repository mirrors) and runs as uid 1000. The operator has its own image
+(`exradius-operator`, `deploy/operator.Dockerfile`).
 
 ### 2.6 Provider tests and verification
 
-- The `oauth_token` provider probe runs in the default project image with the Claude Code
-  bundle mounted, like any run.
-- Project verification runs setup commands in the project image, as before.
+- The `oauth_token` provider probe is a Run with `purpose: probe`: the default project image
+  with the Claude Code bundle mounted, like any run (`kubernetes.md` §13).
+- Project verification is a Run with `purpose: verify`, the same pod as a task's: setup
+  commands run in the project image, and the runner lists the connections' tools.
 
 ## 3. Agent, project and runtime
 
@@ -122,18 +134,20 @@ is replaced by `deploy/backend.Dockerfile`, `deploy/runtime-claude-code.Dockerfi
   what that runtime accepts (`GET /api/system/runtimes`).
 - `projects.image` stays a single free image reference (nullable = default image).
 - The earlier idea of a per-runtime image map on projects is dropped.
-- `GET /api/system/status` workers gain `runtimes: [{name, version, ready}]` from the
-  heartbeat, so the overview can show that the bundle is extracted; `runner_image_ok`
-  is replaced by that.
+- `GET /api/system/status` workers report `runtimes: [{name, version, ready, image}]` from
+  the heartbeat: the bundle image each worker is configured with.
 
 ## 4. Build and release
 
-- `make bundle-claude-code` (or the uv equivalent) produces the bundle in
-  `deploy/build/runtime-claude-code/` and the Dockerfile copies it in.
-- The native Claude Code binary is downloaded at build time from Anthropic's installer
-  endpoint and pinned to a version in the Dockerfile.
-- Compose builds all three images. `EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE` and
-  `EXRADIUS_PROJECT_DEFAULT_IMAGE` settings allow overriding the tags.
+- `deploy/runtime-claude-code.Dockerfile` builds the bundle; `make -C deploy
+  bundle-claude-code` exports the directory alone to `deploy/build/runtime-claude-code/`.
+- The native Claude Code binary is downloaded at build time from Anthropic's release bucket
+  and pinned to a version (with its checksum) in the Dockerfile.
+- Locally, Tilt builds every image (backend, frontend, operator, runtime bundle, project
+  default) and pushes it to the kind registry, and injects the bundle and default image
+  references into the worker's environment; `make -C deploy/kind images` builds and pushes
+  them with the version tag for a plain `helm install`. CI builds them for releases. Values
+  `runtime.claudeCode.image` and `projectDefaultImage` name them.
 
 ## 5. Isolation between the runner and the project
 
@@ -149,6 +163,7 @@ The runner is a guest in the project's container. Two rules keep it that way:
    the agent runs `python`, `node`, `cargo` or `mvn`, it gets the project image's tools and
    the project's variables.
 
-The runner writes only to the state mount and `/tmp`. The project image must provide
+The runner writes only to the workspace (the state directory, `/tmp`, the attachments in
+`prepare` and `files`). The project image must provide
 `bash` (Claude Code's shell tool uses it) and `git`; Debian-based official images have
 both.

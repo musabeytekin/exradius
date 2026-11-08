@@ -4,15 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Exradius is a self-hosted, execution-only harness for AI agents. Tasks arrive on a RabbitMQ
-queue naming a `project` and an `agent` slug; a worker reads the project's config repository,
-clones its code repositories, starts its dependency services, runs one hardened container per
-task through the Claude Agent SDK, and publishes status/question/result events back on a topic
-exchange. Managing tickets, chat or CI is the job of an integration layer outside this repo.
+Exradius is a self-hosted, execution-only harness for AI agents, running on Kubernetes. Tasks
+arrive on a RabbitMQ queue naming a `project` and an `agent` slug; a worker reads the
+project's config repository and creates a `Run` object; an operator turns it into one
+hardened pod (clones, setup, the agent through the Claude Agent SDK); the worker publishes
+status/question/result events back on a topic exchange. Managing tickets, chat or CI is the
+job of an integration layer outside this repo.
 
 The design lives in `docs/` and is the source of truth when code and prose disagree:
 `architecture.md` (system, message contracts, run lifecycle, state machine, §12 implementation
-notes, §13 operating rules), `config-repo.md` (the current project model), `environment-and-services.md`,
+notes, §13 operating rules), `kubernetes.md` (the Run resource, pods, operator, chart, local
+loop) and `kubernetes-plan.md` (the phases: phase 1 runs image-based projects without
+services; builds and services come in phases 2 and 3), `config-repo.md` (the current project
+model), `environment-and-services.md`,
 `runtime-bundles.md`, `providers.md`, `agent-identity.md`, `onboarding.md` (panel),
 `integration-api.md` (hook, directory, bridge files, bridge status), `agent-routing.md`. These are
 internal design notes: Exradius ships no user documentation, and the panel shows state, not help.
@@ -25,15 +29,23 @@ Backend (Python 3.14, uv):
 
 ```bash
 cd backend && uv sync                       # installs the dev group (runner deps, pytest, aiosqlite)
-cd backend && uv run pytest                 # unit tests: SQLite, in-memory object store, local bare git repos
+cd backend && uv run pytest                 # unit tests: SQLite, in-memory object store, a fake Kubernetes API, local bare git repos
 cd backend && uv run pytest tests/test_intake.py -k rejects   # one file / one test
 cd backend && uv run exradius generate-key  # a Fernet EXRADIUS_SECRET_KEY
-cd backend && uv run alembic upgrade head   # migrations (the API container does this at start)
+cd backend && uv run exradius migrate       # alembic upgrade head under an advisory lock (the pods' init containers run it)
 ```
 
-`tests/test_integration.py` skips unless `EXRADIUS_TEST_BROKER_URL` is set (RabbitMQ) and/or
-Docker is reachable with `exradius-project-default:0.1.0` and `exradius-runtime-claude-code:0.1.0`
-built. There is no linter configured for the backend.
+`tests/fakes.py` has `FakeCluster` (the Kubernetes API with a stand-in operator and runner);
+run-lifecycle tests use it. `tests/test_integration.py` skips unless
+`EXRADIUS_TEST_BROKER_URL` is set (RabbitMQ). There is no linter configured for the backend.
+
+Operator (Go, controller-runtime; `go.work` at the root):
+
+```bash
+make -C operator test        # unit tests (pod builder goldens, status mapping) and envtest
+make -C operator manifests   # regenerate the CRD into charts/exradius/files/crds/
+make -C operator generate    # deepcopy
+```
 
 Frontend (Node 24, Vite):
 
@@ -45,21 +57,25 @@ cd frontend && npm test         # vitest (jsdom); single file: npx vitest run sr
 cd frontend && npm run build    # tsc -b, then vite build
 ```
 
-Stack (Docker Compose v2; `deploy/.env` from `deploy/.env.example`, needs `EXRADIUS_SECRET_KEY`,
-`EXRADIUS_ADMIN_PASSWORD`, absolute `EXRADIUS_DATA_DIR`):
+Local cluster (kind, kubectl, helm, tilt):
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d --build
-docker compose -f deploy/docker-compose.yml up -d --build api worker   # after backend changes
-docker compose -f deploy/docker-compose.yml build project-default runtime-claude-code
-make -C deploy bundle-claude-code   # the runtime bundle directory alone, in deploy/build/
+make -C deploy/kind dev-up      # registry localhost:5001, kind cluster "exradius", CloudNativePG, RabbitMQ operator, Secrets
+tilt up                         # build every image, install charts/exradius with values-local.yaml, live-update Python
+tilt down                       # uninstall (the exradius namespace and its Secrets stay)
+make -C deploy/kind dev-down    # delete the cluster and the registry
+make -C deploy/kind images install   # the same without Tilt, images tagged with the version
+make -C deploy/kind e2e PROJECT=<slug> [AGENT=<slug>]   # publish one task, wait for its result
+kubectl --context kind-exradius -n exradius-runs get runs,pods -w
+kubectl --context kind-exradius -n exradius get secret exradius-admin -o jsonpath='{.data.password}' | base64 -d
 ```
 
-Panel http://localhost:3000, API http://localhost:8000 (`/docs`), RabbitMQ UI :15672.
+Panel http://localhost:3100, API http://localhost:8100 (`/docs`), RabbitMQ `localhost:5673`
+and its UI :15673 (Tilt's port-forwards; they avoid a v0.1.0 compose install's ports).
 Publishing a task from a shell: `uv run exradius publish-task --project <slug> --agent <slug>
 --task-id <id> --instructions ...` and `uv run exradius events --task-id <id> --until-result`
-(broker from `EXRADIUS_BROKER_URL`). A task id that was already used, even by a failed task,
-is rejected as a duplicate.
+(broker from `EXRADIUS_BROKER_URL`, credentials in the `exradius-rabbitmq-default-user`
+Secret). A task id that was already used, even by a failed task, is rejected as a duplicate.
 
 ## Architecture
 
@@ -72,53 +88,69 @@ keys, model providers, and one git credential per host for reading config reposi
 and connection config/env/headers; the set of names referenced is the project's required keys.
 The schema is strict pydantic with `extra="forbid"` in `schemas/project_config.py`.
 
-- `config_repo.py` mirrors the repo, reads the file at the branch head and returns a
-  `ProjectConfigSnapshot` (commit, config or errors, warnings, required_keys, store).
+- `config_repo.py` mirrors the repo (in the pod's `EXRADIUS_CACHE_DIR`, an `emptyDir`),
+  reads the file at the branch head and returns a `ProjectConfigSnapshot` (commit, config or
+  errors, warnings, required_keys, store).
 - `project_state.py` wraps it with the host credential, the store, and the runnable check;
   the API caches the latest snapshot on `projects.snapshot` for the panel only.
 - The worker never trusts that cache: intake and `preparing` read the file afresh and
   record `runs.config_commit`. Tasks for a project with errors or missing keys are rejected
-  with the reason.
-- `resolve.py` turns the config into run inputs; secrets are decrypted only there, at run
-  start. Everything shown to the panel, the agent's environment section, events and logs
+  with the reason. `capabilities.py` says what this version cannot run yet (a `dockerfile`,
+  `services`); that is the health reason too.
+- `resolve.py` turns the config into run inputs; secrets are decrypted only there, when the
+  Run and its per-run Secret are created. Everything shown to the panel, the agent's environment section, events and logs
   uses `$NAME` placeholders.
 - `catalog.py` holds the MCP connection catalog (github, postgres, slack, ...); custom
   connections use the `mcpServers` shape.
 
 **Backend package `backend/exradius/`.**
 
-- `api/`: FastAPI. `/api/*` is the admin API (session cookie, single admin user):
-  `config_routes.py` (projects, stores, git credentials, catalog, verification),
-  `provider_routes.py`, `task_routes.py` (tasks, events, transcripts, signed downloads,
-  per-task SSE stream), `system_routes.py`. `internal.py` is `/internal/runs/{run_id}/*`,
-  authenticated by the per-run token that only the runner holds.
+- `api/`: FastAPI. One process serves two ports: 8000 for `/api/*`, the admin API (session
+  cookie, single admin user): `config_routes.py` (projects, stores, git credentials, catalog,
+  verification), `provider_routes.py`, `task_routes.py` (tasks, events, transcripts, signed
+  downloads, per-task SSE stream), `system_routes.py`; and 8001 for `internal.py`,
+  `/internal/runs/{run_id}/*` (spec, transcript, info requests, result, outcome, `/reported`,
+  the `/answers` long-poll, attachments), `/internal/verifications/{id}/*` and
+  `/internal/probes/{id}/*`, each authenticated by its Run's token. `PortSplit` keeps each port
+  to its routes.
 - `worker/`: `main.py` consumes `exradius.tasks`, `exradius.answers` and `exradius.control`
-  (cancel, verify, test_provider) with concurrency = prefetch count. `intake.py` accepts or
-  rejects; `runs.py` (`RunManager`) orchestrates preparing → running → waiting/resuming →
-  finalize; `prepare.py` clones repositories into `runs/<run_id>/project` (the container's `/work`); `builds.py` builds
-  Dockerfile images tagged `exradius/<project>/<name>:<tree hash>` under a per-project lock;
-  `containers.py` starts services on the per-run network `exradius-run-<run_id>` and the
-  workstation container; `delivery.py` adds report-only warnings when work was left unpushed
-  (the worker never commits or pushes); `verify.py` runs the panel's Verify steps.
+  (cancel, verify, test_provider, run_reported) with concurrency = prefetch count, watches the
+  Runs and sweeps every 15 s. `intake.py` accepts or rejects; `runs.py` (`RunManager`) reads
+  the config, creates the Run and its per-run Secret (`run_objects.py` builds them:
+  secret-free spec, secret values by key), `settle()`s runs from Run status and the runner's
+  reports, cancels via `spec.cancel`, recovers by listing Runs, and finalizes by deleting the
+  Run; `kube.py` is the Kubernetes client (httpx, in-cluster token); `verify.py` and
+  `provider_test.py` create verify and probe Runs; `git_identity.py` computes the agent's git
+  variables; `heartbeat.py` reports runtimes and the operator's Lease.
 - `states.py` is the task state machine; `lifecycle.py` performs transitions. Postgres is
   the source of truth: every state change locks the run row, stores an `events` row in the
   same transaction, and the event is published after commit (`published_at` marks success,
   so unpublished events survive restarts). Finalize happens exactly once, guarded by
-  `runs.ended_at`.
-- `runner/`: the process inside the run container (`exradius-runner <run_id>`). It fetches
-  the run spec from the internal API, hosts the built-in `exradius` MCP server
+  `runs.ended_at`. A Run object holds only the live execution.
+- `runner/`: the process inside the run pod (`exradius-runner`): `--prepare` (workspace and
+  task attachments), `--clone`, `--files` (the answer attachments sidecar), `<run_id>` (the
+  session: fetches the run spec, hosts the built-in `exradius` MCP server
   (`request_information`, `submit_result`, attachments) in `tools.py`, builds the prompts in
-  `prompt.py`, and streams transcript events back. `runner/environment.py` strips the
-  runner's own interpreter variables and the run token so the agent sees only the project's
-  environment.
+  `prompt.py`, streams the transcript, waits for answers in the pod and resumes there, runs the
+  delivery check), `--verify` and `--probe`. `runner/environment.py` strips the runner's own
+  interpreter variables and the run token so the agent sees only the project's environment.
+  `gitconfig.py` holds the hooks dispatcher (built into the bundle) and writes the git config.
 - `runtimes/`: the `Runtime` protocol (`base.py`: `RunSpec`, `ConnectionSpec`, `RunOutcome`)
   and `claude_code.py`, the only implementation. The runtime writes Claude Code settings
   into `CLAUDE_CONFIG_DIR` (for example `includeCoAuthoredBy: false`).
-- `models/`: SQLAlchemy models plus Alembic migrations. The chain was reset to a single
-  `0001_initial_schema.py` with the config-repo model; no older data is migrated.
-- `storage.py`: object store for transcripts, artifacts and attachments (filesystem under
-  `<data_dir>/objects/`, or S3). `messaging/`: queue/exchange names and the publisher.
-- `cli.py`: the `exradius` CLI (publish-task, answer, events, generate-key).
+- `models/`: SQLAlchemy models plus Alembic migrations (`0006` is the move to Kubernetes).
+- `storage.py`: object store for transcripts, artifacts and attachments: S3 (SeaweedFS
+  locally); the filesystem and in-memory stores are for tests. `messaging/`: queue/exchange
+  names and the publisher. `git.py`: git helpers shared by the api, worker and runner.
+- `cli.py`: the `exradius` CLI (publish-task, answer, events, generate-key, migrate).
+
+**Operator `operator/`.** Go, controller-runtime. `api/v1alpha1` is the `Run` CRD
+(`exradius.dev`); `internal/podspec` builds the PVC and the pod from a Run (prepare,
+clone-<n>, setup-<n>, the files sidecar, the workstation with the bundle as an image volume)
+and writes the security context itself; `internal/status` maps the pod onto Run status
+(steps, log tails, pull failures, cancel, pod lost, podGeneration); `internal/controller`
+reconciles. The Run spec is the contract with `worker/run_objects.py`: change both and the
+CRD in one commit.
 
 **Prompt layout (architecture §13, prompt.py).** System prompt = Claude Code's preset, then
 the fixed Exradius operating rules, then a generated `# Your environment` section from the
@@ -128,22 +160,22 @@ context and attachments only. Tickets never mention Exradius; agents learn how t
 the rules alone (folders are git clones, branch name starts with the task id, push to origin
 or attach a patch).
 
-**Run isolation (runtime-bundles.md).** Three images: `exradius-backend` (api + worker, no
-Agent SDK), `exradius-runtime-claude-code` (a relocatable Python with the Agent SDK and a
-pinned native Claude Code binary; no Node), `exradius-project-default`. The worker copies
-the bundle into a Docker volume and mounts it read-only at `/opt/exradius/runtime`, so a
-project's workstation can be any glibc image with bash and git (no Alpine). Run containers
-are uid 1000 with a generated `/etc/passwd` entry (`runner`, home `/home/runner`), read-only
-rootfs, all capabilities dropped; the run home, `/tmp` and `/work` are bind mounts under
-`runs/<run_id>/` on disk (not tmpfs: package installs exhausted RAM). Runs join only the
-`exradius-runs` network (where the API is aliased `exradius-api`) plus their own service
-network, never the stack network, so a service named `postgres` cannot resolve to Exradius's
-own database.
+**Run isolation (kubernetes.md §7, runtime-bundles.md).** Images: `exradius-backend` (api
+and worker; no Agent SDK, no Docker SDK; uid 1000), `exradius-operator`, `exradius-frontend`,
+`exradius-runtime-claude-code` (a relocatable Python with the Agent SDK and a pinned native
+Claude Code binary, plus the git hooks dispatcher; no Node), `exradius-project-default`. Run
+pods mount the bundle image as an image volume at `/opt/exradius/runtime`, so a project's
+workstation can be any glibc image with bash and git (no Alpine). The operator writes the
+pod's security: uid 1000, `/etc/passwd` from the `exradius-run-identity` ConfigMap (`runner`,
+home `/home/runner`), read-only root, all capabilities dropped, no ServiceAccount token, no
+service links. `/work`, the home, `/tmp` and the state directory are subPaths of one
+workspace PVC per Run. Runs live in the `exradius-runs` namespace (Pod Security `baseline`),
+the stack in `exradius` (`restricted`). NetworkPolicy and the egress proxy come in phase 4.
 
 **Frontend `frontend/src/`.** React 19 + TypeScript, TanStack Router (`router.tsx`) and
 Query (`lib/queries.ts`), Tailwind 4, Radix primitives, `lib/api.ts` as the only API client.
 Pages: Overview, Projects (detail tabs config / secrets / verify / tasks), Stores, Providers,
-Tasks, Settings. The panel talks to `/api` on the same origin; nginx (compose) or the Vite
+Tasks, Settings. The panel talks to `/api` on the same origin; nginx (in the chart) or the Vite
 proxy (dev) forwards it. Forms offer known values and only ask for free text when the
 information exists nowhere else.
 

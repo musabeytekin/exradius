@@ -10,9 +10,9 @@ The Anthropic credential is the first such thing: it changes, there may be sever
 belongs to whoever logs in. Today it comes from the environment file or from a specially
 named global secret, with a fallback chain nobody can see. That goes.
 
-The environment file keeps only what must exist before the database does: database URL,
-broker URL, the encryption key, the data directory, public URLs, the initial admin
-password. The panel never tells anyone to edit it.
+The environment (on Kubernetes: the chart's values and the Secrets they name) keeps only
+what must exist before the database does: database URL, broker URL, the encryption key,
+public URLs, the initial admin password. The panel never tells anyone to edit it.
 
 ## 2. The model
 
@@ -73,8 +73,9 @@ panel needs no change.
 | anthropic_vertex (later) | `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`, credentials file |
 | anthropic_foundry (later) | `CLAUDE_CODE_USE_FOUNDRY=1`, `ANTHROPIC_FOUNDRY_RESOURCE`, `ANTHROPIC_FOUNDRY_API_KEY` |
 
-The worker resolves the agent's provider (or the default) at container start, decrypts the
-credential then, and passes only that provider's variables. MCP servers started by
+The worker resolves the agent's provider (or the default) when it creates the run's Run,
+decrypts the credential into the per-run Secret, and the workstation gets only that
+provider's variables (`kubernetes.md` §10). MCP servers started by
 Claude Code inherit the process environment, including these variables, which is
 acceptable in v1 (they already inherit project secrets). The run token is still scrubbed
 as before.
@@ -86,8 +87,9 @@ as before.
 - `anthropic / api_key`: `GET https://api.anthropic.com/v1/models` with the key from the API
   container. Success stores the first few model ids in `detail`.
 - `anthropic / oauth_token`: no cheap API check exists. The API publishes a control message;
-  the worker starts a container from the runner image with the provider injected and runs a
-  one-line SDK query ("Reply with OK"). Result recorded like a verification. The endpoint
+  the worker creates a probe Run (`kubernetes.md` §13): the default project image with the
+  runtime bundle and the provider's variables, running a one-line SDK query ("Reply with
+  OK") that reports through the internal API. Result recorded like a verification. The endpoint
   returns 202 with a test id; `GET /api/providers/{id}/tests/{tid}` reports it.
 
 Both store `last_test` on the provider.
@@ -140,12 +142,12 @@ agents: AgentIn/AgentUpdate/AgentOut gain provider_id (nullable)
   Test on save, stored result shown. Set default. Delete confirms and explains when refused.
 - **Agent form**: a provider pick list with "Default (<name>)" as the first option. Hidden
   while only one provider exists.
-- **Overview status strip**: database, broker, workers, Docker and runner image, provider
+- **Overview status strip**: database, broker, workers, the operator, runtimes, provider
   (name, auth method, last test). No object store.
 - **Setup checklist** step 1 becomes "A provider is configured and tested".
 - **Settings**: change password form; the environment list shrinks to the values an
-  operator may need to know (public API URL, public broker address, data directory,
-  worker concurrency) with no edit instructions.
+  operator may need to know (public API URL, public broker address, the operator, worker
+  concurrency) with no edit instructions.
 - **Overview, further**: recent tasks with live state chips; the checklist collapses once
   complete and can be reopened; quick actions for "new project", "new agent", "send a task";
   the status strip compact on one row at 1280 px.

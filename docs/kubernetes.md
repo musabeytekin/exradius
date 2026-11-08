@@ -1,6 +1,6 @@
 # Exradius on Kubernetes
 
-Status: agreed design, 2026-11-08. Supersedes the Docker-based execution of `architecture.md`
+Status: agreed design, 2026-11-08; details settled by phase 1 folded in the same day (§23). Supersedes the Docker-based execution of `architecture.md`
 (§3, §5, §9, §10, the run-container parts of §12), `runtime-bundles.md` §2.2, the services
 lifecycle and networks of `environment-and-services.md` §2, and the memory budget and cache
 mounts of `run-environment.md` §4 and §5. The phases are in `kubernetes-plan.md`. The last
@@ -238,16 +238,24 @@ The worker turns the config into a Run spec (§5); the operator turns a Run spec
 
 | Order | Container | Image | Does | Mounts |
 |---|---|---|---|---|
-| init 1 | `prepare` | workstation + bundle | creates the workspace directories on first start, writes the task's attachments (fetched from the internal API) read-only, writes `.exradius/prepared` | workspace PVC (whole) |
-| init 2..n | `clone-<folder>` | workstation + bundle | refreshes the mirror on the project volume, `git clone --local`, checks out the branch, resets `origin`; skipped once `prepared` exists | workspace `work`, project volume `mirrors` |
+| init 1 | `prepare` | workstation + bundle | creates the workspace directories on first start, writes the task's attachments (fetched from the internal API) read-only, writes the marker `state/steps/prepare.done` | workspace PVC (whole) |
+| init 2..n | `clone-<n>` (n: the repository's index) | workstation + bundle | refreshes the mirror on the project volume, `git clone --local`, checks out the branch, resets `origin`; writes `state/steps/clone-<n>.done` | workspace `work`, project volume `mirrors` |
 | sidecar | `service-<name>` | the service's image | the service, with its startup probe | none |
 | init | `setup-<n>` | workstation | `/bin/sh -c <command>`, as today | workspace, caches, identity files |
-| sidecar | `files` | bundle | writes answer attachments as they arrive (§8.2) | workspace `attachments` |
+| sidecar | `files` | workstation + bundle | writes answer attachments as they arrive (§8.2) | workspace `attachments` |
 | main | `workstation` | workstation + bundle | `/opt/exradius/runtime/bin/exradius-runner <run_id>` | workspace, caches, identity files, `attachments` read-only |
 
-Each init container and each service is one step in status, so Verify and task runs report
-progress the same way. `restartPolicy: Never` at pod level; sidecars restart by their own
-policy.
+Each init container (except `files`) and each service is one step in status, so Verify and
+task runs report progress the same way. `restartPolicy: Never` at pod level; sidecars
+restart by their own policy.
+
+- Container names are DNS labels, so a clone is `clone-<n>` and a setup command `setup-<n>`;
+  the step's name carries the folder or the command ("Clone saleor (main)", "Setup: uv
+  sync").
+- A step container whose marker exists in `state/steps/` exits at once: a recreated pod
+  (§8.3) skips `prepare` and the clones, and runs setup again.
+- `files` runs from the workstation image with the bundle mounted, like `prepare`: the bundle
+  image is `FROM scratch` and has no libc of its own.
 
 ### 7.1 The workspace
 
@@ -419,7 +427,8 @@ status is ahead of their state, so a lost message only delays.
    exists for it (§12). Waiting for builds happens here.
 3. Download URL attachments into the object store; base64 ones are already there from intake.
 4. Create the Run, then the per-run Secret owned by it (§10). The run token is generated now
-   and lives as long as the Run.
+   and lives as long as the Run: it stays valid after a cancel until finalize, so a cancelled
+   runner can still send its delivery check.
 5. The operator creates the PVC and the pod. Step progress shows in Run status. A failed step
    fails the run with that step's log tail ("service db (postgres:16) …", "setup command '…'
    failed …", the clone error).
@@ -943,3 +952,60 @@ To be rewritten in the phase that makes them true, and only then:
   - restricting DNS;
   - pre-pulling project images;
   - registry garbage collection.
+
+## 23. Settled in phase 1
+
+Details the earlier sections left open or got wrong, decided while building phase 1
+(2026-11-08). The sections above are corrected where they were wrong; this is the list.
+
+- **The Run spec** gains `id` (the run, verification or provider test id the pod reports
+  to), `taskId` (printer column), `runtime.env` (the provider's variables, for the
+  workstation only), `git.setupEnv` (setup containers' command-line git config) next to
+  `git.env`, `repositories[].credentialKey`, and `model` for probes. An env entry is
+  `{name, value}` or `{name, secretKey}`. Per-run Secret keys: `token`, `env.<NAME>`,
+  `provider.<NAME>`, `repo.<n>` (a repository's credential, for its clone), `push.<n>` (the
+  token part, for the push helper). The worker builds both in `worker/run_objects.py`.
+- **Run status** carries `reason` and `message` (the operator's own failures:
+  `Cancelled`, `PodLost`, `StepFailed`, `ImagePullFailed`, `CreateContainerConfigError`,
+  `OOMKilled`, `Error`; `Unschedulable` while `Pending`), `podGeneration` (of the pod last
+  created), `pullFailures` and `configErrorSince`. A container that could not start has no
+  log, so its step shows the runtime's termination message.
+- **Containers and markers:** `clone-<n>` and `setup-<n>` (§7); markers in `state/steps/`;
+  `files` runs from the workstation image (the bundle image has no libc). Clone containers
+  also get `EXRADIUS_CLONE_FOLDER`, `_URL`, `_BRANCH`, `_INDEX` and `EXRADIUS_GIT_AUTH`.
+- **The bundle image's root is the bundle.** An image volume mounts the image's root, so
+  the bundle is at `/` in `exradius-runtime-claude-code`, not under `/opt/exradius/runtime`
+  (found on kind: the runner was not found at its path).
+- **Without a project volume** (until phase 3) each clone fetches straight from the remote.
+- **Reports and transitions.** `/reported` stores `reported_status` (`waiting_for_input` or
+  `resumed`); the worker resets it to `null` when it moves a run to `resuming`, so a report
+  in `resuming` always means the runner resumed. The runner keeps the ids of the answers it
+  resumed with and ignores them on the next long-poll. On SIGTERM the runner reports
+  `cancelled` when the run was cancelled, and otherwise fails the run with "the run's pod was
+  stopped (SIGTERM) before the run ended".
+- **Recreating a lost pod** is decided in `resume()` under the run-row lock (bump
+  `spec.podGeneration`, then commit `resuming`), and a settle of a `resuming` run reads the
+  Run again before it fails it, so the old pod's end is never taken for the new one's. The
+  operator deletes older pods and waits until they are gone before it creates the new one,
+  so two runners never share a workspace.
+- **Recovery of a run in `preparing` without a Run** (the worker died before creating it):
+  failed at once when no other worker sent a heartbeat in the last minute, else after 30
+  minutes. `runs.run_object` tells it from a Run that disappeared.
+- **Concurrency.** A slot is held while a run of this worker prepares, runs or resumes, and
+  given back while it waits for input; recovered runs take a slot of the new worker.
+- **The api** listens on both ports in one uvicorn server (two sockets); a middleware keeps
+  `/internal/*` to 8001 and the rest to 8000. Both the api and the worker run
+  `exradius migrate` (alembic under a Postgres advisory lock) in an init container.
+- **Settings.** `EXRADIUS_DATABASE_URL` accepts CloudNativePG's `postgresql://` URI;
+  `EXRADIUS_BROKER_USERNAME` and `EXRADIUS_BROKER_PASSWORD` replace the broker URL's user
+  info (from the RabbitMQ operator's Secret); `EXRADIUS_CACHE_DIR` holds config mirrors.
+- **The local stack.** `make dev-up` also installs cert-manager, which the RabbitMQ Cluster
+  Operator needs for its webhooks. The chart does not create the release namespace (Helm
+  cannot own it); `dev-up` creates `exradius` with the `restricted` labels. SeaweedFS runs
+  as one `weed server` with only S3 exposed. The panel's nginx is unprivileged on 8080.
+  Everything in `exradius` passes Pod Security `restricted`.
+- **Operator RBAC** adds `runs/finalizers` (owned objects carry `blockOwnerDeletion`) and
+  events in both the core and `events.k8s.io` groups.
+- **Tilt** disables its Docker build cache pruning (by default it deletes every build cache
+  older than six hours, other projects' too). A Python change rebuilds the bundle, because
+  run pods mount it, and rolls the worker; the api is updated in place.

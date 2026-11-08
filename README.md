@@ -7,8 +7,8 @@ runs a Claude Code agent in it, and publishes what happened: status changes, que
 human, and a result with a branch or pull request.
 
 Exradius only executes. It has no ticket model and no chat integration: whatever tracker a
-company uses publishes tasks on RabbitMQ and consumes the events. It runs on one machine
-with Docker Compose and is administered from a web panel.
+company uses publishes tasks on RabbitMQ and consumes the events. It runs on Kubernetes,
+locally on kind or in a cloud cluster, and is administered from a web panel.
 
 [![A ticket in a tracker is assigned to the Exradius agent](docs/media/assign-ticket.gif)](docs/media/assign-ticket.mp4)
 
@@ -37,9 +37,8 @@ flowchart LR
     tracker["Tracker or<br/>integration layer"] -- task --> tasks[("exradius.tasks")]
     tasks --> worker["Worker"]
     worker -- reads at branch head --> config["Config repository<br/>exradius.yaml"]
-    worker -- clones, builds, starts --> run["Run container<br/>workstation + Claude Code"]
-    worker -- starts --> services["Service containers<br/>postgres, redis, ..."]
-    run -. private network .- services
+    worker -- creates a Run --> operator["Operator"]
+    operator -- creates the pod --> run["Run pod<br/>clones, setup, workstation + Claude Code"]
     run -- pushes branch, opens PR --> git["Git host"]
     worker -- status, questions, result --> events[("exradius.events")]
     events --> tracker
@@ -50,22 +49,23 @@ flowchart LR
 1. **Intake.** The worker reads the project's `exradius.yaml` afresh, rejects the task with
    a reason if the config has errors or the secret store lacks a key it references, and
    stores the task before acknowledging the message.
-2. **Preparing.** It clones the repositories from per-project mirrors into a fresh run
-   directory, builds the workstation image when the config gives a Dockerfile (cached by
-   tree hash), starts the services on a network of the run's own, and runs the setup
-   commands (`pnpm install`, `uv sync`, ...).
+2. **Preparing.** It creates a `Run` object, and the operator turns it into one pod on a
+   fresh workspace volume: the repositories are cloned, then the setup commands run
+   (`pnpm install`, `uv sync`, ...) in the workstation image. Image builds and services
+   (Postgres, Redis, ...) come back in the next phases of the move to Kubernetes.
 3. **Running.** The agent works in `/work`, where every folder is a git clone. Its system
    prompt holds Exradius's operating rules and a generated description of the environment:
    image, repositories with branch and push rights, services with their settings, the
    project's notes.
 4. **Questions.** When the ticket is not enough, the agent calls `request_information`.
-   The run stops, the question goes out as an event, and an answer on `exradius.answers`
-   resumes the same session.
+   The session stops, the question goes out as an event, and the pod waits; an answer on
+   `exradius.answers` resumes the same session in the same pod.
 5. **Ending.** The agent pushes a branch named after the task (or attaches a patch when it
-   may not push) and submits its result. The worker uploads the transcript, warns about
-   any work left unpushed, publishes `task.result` and removes the run.
+   may not push) and submits its result. The runner warns about any work left unpushed; the
+   worker uploads the transcript, publishes `task.result` and deletes the Run, which
+   removes the pod and its workspace.
 
-Several runs of one project can go at once, each in its own directory and network.
+Several runs of one project can go at once, each in its own pod and workspace.
 
 ## Design decisions
 
@@ -79,7 +79,7 @@ Several runs of one project can go at once, each in its own directory and networ
   one credential per git host. The schema is strict, so unknown keys are errors, not
   warnings, and each run records the config commit it used.
 - **Enforce, don't configure.** Whatever Exradius needs inside a run is enforced at kernel,
-  Docker or git command-line level, never through a setting a project can override. For
+  Kubernetes or git command-line level, never through a setting a project can override. For
   example, Plane's husky hooks set a repository-local `core.hooksPath` that silently dropped
   the task trailers. The hooks path now comes from git's command-line config, which outranks
   every config file, and a dispatcher runs the project's own hooks after Exradius's
@@ -190,29 +190,65 @@ services and runs setup; when that fails, it names the cause.
 
 ## Running it
 
-You need Docker with Compose v2 and an Anthropic API key (or a Claude Code OAuth token).
+Exradius runs on Kubernetes (since 0.2.0; [docs/kubernetes.md](docs/kubernetes.md)). The
+same Helm chart installs it on a local kind cluster and, with another values file, on a
+cloud cluster. This version runs projects whose workstation is an image and that have no
+services; Dockerfile workstations and services come in the next phases
+([docs/kubernetes-plan.md](docs/kubernetes-plan.md)). v0.1.0 is the last Docker Compose
+version.
+
+### Locally, on kind
+
+You need Docker, [kind](https://kind.sigs.k8s.io), kubectl, Helm and
+[Tilt](https://tilt.dev) (`brew install kind kubectl helm tilt-dev/tap/tilt`), about 4 GB
+of free memory for Docker, and a model provider's credential (an Anthropic API key or a
+Claude Code OAuth token).
 
 ```bash
-cp deploy/.env.example deploy/.env
+make -C deploy/kind dev-up     # local registry, kind cluster "exradius", operators, Secrets
+tilt up                        # build every image, install the chart, live-update the backend
 ```
 
-In `deploy/.env`, set:
-- `EXRADIUS_SECRET_KEY`: a Fernet key from `cd backend && uv run exradius generate-key`.
-- `EXRADIUS_ADMIN_PASSWORD`: the first admin password.
-- `EXRADIUS_DATA_DIR`: an absolute host path for runs, mirrors, caches and stored
-  transcripts. On macOS it must be under `/Users`.
-
-The file documents the rest (S3 instead of the filesystem, ports, worker concurrency).
+`dev-up` installs CloudNativePG, the RabbitMQ Cluster Operator (and cert-manager, which it
+needs), creates the namespace `exradius` and generates the Secrets `exradius-secret-key`,
+`exradius-admin` and `exradius-objectstore`. It prints how to read the admin password:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d --build
+kubectl --context kind-exradius -n exradius get secret exradius-admin -o jsonpath='{.data.password}' | base64 -d; echo
 ```
 
-- Panel: http://localhost:3000
-- API: http://localhost:8000 (OpenAPI at `/docs`)
-- RabbitMQ UI: http://localhost:15672
+Tilt forwards, on ports that leave room for a v0.1.0 install beside it:
 
-In the panel:
+- Panel: http://localhost:3100
+- API: http://localhost:8100 (OpenAPI at `/docs`)
+- RabbitMQ: `localhost:5673`, its UI at http://localhost:15673
+- Tilt's own UI: http://localhost:10350
+
+`tilt down` uninstalls the chart; `make -C deploy/kind dev-down` deletes the cluster and the
+registry. Without Tilt, `make -C deploy/kind images install` builds and pushes the images
+with their version tag and installs the chart with `charts/exradius/values-local.yaml`.
+
+To watch runs: `kubectl --context kind-exradius -n exradius-runs get runs,pods -w`.
+
+### On a cluster
+
+Prerequisites, which the chart does not install: a storage class for the run workspaces,
+nodes with containerd 2.1 or later (image volumes), and either CloudNativePG and the
+RabbitMQ operator or an external Postgres and RabbitMQ. Create the Secrets the values name
+(`secretKey.existingSecret`, `admin.existingSecret`, the database, broker and object store
+credentials), then:
+
+```bash
+kubectl create namespace exradius
+kubectl label namespace exradius pod-security.kubernetes.io/enforce=restricted
+helm install exradius charts/exradius -n exradius -f my-values.yaml
+```
+
+`charts/exradius/values.yaml` documents every key. Values files for EKS, GKE and AKS come
+with phase 6.
+
+### In the panel
+
 1. Add a model provider (Providers).
 2. Add a credential for the host of your config repository (Settings).
 3. Create the secret store your config names (Stores).
@@ -248,7 +284,7 @@ The backend ships a CLI for trying this from a shell:
 
 ```bash
 cd backend
-export EXRADIUS_BROKER_URL=amqp://exradius:exradius@localhost:5672/
+export EXRADIUS_BROKER_URL=amqp://<user>:<password>@localhost:5673/   # the exradius-rabbitmq-default-user Secret
 uv run exradius events --task-id PLANE-214 --until-result      # in one terminal
 uv run exradius publish-task --task-id PLANE-214 --project plane --agent developer \
   --instructions "Estimates created through the public API return 404. Fix it."
@@ -260,35 +296,42 @@ The message contracts are in [docs/architecture.md](docs/architecture.md) §4.
 ## Development
 
 ```bash
-cd backend && uv sync && uv run pytest      # 400+ tests: SQLite, local bare git repositories, no services
-cd frontend && npm install && npm run dev   # http://localhost:5173, proxies /api to localhost:8000
+cd backend && uv sync && uv run pytest      # 500+ tests: SQLite, a fake Kubernetes API, local bare git repositories
+make -C operator test                       # the operator: unit tests and envtest (a real API server)
+cd frontend && npm install && npm run dev   # http://localhost:5173; EXRADIUS_API_URL=http://localhost:8100 for the kind install
 cd frontend && npm run lint && npm test && npm run build
 ```
 
-`tests/test_integration.py` also exercises a real RabbitMQ (`EXRADIUS_TEST_BROKER_URL`) and,
-when Docker is reachable with the images built, the run container sandbox itself. After
-backend changes, rebuild with
-`docker compose -f deploy/docker-compose.yml up -d --build api worker`.
+Under `tilt up`, a change to a Python file is synced into the api and restarts it in place;
+the worker and the runtime bundle are rebuilt, because run pods mount the bundle.
+`make -C deploy/kind e2e PROJECT=<slug>` publishes one task to the kind install and waits
+for its result. `tests/test_integration.py` also exercises a real RabbitMQ
+(`EXRADIUS_TEST_BROKER_URL`).
 
 **Stack.** Backend: Python 3.14, FastAPI, SQLAlchemy and Alembic on Postgres, aio-pika on
-RabbitMQ, the Docker SDK, the Claude Agent SDK and MCP. Panel: React 19, TypeScript, Vite,
-Tailwind CSS 4, Radix, TanStack Router and Query.
+RabbitMQ, httpx for the Kubernetes API, the Claude Agent SDK and MCP. Operator: Go,
+controller-runtime. Install: Helm, kind and Tilt locally. Panel: React 19, TypeScript,
+Vite, Tailwind CSS 4, Radix, TanStack Router and Query.
 
 ## Repository layout
 
 ```
 backend/exradius/
-  api/          admin API (session cookie) and the internal run API (per-run token)
-  worker/       intake, run orchestration, clones, image builds, containers, Verify
-  runner/       the process inside the run container and the built-in exradius MCP server
+  api/          admin API (port 8000) and the internal API for run pods (port 8001)
+  worker/       intake, Run objects and settling, Verify, provider probes
+  runner/       the process in the run pod: prepare, clone, files sidecar, the agent's
+                session, the built-in exradius MCP server, the delivery check
   runtimes/     the runtime interface and its Claude Code implementation
   models/       SQLAlchemy models and Alembic migrations
   schemas/      broker messages, API bodies and the exradius.yaml schema
   messaging/    RabbitMQ topology and publishing
 backend/tests/
+operator/       Go operator: the Run CRD, the pod builder, status mapping, the controller
+charts/exradius/  the Helm chart
 frontend/src/   the admin panel
-deploy/         Compose stack and the three images: backend, Claude Code runtime bundle,
-                default project image
+deploy/         Dockerfiles (backend, operator, Claude Code runtime bundle, default project
+                image) and kind/ (the local cluster)
+Tiltfile        the local developer loop
 docs/           design notes
 ```
 
@@ -297,9 +340,11 @@ docs/           design notes
 | Document | Covers |
 |---|---|
 | [architecture.md](docs/architecture.md) | the system, message contracts, run lifecycle, state machine, implementation notes, operating rules |
+| [kubernetes.md](docs/kubernetes.md) | Exradius on Kubernetes: the Run resource, pods, the operator, the chart, the local loop |
+| [kubernetes-plan.md](docs/kubernetes-plan.md) | the phases of the move to Kubernetes |
 | [config-repo.md](docs/config-repo.md) | projects as config repositories and the `exradius.yaml` format |
 | [run-environment.md](docs/run-environment.md) | what is enforced inside a run, and how: hooks, credentials, memory, caches |
-| [runtime-bundles.md](docs/runtime-bundles.md) | the relocatable agent runtime and the run container sandbox |
+| [runtime-bundles.md](docs/runtime-bundles.md) | the relocatable agent runtime, mounted into run pods |
 | [environment-and-services.md](docs/environment-and-services.md) | service containers and the environment section of the prompt |
 | [agent-identity.md](docs/agent-identity.md) | agents' git identities, trailers and push credentials |
 | [setup-and-verify.md](docs/setup-and-verify.md) | Verify with diagnosis, and the setup skill |

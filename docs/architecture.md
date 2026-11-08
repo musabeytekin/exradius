@@ -32,40 +32,51 @@ Agents are isolated: they never see each other, never share a directory, and not
 
 ## 3. Components
 
+Exradius runs on Kubernetes. It declares what a task needs as a `Run` object, and an operator
+turns it into a pod; Exradius itself never starts a container. The design is
+`docs/kubernetes.md`, which this section summarises.
+
 ```
-                 user's integration layer
-                 (publishes tasks + answers, consumes events)
-                            │        ▲
-                            ▼        │
-                   ┌────────────────────────┐
-                   │   RabbitMQ (broker)    │
-                   └────────────────────────┘
-                      │                 ▲
-          consumes    │                 │ publishes
-                      ▼                 │
-   ┌──────────┐   ┌──────────────┐   ┌──────────┐    ┌──────────────┐
-   │ Frontend │──▶│  API server  │◀──│  Worker  │───▶│ Docker daemon│
-   │ (React)  │   │  (FastAPI)   │   │          │    │              │
-   └──────────┘   └──────┬───────┘   └────┬─────┘    └──────┬───────┘
-                         │                │                 │
-                         ▼                ▼                 ▼
-                  ┌────────────┐   ┌──────────────┐   ┌────────────────┐
-                  │  Postgres  │   │ Object store │   │ Run container  │
-                  │            │   │ (fs or S3)   │   │  └─ runner     │
-                  └────────────┘   └──────────────┘   │     └─ SDK     │
-                                                      └───────┬────────┘
-                                                              │ internal HTTP
-                                                              ▼
-                                                         API server
+ integration layer ──▶ RabbitMQ ◀──────────────────────────────┐
+                          │ tasks, answers, control            │ events
+                          ▼                                    │
+ Frontend ──▶ api (Python) ◀── internal port 8001 ──┐    worker (Python) ──▶ Postgres
+              │                                      │      │  master key
+              ▼                                      │      │  writes Run objects and per-run Secrets
+          Postgres, object store                     │      ▼
+                                                     │  ┌──────────── Kubernetes API ────────────┐
+                                                     │  │  Run objects, pods, PVCs, Secrets      │
+                                                     │  │  (namespace exradius-runs)             │
+                                                     │  └─────────────────▲──────────────────────┘
+                                                     │                    │ watches Runs, creates pods
+                                                     │             operator (Go)
+                                                     │
+                                          run pod: prepare, clone-*, setup-*, files, workstation + runner
 ```
 
-- **API server.** FastAPI. Serves the admin panel API and the internal run API that containers call back into. Owns the Postgres schema.
-- **Worker.** Consumes tasks and answers from the broker, prepares run directories, starts and stops run containers, publishes outbound events. Concurrency is a worker setting (prefetch count). Several workers may run on one host; version one targets a single host.
-- **Runner.** A small Python process that is the container's entrypoint. Hosts the Claude Agent SDK session and the built-in `exradius` MCP server. Talks to the API server over internal HTTP with a per-run token.
-- **Broker.** RabbitMQ, shipped in the docker-compose stack. Pointing Exradius at an external broker is a configuration value, not a feature.
-- **Postgres.** All configuration and all task/run state. The broker is never the source of truth.
-- **Object store.** Transcripts, result artifacts, attachments. The filesystem by default (a directory inside the shared data directory that the API server and the worker both mount); any S3 API optionally.
-- **Frontend.** React single-page app. Admin panel only.
+- **api.** FastAPI, one process on two ports: 8000 for the admin panel API, the integration
+  API, hooks and signed downloads; 8001 (`/internal/*` only) for run pods. Owns the Postgres
+  schema.
+- **worker.** Consumes tasks, answers and control messages from the broker, reads the
+  config, creates a `Run` and its per-run Secret for each run, settles runs from the Run's
+  status and from what the runner reported, publishes outbound events, and deletes the Run at
+  the end. It holds the master key and may only ask for Runs: it cannot create pods or read
+  Secrets. Concurrency (Runs in flight) is a worker setting. A second replica is safe.
+- **operator.** Go, controller-runtime. Watches Runs in `exradius-runs`, creates each Run's
+  workspace PVC and pod, writes the pod's security settings itself, mirrors the pod's state
+  into the Run's status, and deletes the pod on cancel. It holds nothing secret.
+- **Runner.** The Python process in the run pod, from the runtime bundle (image volume at
+  `/opt/exradius/runtime`): it prepares the workspace, clones, writes answer attachments,
+  hosts the Claude Agent SDK session and the built-in `exradius` MCP server, and talks to the
+  api's internal port with the Run's token.
+- **Broker.** RabbitMQ (the RabbitMQ operator in a local install). Pointing Exradius at an
+  external broker is a configuration value, not a feature.
+- **Postgres.** All configuration and all task/run state; the source of truth. A Run object
+  holds only the live execution. CloudNativePG in a local install, a managed database in
+  clouds.
+- **Object store.** Transcripts, result artifacts, attachments, in any S3 API: SeaweedFS in a
+  local install, S3 in AWS.
+- **Frontend.** React single-page app, served by nginx. Admin panel only.
 
 ## 4. Message contracts
 
@@ -196,27 +207,52 @@ Every transition emits a `task.status` event.
 
 ### 5.1 Preparing
 
-The worker:
+The worker reads the config afresh, records the commit, then creates the run's `Run` object
+and its per-run Secret in `exradius-runs` (`docs/kubernetes.md` §5, §8.1). The Run spec is a
+secret-free description: the workstation image, setup commands, memory, the project's
+variables (secret values by Secret key), the repositories, the agent's git variables and the
+runtime bundle image. The operator creates a workspace PVC and one pod:
 
-1. Creates the run directory on the host: `/var/lib/exradius/runs/<run_id>/` containing
-   - `project/` — becomes the container's working directory;
-   - `state/` — runtime state that must survive suspend/resume (for Claude Code, the session files under its home directory);
-   - `home/` — the run user's home, mounted at `/home/runner` (`$HOME`). It is on disk, like an engineer's home directory, because package manager caches and build output land there: one `yarn install` of a large Node project leaves 800 MiB in its cache (`~/.yarn/berry/cache` for Outline), and in memory (a tmpfs) two such runs at once exhausted a 7.7 GB Docker VM. Setup commands, the agent container and every resume share it, so a cache filled by setup is warm for the agent; it goes away with the run directory (§5.5);
-   - `tmp/` — the run's `/tmp`, mode 1777, on disk for the same reason: Yarn Berry stages every package archive in `/tmp/xfs-*/archive.zip` until it exits, as much again as its cache (814 MiB for Outline);
-   - `attachments` are written to `project/.exradius/attachments/`.
-2. For each repository of the project: refreshes the per-project bare mirror at `/var/lib/exradius/mirrors/<project>/<repo>.git` with `git fetch`, then clones from the mirror into `project/<repo-folder>/` with `git clone --local` (hardlinked objects, fast) and checks out the configured branch.
-3. Runs the project's setup commands with `project/` as working directory, inside the run image (so toolchains match). Non-zero exit fails the run.
+1. `prepare` lays out the workspace and writes the task's attachments, read-only, under
+   `/work/.exradius/attachments/`;
+2. one `clone-<n>` per repository clones it into `/work/<folder>` and checks out the
+   configured branch (the remote's default without one);
+3. one `setup-<n>` per setup command runs it with `/work` as working directory, inside the
+   workstation image (so toolchains match). A non-zero exit fails the run;
+4. the `files` sidecar starts, then the workstation container (§5.2).
 
-Nothing is shared between concurrent runs except the read-only mirrors. Any number of agents can work on the same project at once.
+The workspace PVC holds `/work`, the run user's home `/home/runner`, `/tmp` and the runtime
+state. Home and `/tmp` are on disk, like an engineer's home directory, because package
+manager caches and build output land there: one `yarn install` of a large Node project leaves
+800 MiB in its cache, and Yarn Berry stages as much again in `/tmp`. Setup and the agent share
+them, so a cache filled by setup is warm for the agent.
+
+Each init container is a step in the Run's status, which Verify shows the same way. A pod
+that cannot be scheduled waits, and the panel says "waiting for cluster capacity"; the run
+stays `preparing`.
+
+Nothing is shared between concurrent runs. Any number of agents can work on the same project
+at once.
 
 ### 5.2 Running
 
-The worker starts a container from the project's image with the agent's runtime bundle mounted into it (`docs/runtime-bundles.md`). The project image is any glibc-based Linux image with `bash` and `git` on `PATH` (Claude Code's shell tool uses bash), for example `python:3.14` or `maven:3-eclipse-temurin-21`; musl images such as Alpine are not supported. A project without an image gets `exradius-project-default` (Ubuntu LTS with git, curl, ca-certificates and build-essential), which is a default, not a base. Nothing has to inherit from an Exradius image. The container gets:
+The workstation container runs the project's image with the agent's runtime bundle mounted
+into it (`docs/runtime-bundles.md`). The project image is any glibc-based Linux image with
+`bash` and `git` on `PATH` (Claude Code's shell tool uses bash), for example `python:3.14` or
+`maven:3-eclipse-temurin-21`; musl images such as Alpine are not supported. A project without
+an image gets `exradius-project-default` (Ubuntu LTS with git, curl, ca-certificates and
+build-essential), which is a default, not a base. Nothing has to inherit from an Exradius
+image. The container gets:
 
-- `project/` mounted at `/work`, the working directory;
-- `state/` mounted at the runtime's state location;
-- environment: the project's variables, the project's secrets (decrypted at this moment only), the variables of the agent's model provider (or the default provider; see `docs/providers.md`), `EXRADIUS_RUN_TOKEN` and `EXRADIUS_API_URL`;
-- the runtime bundle volume mounted read-only at `/opt/exradius/runtime`, with `/opt/exradius/runtime/bin/exradius-runner` as entrypoint, receiving the run id.
+- the workspace's `work` at `/work`, the working directory, with the attachments read-only;
+- the workspace's `home`, `tmp` and `state` at `/home/runner`, `/tmp` and `/exradius/state`;
+- environment: the project's variables, the project's secrets (from the per-run Secret), the
+  variables of the agent's model provider (or the default provider; see `docs/providers.md`),
+  the agent's git identity, `EXRADIUS_RUN_TOKEN` and `EXRADIUS_API_URL`;
+- the runtime bundle mounted read-only at `/opt/exradius/runtime`, running
+  `/opt/exradius/runtime/bin/exradius-runner <run id>`.
+
+The run moves to `running` when the workstation container starts.
 
 The runner fetches the run spec from the internal API (prompt, connections, task instructions, context, attachment list), assembles the Claude Agent SDK options and starts the session. The prompt is split as §13 describes: the system prompt is Claude Code's preset, then the fixed operating rules, then the agent's prompt; the first user message is only the ticket:
 
@@ -248,15 +284,29 @@ Any other destination for results (posting to a chat tool, writing to a wiki) is
 
 ### 5.4 Waiting and resuming
 
-On `waiting_for_input` the container exits and the run directory stays on disk, uncommitted work included. When an answer arrives, the worker starts a new container with the same mounts and the runner resumes the runtime session (for Claude Code: the SDK `resume` option with the stored session id) with the answer as the next user message. The run returns to `running`.
+When the agent asks a question, the runner interrupts the session, reports `waiting` and
+**stays alive**: the pod, its workspace and uncommitted work all stay as they are. When an
+answer arrives, the worker moves the run to `resuming`; the runner, long-polling the internal
+API, gets the answer, waits for the `files` sidecar to write any answer attachments, reports
+`resumed` and resumes the runtime session in the same process (for Claude Code: the SDK
+`resume` option with the stored session id) with the answer as the next user message. The run
+returns to `running`.
 
-A run can cycle through `waiting_for_input` any number of times.
+A run can cycle through `waiting_for_input` any number of times. The pod's resources stay
+reserved while it waits. A pod lost while the run waits is recreated on the same workspace
+when the answer arrives, and its runner starts in resume mode (`docs/kubernetes.md` §8.3).
 
 ### 5.5 Ending
 
-The run ends when the session finishes (`completed`), the runner reports an error (`failed`), or the admin cancels (`cancelled`; the worker stops the container). The worker uploads the transcript, publishes `task.result`, and deletes the run directory. Mirrors are kept.
+The run ends when the session finishes (`completed`), the runner reports an error or the pod
+ends without an outcome (`failed`), or the admin cancels (`cancelled`: the operator deletes
+the pod with its 30-second grace period). After the session the runner runs the delivery check
+and reports its warnings with the outcome. The worker uploads the transcript, publishes
+`task.result`, revokes the token and deletes the Run, which removes the pod, the workspace and
+the Secret.
 
-A cancelled run that was `waiting_for_input` also frees its directory. There is no automatic expiry of waiting runs in version one; the admin panel lists them.
+A cancelled run that was `waiting_for_input` also frees its pod and workspace. There is no
+automatic expiry of waiting runs; the admin panel lists them.
 
 ## 6. Data model
 
@@ -274,23 +324,23 @@ agent_connections agent_id, connection_id
 project_agents    project_id, agent_id, connection_overrides (json), secret_overrides (json)
 tasks             id (user task_id), project_id, agent_id, instructions, context (json), correlation (json), state, received_at
 attachments       id, task_id, name, content_type, object_key
-runs              id, task_id, state, container_id, runtime_session_id, directory, started_at, ended_at, error
+runs              id, task_id, state, runtime_session_id, run_object, started_at, ended_at, error
 info_requests     id, run_id, question, context, created_at, answered_at, answer, answer_attachments (json)
 events            id, task_id, run_id, type, payload (json), published_at
 transcript_chunks id, run_id, seq, payload (json)
 artifacts         id, run_id, name, content_type, object_key
 admin_user        id, username, password_hash
-workers           id, hostname, started_at, last_seen_at, concurrency, docker_ok, docker_detail,
-                  images (json), runtimes (json), version
+workers           id, hostname, started_at, last_seen_at, concurrency, runtimes (json),
+                  operator (json), version
 project_verifications  id, project_id, state, created_at, started_at, ended_at, error,
-                  steps (json), worker_id, commit, diagnosis
+                  steps (json), worker_id, commit, diagnosis, token_hash, tool_reports (json)
 provider_tests    id, provider_id, state, created_at, started_at, ended_at, detail, error,
-                  fingerprint, worker_id
+                  fingerprint, worker_id, token_hash, report (json)
 ```
 
 The project-side tables above were replaced on 2026-11-07 by config repositories (`docs/config-repo.md` §8); §12 "Config repositories" has the current model.
 
-Secrets and provider credentials are encrypted with a key from the Exradius environment. They are decrypted only at container start and never returned by the admin API.
+Secrets and provider credentials are encrypted with a key from the Exradius environment. They are decrypted only when a Run is created (into its per-run Secret) or for the run spec, and never returned by the admin API.
 
 ## 7. Runtime interface
 
@@ -348,26 +398,33 @@ Version one scope:
 
 ## 10. Repository layout and stack
 
-Single repository, two packages:
+One repository (`docs/kubernetes.md` §18):
 
 ```
 exradius/
-  backend/            Python 3.14, uv, FastAPI, SQLAlchemy + Alembic, aio-pika, docker SDK
+  backend/            Python 3.14, uv, FastAPI, SQLAlchemy + Alembic, aio-pika, httpx
     exradius/
-      api/            admin API + internal run API
-      worker/         broker consumer, run preparation, container control
-      runner/         run container entrypoint (inside the runtime bundle), exradius MCP server
+      api/            admin API (8000) + internal API (8001)
+      worker/         broker consumer, Run objects and settling, Verify, provider probes
+      runner/         the run pod's process (inside the runtime bundle): prepare, clone,
+                      files sidecar, session, exradius MCP server, delivery check
       runtimes/       Runtime protocol, ClaudeCodeRuntime
       models/, schemas/, messaging/
     tests/
-  frontend/           React + TypeScript + Vite
+  operator/           Go module (controller-runtime): api/v1alpha1 (Run), internal/podspec,
+                      internal/status, internal/controller, cmd/
+  charts/exradius/    the Helm chart; the CRD in files/crds/ is generated from operator/
+  frontend/           React + TypeScript + Vite, served by nginx
   deploy/
-    docker-compose.yml               api, worker, frontend, postgres, rabbitmq; builds the images below
     backend.Dockerfile               exradius-backend: api and worker (no Node, no Agent SDK)
+    operator.Dockerfile              exradius-operator
     runtime-claude-code.Dockerfile   exradius-runtime-claude-code: the Claude Code runtime bundle
     runtime-claude-code/             the bundle's launcher script
     project-default.Dockerfile       exradius-project-default: image for projects without one
+    kind/                            the local cluster: make dev-up, dev-down, images, e2e
     Makefile                         make bundle-claude-code: the bundle directory alone
+  Tiltfile            the developer loop on kind
+  go.work
   docs/
 ```
 
@@ -380,19 +437,28 @@ Recorded so they are not re-debated:
 - persistent per-project cache directories to speed up setup commands;
 - per-project API keys;
 - roles and multiple admin users;
-- external broker support beyond a connection string;
-- multi-host workers.
+- external broker support beyond a connection string.
+
+Multi-host workers came with Kubernetes: runs are pods the scheduler places on any node, and
+any worker replica can settle any run (`docs/kubernetes.md`).
 
 ## 12. Implementation notes
 
 Details the design left open, and the simplest choice made for each in version one.
 
+Since 0.2.0 Exradius runs on Kubernetes (`docs/kubernetes.md`), in phases
+(`docs/kubernetes-plan.md`). Phase 1 runs image-based projects without services: a config
+with a `dockerfile` (workstation or service) or with `services` is valid but not runnable
+yet, its health reason says so ("workstation.dockerfile needs image builds, not available
+yet"), and `workstation.cache` is accepted and ignored with a warning. The notes below on
+image builds, services, memory and caches describe v0.1.0 until phases 2 and 3 rewrite them.
+
 **Layout and images**
 
 - The package lives at `backend/exradius/` as in §10. Shared modules sit next to the listed folders: `config.py` (`EXRADIUS_*` settings), `crypto.py`, `states.py` (the §5 state machine), `resolve.py` (secrets and connections), `storage.py`, `db.py` and `cli.py`.
-- Three images (`docs/runtime-bundles.md`). `exradius-backend` runs the api and worker; it has git and the Docker SDK, but no Node and no Agent SDK (the `runner` dependency group is not installed). `exradius-runtime-claude-code` holds only the Claude Code bundle. `exradius-project-default` is the run container image of projects that name none. Compose builds the last two through build-only services (`scale: 0`). `EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE` and `EXRADIUS_PROJECT_DEFAULT_IMAGE` override their tags.
+- Five images. `exradius-backend` runs the api and worker; it has git, but no Docker SDK, no Node and no Agent SDK (the `runner` dependency group is not installed), and runs as uid 1000. `exradius-operator` is the Go operator (distroless, uid 65532). `exradius-frontend` is nginx with the panel. `exradius-runtime-claude-code` holds only the Claude Code bundle (`docs/runtime-bundles.md`). `exradius-project-default` is the workstation image of projects that name none. Tilt builds them all locally; `make -C deploy/kind images` builds and pushes them with the version tag. The chart passes the bundle and default images to the worker as `EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE` and `EXRADIUS_PROJECT_DEFAULT_IMAGE`.
 - A stdio connection in a run needs its command in the workstation image; the default image has neither `npx` nor `uvx`, which the config check reports as a warning.
-- The object store is the filesystem by default (`EXRADIUS_OBJECT_STORE=filesystem`): objects live at `<EXRADIUS_DATA_DIR>/objects/<bucket>/<key>`, written atomically (temporary file, then rename). Keys are validated before use: no empty, `.` or `..` segments, no leading `/`, backslash or NUL, and the resolved path must stay inside the bucket directory, so a key or a symlink cannot escape it. The API server and the worker both mount the data directory. `EXRADIUS_OBJECT_STORE=s3` selects any S3 API through the `EXRADIUS_S3_*` variables instead. Compose ships no object store service, because MinIO no longer publishes community server images.
+- The object store is any S3 API through the `EXRADIUS_S3_*` variables: SeaweedFS in a local install (from the chart; MinIO's community edition is no longer maintained), S3 in AWS. Keys are validated before use: no empty, `.` or `..` segments, no leading `/`, backslash or NUL. The filesystem and in-memory stores are for tests only. There is no data directory any more: config-repository mirrors live in an `emptyDir` cache of the api and worker pods (`EXRADIUS_CACHE_DIR`) and are fetched again after a restart.
 - Download URLs in `task.result` are signed with an HMAC-SHA256 of the URL path, keyed by a value derived from `EXRADIUS_SECRET_KEY`. `GET /api/artifacts/{id}/content` and `GET /api/runs/{run_id}/transcript` accept a valid `sig` or the admin session. A signature is bound to its path and does not expire in version one. The transcript endpoint serves the stored JSON lines file once the run has ended, and assembles it from the stored chunks while the run is still going. Behind a reverse proxy that adds a path prefix, include the prefix in `EXRADIUS_PUBLIC_API_URL`; the signature covers only the API path.
 
 **Data model additions** (beyond §6)
@@ -402,7 +468,9 @@ Details the design left open, and the simplest choice made for each in version o
   - `reported_status`: the outcome the runner reported.
   - `summary` and `output`: the result fields.
   - `resume_request_ids`: the answers delivered by the current resume.
-  - `worker_id`: the worker driving the run through preparing, running or resuming (crash recovery).
+  - `run_object`: the name of the run's `Run` (`run-<run id>`) once the worker has created it, so recovery can tell a Run that disappeared from one never created. It replaced `container_id`, `directory` and `worker_id` (migration `0006`).
+  - `delivery_warnings`: what the runner's delivery check found, for `task.result`.
+  - `waiting_for`: `capacity` while the run's pod cannot be scheduled (the run stays `preparing`).
 - `info_requests`:
   - `published_at` and `delivered_at`.
   - `late_answers`: answers after the first, which are stored but not delivered.
@@ -416,42 +484,39 @@ Details the design left open, and the simplest choice made for each in version o
 **Intake and the broker**
 
 - A rejected task is not inserted into `tasks`. Its `task.status` event (`state: rejected`, `run_id: null`, with a `reason`) is stored in `events` and published. A duplicate `task_id` does not touch the existing task.
-- Worker concurrency is `EXRADIUS_WORKER_CONCURRENCY`. It is both the prefetch count of the task consumer and the number of run slots. A task message is persisted and acknowledged only when a slot is free, so the broker holds the backlog. Answers and control messages use a separate channel.
+- Worker concurrency is `EXRADIUS_WORKER_CONCURRENCY` (values `worker.concurrency`). It is both the prefetch count of the task consumer and the number of run slots: a slot is held while a run of this worker prepares, runs or resumes, and given back while it waits for input. A task message is persisted and acknowledged only when a slot is free, so the broker holds the backlog. Answers and control messages use a separate channel.
 - Base64 attachments are uploaded to the object store at intake, before the ack. URL attachments are downloaded while the run is preparing.
 - The worker is the only publisher of outbound events. Each event is first stored in `events`, then published with AMQP `message_id` = `events.id`. If publishing fails, the row keeps `published_at = NULL` and the run continues. Version one does not republish.
 - Event timestamps are UTC with second precision (`2026-11-05T19:12:03Z`).
 - `result.output` is the JSON value passed to `submit_result`, or `null`. It is not wrapped in an object. `summary` is the final assistant message (the SDK `ResultMessage.result`).
-- Admin cancel travels from the API to the workers over an internal durable queue, `exradius.control`. That queue is not part of the public contract in §4. Any worker can handle it.
+- Admin cancel travels from the API to the workers over an internal durable queue, `exradius.control`. That queue is not part of the public contract in §4. Any worker can handle it. The same queue carries `{"action": "run_reported", "run_id"}` when the runner reports through `/reported` (below), and Verify and provider-test requests.
 
-**Run lifecycle**
+**Run lifecycle** (`worker/runs.py`, `docs/kubernetes.md` §4, §8)
 
 - Every transition locks the run row (`SELECT … FOR UPDATE OF runs`), updates both run and task, and records the status event in the same transaction.
-- Finalisation happens exactly once, guarded by `runs.ended_at IS NULL`. It stores the transcript under the key `runs/<run_id>/transcript.jsonl`, publishes `task.result`, revokes the token and deletes the run directory. Cancel, failure and completion all go through it, so a cancel racing with a container exit produces one result.
-- The runner never changes state. It reports its outcome to the internal API. The worker makes the transition after the runner container exits, and then publishes any pending `task.info_request` events. These are published within seconds of the call, because the runner interrupts the session right away.
-- A run waits on its first outstanding question. All questions answered by the time it resumes are delivered together in one message. An answer that arrives before the suspended container has exited is picked up as soon as the container exits.
-- Crash recovery runs when a worker starts, before it consumes any message. Each worker process gets a fresh id, which it stamps on the runs it drives through `preparing`, `running` and `resuming`. On Postgres it holds a session-level advisory lock on that id for as long as it lives, so other workers can tell whether it is still alive. Recovery has three steps:
-  1. *Reconciliation.* Every run in `preparing`, `running` or `resuming` whose worker is no longer alive is claimed under the run row lock. Claiming stamps the new worker's id, so two restarting workers never recover the same run, and runs of live workers are left alone. If a runner container labelled with the run's id still exists, the worker re-attaches: it records the container (moving a `preparing` or `resuming` run to `running` if the old worker died before recording it) and settles the container's exit through the normal path. If the container is gone but the runner had already reported an outcome, that outcome is applied. Otherwise any leftover setup containers are removed and the run is failed with "worker restarted while the run was <state>", then finalised as usual (directory removed, `task.result` published). Settling checks that the run is still `running` with the same container, so two workers waiting on one container act on its exit once.
-  2. *Orphan sweep.* Every directory under `<data_dir>/runs/` that does not belong to a run in `preparing`, `running`, `waiting_for_input` or `resuming` is removed and logged. The directories are listed before the database is queried, so a run that starts meanwhile is never swept.
-  3. *Resumable runs.* Waiting runs whose answer arrived while no worker could act on it are resumed.
+- `RunManager.settle(run_id)` is the one place that turns what happened into transitions. It reads the Run (or takes it from a watch event) and the run row under its lock: Run status `Running` moves `preparing` to `running`; a final status (`Succeeded`, `Failed`) ends the run, as `completed` when the runner reported that, else `failed` with the failed step's log tail, the operator's message or "runner exited with code N without reporting an outcome"; `resuming` with a report moves to `running`; `reported_status = waiting_for_input` moves `running` to `waiting_for_input` and publishes the pending `task.info_request` events. It is idempotent, and called for every event of the worker's watch on Runs, for every `run_reported` control message, and by a sweep of every unfinished run every 15 s, so a lost event or message only delays.
+- Finalisation happens exactly once, guarded by `runs.ended_at IS NULL`. It stores the transcript under the key `runs/<run_id>/transcript.jsonl`, publishes `task.result` (with the delivery warnings), revokes the token and deletes the Run; garbage collection removes the pod, the workspace PVC and the Secret. Cancel, failure and completion all go through it, so a cancel racing with a pod's end produces one result.
+- The runner never changes state. It reports to the internal API: `/reported` (`waiting`, `resumed`) while it stays alive, `/outcome` once at the end. These are seconds apart from the call, because the runner interrupts the session right away.
+- A run waits on its first outstanding question. All questions answered by the time it resumes are delivered together in one message. An answer that arrives before the run reached `waiting_for_input` is picked up as soon as it does.
+- Cancel: the worker moves the run to `cancelled` and sets `spec.cancel: true`; the operator deletes the pod (30 s grace); the runner, on SIGTERM, stops the session, runs the delivery check and reports; the worker finalises once the Run says the pod is gone, or after 90 s if no operator answers. The run token stays valid until finalisation, so the cancelled runner can still report.
+- A pod lost while the run waits (deleted by hand, node gone) is recreated when the answer arrives: the worker bumps `spec.podGeneration` under the run-row lock, and the operator creates a new pod on the same workspace whose runner starts in resume mode. A pod lost while the run is running fails it ("the run's pod was lost: …").
+- Crash recovery runs when a worker starts, before it consumes any message. Run objects survive the worker, so any worker can settle any run (§4 of `docs/kubernetes.md`):
+  1. The worker lists the Runs and settles every unfinished run (`ended_at IS NULL`, not `queued`) from its Run. An unfinished run without one fails with "the run's Kubernetes object disappeared". A run in `preparing` whose Run was never created fails with "the worker restarted while preparing the run" when no other worker sent a heartbeat in the last minute, or once it has been preparing for 30 minutes. Runs in `preparing`, `running` and `resuming` take a slot of the new worker.
+  2. A Run whose run has ended is deleted, as are verify and probe Runs whose verification or test is no longer open.
+  3. Waiting runs whose answer arrived while no worker could act on it are resumed.
 
-  Waiting runs are otherwise left alone. They keep their directory, and §5.5's rule of no automatic expiry still holds. Without Postgres (SQLite in tests), a worker assumes it is the only one.
-- Setup commands (`workstation.setup`) run one container each, from the workstation image, with `/work` mounted and the workstation environment (the config's `env` and the exported secrets, see "Config repositories"). A non-zero exit fails the run, and the tail of the command's output becomes the error. Setup commands do not run again on resume.
+  Waiting runs are otherwise left alone, and §5.5's rule of no automatic expiry still holds. Verifications and provider tests held by a worker that died are failed at start; their ownership still uses the advisory-lock presence (`worker/presence.py`). Without Postgres (SQLite in tests), a worker assumes it is the only one.
+- Setup commands (`workstation.setup`) run as init containers `setup-<n>` of the run's pod, from the workstation image, with `/work` and the workstation environment (the config's `env` and the exported secrets, see "Config repositories"). A non-zero exit fails the pod, and the step's log tail becomes the run's error. They do not run again when the session resumes in the same pod; they do run when a lost pod is recreated.
 
-**Run containers and directories**
+**Run pods and workspaces** (`docs/kubernetes.md` §5, §7)
 
-- `state/` is mounted at `/exradius/state`. `ClaudeCodeRuntime` sets `CLAUDE_CONFIG_DIR=/exradius/state/claude`, so session files survive suspend/resume. The working directory is always `/work`, which keeps session paths stable across containers.
-- Containers run as `1000:1000` with these settings:
-  - a read-only root filesystem;
-  - `cap_drop: ALL` and `no-new-privileges`;
-  - `HOME=/home/runner` and `/tmp`, bind-mounted from the run's `home/` and `tmp/` directories (exec allowed, like the tmpfs mounts they replaced), so what a run writes takes disk, not memory. Setup, run and resume containers and Verify's setup containers all mount the same ones. Only containers without a run directory (the provider probe) and the delivery check (which mounts `/work` read-only and needs neither) get tmpfs for both. A run directory from before they were on disk gets empty ones when its container starts;
-  - membership of the network named by `EXRADIUS_RUN_NETWORK` (`exradius-runs`), so they reach the API at `EXRADIUS_RUN_API_URL` (`http://exradius-api:8000`). Only the API is on that network; see "Networks" in §12.
-
-  The worker runs as root and chowns `project/`, `state/`, `home/` and `tmp/` to the run user.
-- Removing a run directory copes with whatever the run left: read-only files and directories (sealed attachments, Go's module cache, `chmod -w` build output), unreadable directories, deep `node_modules` trees, sockets and FIFOs. A plain `rmtree` runs first; if it fails, the worker gives the owner `rwx` on every directory (walking by directory descriptor, never following symlinks) and removes the rest.
-- Attachments are written root-owned with mode `0444`. Their directory is also bind-mounted read-only over `/work/.exradius/attachments`. Answer attachments go to `.exradius/attachments/<request_id>/`.
-- The worker sees its data directory at `EXRADIUS_DATA_DIR`. Bind mounts are created by the host's Docker daemon, so `EXRADIUS_HOST_DATA_DIR` gives the same directory as the host sees it. The compose file mounts both at the same host path.
-- Mirrors are created with `git clone --mirror`, refreshed with `git fetch --prune` and serialised with a file lock per mirror. Clones use `git clone --local --branch <branch>`, after which `origin` is reset to the real remote URL. A repository's `credential` is used for the mirror fetch as an HTTP Basic `extraHeader` (a bare token becomes `x-access-token:<token>`), and for pushing only through the credential helper of `push: true` (Agent identity below). It is never written into the clone. A mirror's `HEAD` follows the remote's default branch at every fetch, so a repository without `branch` clones that one.
-- The run token is a fresh random token for each container start, stored hashed and cleared when that container exits. The runner removes it from its own environment before starting the SDK, so the agent's tools do not inherit it.
+- The worker builds the Run spec in `worker/run_objects.py`: it is secret-free, and every value that holds a secret is a key of the per-run Secret (`token`, `env.<NAME>`, `provider.<NAME>`, `repo.<n>`, `push.<n>`). The Secret is created right after the Run with an ownerReference to it, so it goes with the Run.
+- The operator writes the pod's security itself: the run uid and gid (`runs.user`, default `1000:1000`), `runAsNonRoot`, a read-only root filesystem, no privilege escalation, all capabilities dropped, seccomp `RuntimeDefault`, no ServiceAccount token, no service links, `fsGroup` with `OnRootMismatch`, and a 30-second grace period. The Run spec cannot change any of it.
+- The workspace is one PVC per Run (`runs.workspace.size`, default 50 Gi): `work` at `/work` (attachments read-only at `/work/.exradius/attachments`), `home` at `/home/runner`, `tmp` at `/tmp` (1777) and `state` at `/exradius/state`. `ClaudeCodeRuntime` sets `CLAUDE_CONFIG_DIR=/exradius/state/claude`, so session files survive a recreated pod. The working directory is always `/work`. Removing a workspace is deleting the PVC; there is no Exradius code for read-only trees, sockets or deep `node_modules` any more.
+- `prepare` (the runner, as the run user) creates the layout on the first start of a pod and writes the task's attachments, fetched from `GET /internal/runs/{id}/attachments/{id}`, with mode `0444`. URL attachments are downloaded into the object store by the worker before it creates the Run. Answer attachments are written by the `files` sidecar (run uid + 1, the run's group) into `.exradius/attachments/<request_id>/` with mode `0444` as they are delivered; the runner resumes once they are there. Steps leave markers in `state/steps/`, so a recreated pod skips `prepare` and the clones.
+- `clone-<n>` clones straight from the remote with `git clone --branch <branch>` (the remote's default branch without one), then resets `origin` to the plain URL. A repository's `credential` comes from the per-run Secret and is used for that command only as an HTTP Basic `extraHeader` (a bare token becomes `x-access-token:<token>`); for pushing only through the credential helper of `push: true` (Agent identity below). It is never written into the clone. Mirrors on a project volume come in phase 3.
+- The run token is generated when the worker creates the Run, kept hashed on the run (`runs.token_hash`), carried by the per-run Secret, and revoked at finalisation. The runner removes it from its own environment before starting the SDK, so the agent's tools do not inherit it.
+- The api's internal port (8001, Service `exradius-api-internal`) serves only `/internal/*`; port 8000 refuses those paths. New routes for run pods: `POST /internal/runs/{id}/reported`, `GET /internal/runs/{id}/answers?wait=` (long-poll, up to 60 s), `GET /internal/runs/{id}/attachments` and `/attachments/{id}` (a task attachment's id, or `<request id>.<n>` for an answer attachment); `/outcome` gains `warnings` and the status `cancelled`. Verify Runs use `/internal/verifications/{id}/spec` and `/tools`, probe Runs `/internal/probes/{id}/result`, each with its own token (`project_verifications.token_hash`, `provider_tests.token_hash`).
 
 **Prompt and runtime**
 
@@ -465,11 +530,11 @@ Details the design left open, and the simplest choice made for each in version o
 
   It interrupts the session once `request_information` has been called, and resumes with the SDK `resume` option.
 - The built-in `exradius` server is registered with `alwaysLoad: true`, so its tools are always in the prompt and never deferred behind Claude Code's tool search.
-- Each SDK message is stored as one transcript chunk, a JSON object with a `type` field. Sequence numbers continue across containers of the same run.
+- Each SDK message is stored as one transcript chunk, a JSON object with a `type` field. Sequence numbers continue across the sessions of a run and across a recreated pod (an offset file in the state directory).
 
 **Configuration resolution**
 
-- Every `${secret:NAME}` resolves from the secret store the config names (`secret_store`); there are no project or global secrets, overrides or fallbacks. `exradius/resolve.py` substitutes at container start (worker) and for the run spec (API); a missing key raises `MissingSecret` ("missing secret NAME in store S").
+- Every `${secret:NAME}` resolves from the secret store the config names (`secret_store`); there are no project or global secrets, overrides or fallbacks. `exradius/resolve.py` substitutes at Run creation (worker) and for the run spec (API); a missing key raises `MissingSecret` ("missing secret NAME in store S").
 - The connection name `exradius` is reserved for the built-in server.
 - The model credential comes only from a provider (`docs/providers.md`).
 
@@ -482,19 +547,18 @@ Details the design left open, and the simplest choice made for each in version o
 
 **Onboarding additions** (`docs/onboarding.md` §4)
 
-- **Heartbeats.** Every 15 s each worker upserts its row in `workers`: hostname, concurrency, version, whether its Docker daemon answers, its runtime bundles (`runtimes: [{name, version, ready, image, error}]`, see Runtime bundles below), and the tags of every image on its daemon except Exradius' own backend and bundle images (label `exradius.role`). A worker deletes its row when it shuts down cleanly. `GET /api/system/status` and `GET /api/system/images` list only workers seen in the last 60 s. The table is only for reporting: crash recovery still uses the advisory-lock presence.
+- **Heartbeats.** Every 15 s each worker upserts its row in `workers`: hostname, concurrency, version, the runtime bundles it is configured with (`runtimes: [{name, version, ready, image, error}]`; pulling them is the nodes' business) and the operator as its leader Lease shows it (`operator: {alive, holder, renewed_at, detail}`, alive when the Lease `exradius-operator` was renewed within its duration plus 10 s). A worker deletes its row when it shuts down cleanly. `GET /api/system/status` lists only workers seen in the last 60 s. The table is for reporting, and for one recovery question: whether another worker is alive. `GET /api/system/images` is gone: there is no daemon whose images could be listed.
 - **System status.**
   - The database check is `SELECT 1`.
   - The broker check is the API's own connection, which is shared with publishing.
   - `provider` reports the default provider and the number of providers (see Providers below). The object store and the Anthropic key are no longer reported.
-  - `data_dir` is the API's `EXRADIUS_DATA_DIR`, for the Settings page.
-- **Integration info.** Username, vhost and whether a password is set come from `EXRADIUS_BROKER_URL`; the password is never returned. Host and port come from `EXRADIUS_PUBLIC_BROKER_HOST` and `EXRADIUS_PUBLIC_BROKER_PORT`, which compose sets to `localhost` and the AMQP port, because the API's own broker URL names the compose-internal host `rabbitmq`.
+  - `operator` is the most recently seen live worker's view of the operator; `null` while no worker reported one.
+- **Integration info.** Username, vhost and whether a password is set come from `EXRADIUS_BROKER_URL`; the password is never returned. User name and password may instead come from `EXRADIUS_BROKER_USERNAME` and `EXRADIUS_BROKER_PASSWORD`, which replace the URL's user info (the chart takes them from the RabbitMQ operator's generated Secret). Host and port come from `EXRADIUS_PUBLIC_BROKER_HOST` and `EXRADIUS_PUBLIC_BROKER_PORT` (values `broker.publicHost`, `broker.publicPort`), because the API's own broker URL names the in-cluster Service.
 - **Verification.**
   - `POST /api/projects/{id}/verify` stores a `pending` row and publishes `{"action": "verify"}` on `exradius.control`. If the broker cannot be reached, it answers 503 and marks the row failed.
   - The worker that takes the message claims the row (`worker_id`) before acknowledging it. The job then occupies one of the worker's run slots.
-  - The first step is "Read config" (commit, file and branch, errors, warnings, missing keys); it fails when the project is not runnable, and nothing else runs. Once it passes, the worker records the rest of the plan as `pending` steps: "Build workstation" and "Build service <name>" for each Dockerfile in the config, create the directory, for each repository fetch the mirror and clone, prepare the attachments folder, start each service, run each setup command, then the cleanups ("Stop services", "Remove directory"). Steps therefore appear after the verification started. Each step goes to `running` and then `passed` or `failed`, with ISO timestamps and a log tail of up to 4000 characters (a build's log ends with `built <tag> in <s>s`, or reads `<tag> is up to date (context unchanged)`). After a failure the remaining steps are `skipped`, but the cleanups always run.
-  - The work happens in `runs/verify-<id>`, with setup containers labelled with that name. The orphan sweep keeps such a directory while its verification is `pending` or `running`.
-  - At startup, verifications claimed by a worker that is no longer alive are failed and their directory and containers removed.
+  - The first step is "Read config" (commit, file and branch, errors, warnings, missing keys, and what this version cannot run yet); it fails when the project is not runnable, and nothing else runs. Once it passes, the worker creates a verify Run (`verify-<id>`, `docs/kubernetes.md` §13), the same pod as a task's, and records its steps as `pending`: "Prepare workspace", "Clone <repo> (<branch>)" for each repository, "Setup: <command>" for each setup command, and "List tools <name>" for each connection an agent uses. Steps therefore appear after the verification started. The worker polls the Run every second and mirrors its step states and log tails (up to 4000 characters) into the verification; a pod waiting for room shows "waiting for cluster capacity: <scheduler message>" on the first step. The verify pod's runner (`exradius-runner --verify`) lists each connection's tools after setup and reports them through `/internal/verifications/{id}/tools`. After a failure the remaining steps are `skipped`. At the end the Run is deleted, which removes everything the verification made: there are no cleanup steps.
+  - At startup, verifications claimed by a worker that is no longer alive are failed and their Runs deleted.
   - Setup commands see the workstation environment, exactly as in a run.
 - **Sending from the panel.**
   - `POST /api/tasks` validates the body with the task schema, where `version` may be omitted, and publishes it on `exradius.tasks`.
@@ -513,8 +577,8 @@ Details the design left open, and the simplest choice made for each in version o
 - **Model.** `providers` holds named credential profiles. `credential_encrypted` is Fernet-encrypted like secrets and never returned. A partial unique index on `is_default` allows at most one default. The API makes the first provider the default and moves the flag with `POST /api/providers/{id}/default`, which clears the old default before setting the new one. An agent names a provider by its `slug` in the config (`agents.<name>.provider`; absent uses the default). The design asked for a unique slug-like `name`; providers already had a unique `slug`, so that is what configs name, and `name` stays the display name.
 - **Rules.** `kind`, `auth_method` and `settings` are validated against the auth methods the runtimes declare: unknown setting names and missing required ones are refused. Changing the kind or auth method needs a new credential, and agents whose runtime cannot use the new pair block the change. `last_test` is cleared when the credential, settings, kind or auth method change, but not on a rename. Delete answers 409 while agents name the provider ("used by agents bank/developer; …"), or while it is the default and others exist. The last provider can be deleted. `agent_count` counts the agents that name the provider, plus, for the default, the agents without a provider of their own. Agents are counted from each project's latest read config (`projects.snapshot`), so usage follows a re-read.
 - **Capabilities.** Each runtime class declares `capabilities` (provider kinds, auth methods, their settings fields and notice), and `GET /api/system/runtimes` returns them. `ClaudeCodeRuntime` accepts `anthropic` with `api_key` and `oauth_token`.
-- **Injection.** At every container start (first start and each resume), the worker resolves the agent's provider or the default, decrypts its credential and adds the runtime's mapping: `ANTHROPIC_API_KEY` for `api_key`, `CLAUDE_CODE_OAUTH_TOKEN` for `oauth_token`. Project variables and secrets named like any provider variable of the runtime (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) are dropped with a warning, so the run gets only its provider's credential. Setup command containers get no provider. Intake rejects a task with `no provider configured` when the agent names none and there is no default, and with `unknown provider 'x'` when it names a slug no provider has. A run whose provider has disappeared by container start fails with the same message.
-- **Tests.** `POST /api/providers/{id}/test` for `api_key` calls `GET https://api.anthropic.com/v1/models` from the API container (20-second timeout) and answers 200 `{ok, detail, error}`, with up to five model ids in `detail`. For `oauth_token` it stores a `pending` row in `provider_tests`, publishes `{"action": "test_provider", "test_id"}` on `exradius.control` and answers 202 `{test_id}` (503, with the row failed, if the broker is down). The worker claims the row before acknowledging and, in a run slot, starts a container from the default project image with the runtime bundle mounted, only the provider's variables and no run mounts, running `exradius-runner --probe claude_code`. That is a one-turn Claude Code session with no tools, sent "Reply with OK", with a 180-second limit. The probe prints one `EXRADIUS_PROBE {ok, detail, error}` line, which the worker records on the test. `GET /api/providers/{id}/tests/{test_id}` reports it. Both kinds of test store `last_test`, but only if the provider's credential and settings are unchanged since the test began (`fingerprint`). Tests held by a worker that died are failed at startup.
+- **Injection.** When it creates the Run, the worker resolves the agent's provider or the default, decrypts its credential into the per-run Secret and names the runtime's mapping in the Run spec (workstation container only): `ANTHROPIC_API_KEY` for `api_key`, `CLAUDE_CODE_OAUTH_TOKEN` for `oauth_token`. Project variables and secrets named like any provider variable of the runtime (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`) are dropped with a warning, so the run gets only its provider's credential. Setup containers get no provider. Intake rejects a task with `no provider configured` when the agent names none and there is no default, and with `unknown provider 'x'` when it names a slug no provider has. A run whose provider has disappeared by the time its Run is created fails with the same message.
+- **Tests.** `POST /api/providers/{id}/test` for `api_key` calls `GET https://api.anthropic.com/v1/models` from the API container (20-second timeout) and answers 200 `{ok, detail, error}`, with up to five model ids in `detail`. For `oauth_token` it stores a `pending` row in `provider_tests`, publishes `{"action": "test_provider", "test_id"}` on `exradius.control` and answers 202 `{test_id}` (503, with the row failed, if the broker is down). The worker claims the row before acknowledging and, in a run slot, creates a probe Run (`probe-<id>`, `docs/kubernetes.md` §13): the default project image with the runtime bundle, `emptyDir`s instead of a workspace, only the provider's variables (from the per-run Secret), running `exradius-runner --probe claude_code --report <id>`. That is a one-turn Claude Code session with no tools, sent "Reply with OK", with a 180-second limit. The probe posts `{ok, detail, error}` to `/internal/probes/{id}/result` (and prints it as an `EXRADIUS_PROBE` line); the worker records it on the test, or the workstation's log tail when the pod ends without a report, and deletes the Run. `GET /api/providers/{id}/tests/{test_id}` reports it. Both kinds of test store `last_test`, but only if the provider's credential and settings are unchanged since the test began (`fingerprint`). Tests held by a worker that died are failed at startup.
 - **Migration.** At API start, when no provider exists, `EXRADIUS_ANTHROPIC_API_KEY` becomes the default provider "Anthropic (migrated)" (`api_key`), and a warning is logged. After that it is not read. (The migration from a global secret `ANTHROPIC_API_KEY` went with the secrets table.)
 
 **Runtime bundles** (`docs/runtime-bundles.md`)
@@ -526,16 +590,8 @@ Details the design left open, and the simplest choice made for each in version o
   - `VERSION`: `exradius <version>`, `runtime claude_code`, `claude-code <version>`.
   - `ClaudeCodeRuntime` passes `$EXRADIUS_RUNTIME_DIR/bin/claude` as the SDK's `cli_path`. Outside a bundle (tests, development) it leaves `cli_path` unset.
   - The packaging is python-build-standalone plus a launcher rather than PyInstaller: nothing has to be frozen, and the SDK and `mcp` load exactly as in development. `make -C deploy bundle-claude-code` exports the directory to `deploy/build/runtime-claude-code/`.
-- **Extraction.** The worker inspects the bundle image named by `EXRADIUS_RUNTIME_IMAGE_<RUNTIME>`:
-  - It does this at start, at every container start and at every heartbeat. Once a build is extracted this is one image inspect.
-  - Each bundle build gets a volume `exradius-runtime-<runtime>-<version>-<first 12 hex digits of the image id>`, labelled with the runtime, version and image id. The image id is in the name so that rebuilding the same version never changes a volume that running containers use.
-  - To fill a new volume, the worker creates (but does not start) a container from the bundle image with the volume mounted over `/opt/exradius/runtime`; Docker copies the image's content into an empty volume at that moment.
-  - It then reads `VERSION` through that container. The volume is ready if `VERSION` names the image's version.
-  - After startup, the worker removes bundle volumes of other builds, skipping any that a container still uses (Docker refuses to remove them).
-  - A missing bundle image does not stop the worker: the heartbeat reports the runtime as not ready, with the error, and runs fail with `runtime claude_code is not available: …`.
-- **Run containers.** The bundle volume is mounted read-only at `EXRADIUS_RUNTIME_MOUNT` (`/opt/exradius/runtime`) in run containers and provider probes, but not in setup containers.
-  - Every container gets `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=safe.directory` and `GIT_CONFIG_VALUE_0=*`. This command-line level git config replaces the system setting the old runner image carried. Without it, git in a stock image rejects the checkout on Docker Desktop, where the bind-mounted `/work` does not appear owned by the run user.
-  - Projects that still name an image built `FROM exradius-runner` keep working: it is a glibc image with git.
+- **Mounting.** Run pods mount the bundle image named by `EXRADIUS_RUNTIME_IMAGE_<RUNTIME>` as an image volume at `/opt/exradius/runtime`, read-only, in `prepare`, `clone-*`, `files` and the workstation, not in setup containers (`docs/kubernetes.md` §7.2). A rebuilt bundle is a new image, so a running pod never sees it change. There is no extraction and no volume cleanup any more.
+  - Setup containers get `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=safe.directory` and `GIT_CONFIG_VALUE_0=*`, and the workstation gets it as the first of its command-line git config. Without it, git in a stock image can reject a checkout that it does not see owned by the run user.
 - **Isolation** (runtime-bundles.md §5, `exradius/runner/environment.py`). The runner's first act is `isolate()`:
   - It removes `EXRADIUS_RUNTIME_DIR` (the launcher's) and `EXRADIUS_RUN_TOKEN` from its process, and keeps a copy of everything else as the container's environment.
   - It then removes `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, `VIRTUAL_ENV`, `NODE_OPTIONS` and `NODE_PATH` from its own process only.
@@ -550,21 +606,21 @@ Details the design left open, and the simplest choice made for each in version o
   - The identity is the config's `agents.<name>.identity`: `name` defaults to the agent's name, `email` to `<agent>@<project slug>.exradius.local`.
   - Both are validated as git idents: no angle brackets, no control characters, and an `x@y` email.
   - `repositories[].push` (default false) needs a `credential`; a file that would push without one is a config error.
-- **At every run container start** (first start and each resume) the worker adds:
+- **In the Run spec's `git.env`** (the workstation only) the worker puts:
   - `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`, `EXRADIUS_AGENT` (slug) and `EXRADIUS_TASK_ID`;
-  - `GIT_CONFIG_GLOBAL=<state>/git/config`. These override project variables of the same names.
-  - Setup containers and the provider probe get none of this: they have no agent or task, and the probe has no state mount.
+  - `GIT_CONFIG_GLOBAL=/exradius/state/git/config`. These override project variables of the same names.
+  - Setup containers and the provider probe get none of this: they have no agent or task.
 - **Global git config in the state mount.**
   - The run's global config lives at `<state>/git/config`, not `$HOME/.gitconfig` (the home also persists, but belongs to the agent and its tools), named by `GIT_CONFIG_GLOBAL` (git 2.32 or later; Ubuntu 22.04 and Debian bookworm images have it). With older git, only the identity variables apply.
-  - The worker creates `config` once with just `[include] path = exradius.gitconfig`, and rewrites `exradius.gitconfig` at every start. So the agent's own `git config --global` changes survive resume, and the managed settings follow the current agent and repositories.
-  - `exradius.gitconfig` sets `user.name`, `user.email`, `core.hooksPath=<state>/git-hooks`, `push.autoSetupRemote=true`, `init.defaultBranch=main` and the credential helpers. All values are quoted.
-- **Commit trailers.** `<state>/git-hooks/prepare-commit-msg` runs `git interpret-trailers --if-exists doNothing` for `Exradius-Task: $EXRADIUS_TASK_ID` and `Exradius-Agent: $EXRADIUS_AGENT`, so amending or rebasing never duplicates them. Because `core.hooksPath` replaces the hooks directory, a repository's own hooks (and any husky-style setup) do not run in v1.
+  - The runner creates `config` once with just `[include] path = exradius.gitconfig`, and rewrites `exradius.gitconfig` at every start (`runner/gitconfig.py`). So the agent's own `git config --global` changes survive resume, and the managed settings follow the current agent and repositories.
+  - `exradius.gitconfig` sets `user.name`, `user.email`, `push.autoSetupRemote=true` and `init.defaultBranch=main`. All values are quoted. `core.hooksPath` and the credential helpers are command-line config (see "Git at the command-line level").
+- **Commit trailers.** The bundle's `git-hooks/prepare-commit-msg` (`/opt/exradius/runtime/git-hooks`, read-only, so the agent cannot edit it) runs `git interpret-trailers --if-exists doNothing` for `Exradius-Task: $EXRADIUS_TASK_ID` and `Exradius-Agent: $EXRADIUS_AGENT`, so amending or rebasing never duplicates them. Because `core.hooksPath` replaces the hooks directory, a repository's own hooks (and any husky-style setup) do not run in v1.
 - **Push.**
   - For each repository (in file order, index N) with `push`, a credential and an `http(s)` URL, the token goes into `EXRADIUS_GIT_CREDENTIAL_<N>`.
   - The username is the part before `:` of a `user:token` secret, otherwise `x-access-token`, as for mirrors. Only the token goes into the variable.
   - `exradius.gitconfig` gets `credential.<scheme://host>.useHttpPath=true`, so two repositories on one host can carry different credentials. Each repository URL gets an empty `helper` (which drops helpers from the image's or system config) followed by `!f() { test "$1" = get || exit 0; echo "username=…"; echo "password=$EXRADIUS_GIT_CREDENTIAL_N"; }; f`.
-  - The secret is only in the environment; neither the state mount nor the clone's `.git/config` contains it.
-  - SSH remotes get no helper. Without `push` there is no helper, and a push fails for lack of credentials. Mirror fetches still use `http.extraHeader` in the worker.
+  - The secret is only in the environment (from the per-run Secret, key `push.<N>`); neither the state directory nor the clone's `.git/config` contains it.
+  - SSH remotes get no helper. Without `push` there is no helper, and a push fails for lack of credentials. Clones use `http.extraHeader` in their own init container.
   - `tests/test_git_identity.py` commits in a prepared run directory with real git, and pushes to a `git http-backend` behind Basic auth: the push succeeds with the helper and fails without it.
 
 **Environment section, services and model** (`docs/environment-and-services.md`)
@@ -572,10 +628,10 @@ Details the design left open, and the simplest choice made for each in version o
 - **Data model.** Model, notes and services now come from the config file (`agents.<name>.model`, `notes`, `services`; see "Config repositories"); only `provider_tests.model` (the model a worker-run provider test uses) is a column. There is no image probe: the design dropped the "Installed" line, so the agent finds its tools itself.
 - **Environment section** (`exradius/environment.py`). `config_environment_text` renders the documented layout from the config: the workstation ("built from the image x", or "built from <dockerfile>" for a built one, the path from the repository root), its repositories in file order ("the default branch" when the file gives no `branch`), the fixed "Not available" line, its services in file order with their settings (a built service shows as `(built from <dockerfile>)`), the fixed closing paragraph and the notes (stripped; left out when empty). Repository URLs lose `user:password@`, the query and the fragment; scp-like `git@host:path` URLs are kept as written. "pushing allowed" means what the worker actually configures: `push`, a credential and an http(s) URL. With no repositories the second line reads "The working directory contains no repositories."
   - Service settings (`service_settings`): each env entry as `KEY=value`, plain values first, then those that use secrets, each group in stored order. A `${secret:NAME}` shows as `$NAME`, because the workstation exports every secret its services' settings use under its own name (`resolve.exported_secrets`); a name that is not a valid variable name (it has `.` or `-`) is not exported and shows as `<a secret you do not have>`. Secret values never appear. When any setting names a variable, the list ends with "A value written as $NAME is the value of your environment variable NAME."
-  - The API builds the section for each run spec (`RunSpecResponse.environment_text`, so it is rebuilt at every container start, resume included) and for the resolved agent view (`ResolvedAgentOut.environment_text`, with `image` and `model`). `build_system_prompt` joins rules, environment and role with blank lines and skips empty parts.
+  - The API builds the section for each run spec (`RunSpecResponse.environment_text`, so it is rebuilt whenever a runner starts, a recreated pod included) and for the resolved agent view (`ResolvedAgentOut.environment_text`, with `image` and `model`). `build_system_prompt` joins rules, environment and role with blank lines and skips empty parts.
 - **Model.** `agents.<name>.model` in the config; absent is the runtime's default. Ids are validated loosely (`^[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]*$`), so any id the provider accepts works. The run spec carries `model`; `ClaudeCodeRuntime` passes it as `ClaudeAgentOptions.model` and to the provider probe. The model catalog is `providers.MODELS` (anthropic: `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, each with a one-line description), returned as `models: [{id, description}]` on each provider kind of `GET /api/system/runtimes` and on `ProviderOut`.
   - `POST /api/providers/{id}/test` takes an optional body `{model}`. For `api_key` it calls `GET /v1/models/{model}` (free; the id or alias must exist for the key) instead of listing models. For `oauth_token` the worker's probe runs `exradius-runner --probe claude_code --model <id>`. A test with a model is stored as `last_test` only when it passes, since a wrong id says nothing against the credential.
-- **Secret references** in `env` and in services' `env` resolve from the store at container start, for run and setup containers alike. A missing key fails the run in `preparing` (in Verify, "Read config" already fails).
+- **Secret references** in `env` and in services' `env` resolve from the store when the Run is created, for setup containers and the workstation alike. A missing key fails the run in `preparing` (in Verify, "Read config" already fails).
 - **Services in a run** (`ContainerManager.create_run_network`, `start_service`, `remove_run_services`).
   - In `preparing`, after cloning and attachments and before setup commands, the worker creates the bridge network `exradius-run-<run_id>` (labels `exradius.run_id`, `exradius.kind=network`). It then starts each service in order on that network, with the alias and hostname `name`, labels `exradius.run_id`, `exradius.kind=service`, `exradius.service=<name>`, `cap_drop ALL` plus `CHOWN SETUID SETGID FOWNER DAC_OVERRIDE NET_BIND_SERVICE`, `no-new-privileges`, no mounts and no published ports. The env is decrypted at that moment. The image's own user, root filesystem and entrypoint are kept, and `containers.run` pulls a missing image.
   - Readiness is polled every second for 120 s, counted from container start, so a pull does not count. `{"command"}` runs `docker exec` in the service until it exits 0. `{"tcp": p}` runs `cat /proc/net/tcp /proc/net/tcp6` in the service and waits for a LISTEN socket on `p`; the worker is not on the run network, so it cannot connect itself, and this needs only `cat` in the image. `null` waits for `Health.Status=healthy` when the image has a HEALTHCHECK, otherwise for one second of "running". A service that exits or times out fails the run with `service <name> (<image>) …`, the last check's output and the container's last 40 log lines.
@@ -602,7 +658,7 @@ Details the design left open, and the simplest choice made for each in version o
   - `workstation` is a reserved service name (not in the design): it would share the tag `exradius/<project>/workstation`.
   - A launcher (`npx`, `uvx`) on the default workstation is a warning, for catalog entries (`requires`) and custom stdio connections alike.
   - Flow mappings cannot hold an unquoted reference: `{token: ${secret:X}}` is not YAML, because `{` opens a flow mapping. The design's example was fixed to quote them; block style needs no quotes.
-- **Reading** (`exradius/config_repo.py`, `exradius/project_state.py`). The mirror is `<data_dir>/config-repos/<project id>.git`, fetched under the same file lock as code mirrors with the credential of the URL's host (`git_credentials`; a token is sent as `x-access-token:<token>`, `basic` as given; local paths and `file://` have no host). Without `config_branch`, the branch is the remote's default (the mirror's `HEAD`, which follows the remote at every fetch). The file is `config_path`, or `exradius.yaml`, then `.exradius/exradius.yaml`. A repository, branch or file that cannot be read raises `ConfigReadError`; callers turn it into a snapshot with that error and no commit. Reads happen in `POST /api/projects`, re-read and PATCH (API), and at intake, in `preparing` and in Verify (worker); each stores the snapshot on the project.
+- **Reading** (`exradius/config_repo.py`, `exradius/project_state.py`). The mirror is `<EXRADIUS_CACHE_DIR>/config-repos/<project id>.git` in the reading pod's own cache, fetched under a file lock with the credential of the URL's host (`git_credentials`; a token is sent as `x-access-token:<token>`, `basic` as given; local paths and `file://` have no host). Without `config_branch`, the branch is the remote's default (the mirror's `HEAD`, which follows the remote at every fetch). The file is `config_path`, or `exradius.yaml`, then `.exradius/exradius.yaml`. A repository, branch or file that cannot be read raises `ConfigReadError`; callers turn it into a snapshot with that error and no commit. Reads happen in `POST /api/projects`, re-read and PATCH (API), and at intake, in `preparing` and in Verify (worker); each stores the snapshot on the project.
   - Health (`project_state.assess`): errors are the file's plus a slug change ("project.slug: the file says 'x', but this project was added as 'y'; …"; the row keeps its slug). Missing keys are the required keys the store lacks (all of them when it does not exist). The reason, in order: `config error: <first error>`, `secret store S does not exist`, `missing secret A in store S` / `missing secrets A, B in store S`. A file that names a store but references no secret does not need the store.
 - **Intake** reads the config afresh (not the cache), so an agent added to the file is known to the next task. Rejections: `unknown project 'x'`, the health reason, `unknown agent 'x' in project 'p' (it defines a, b)`, `no provider configured` / `unknown provider 'x'`, and the existing ones. `POST /api/tasks` still checks nothing itself; the panel sees the rejection as a `rejected` status event on the task's stream.
 - **Preparing** reads the config again, fails the run with the health reason or "agent 'x' is no longer defined in project 'p'", records `config_commit`, `config` and `agent_snapshot`, builds the images, then clones, writes attachments, starts the services and runs `workstation.setup`, all from that config. Container start (first start and each resume) takes model, provider, runtime, identity and connections from `runs.config`; the run spec carries the role as `agent_prompt`.

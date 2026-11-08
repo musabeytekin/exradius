@@ -155,13 +155,16 @@ until they land.
 ```
 GET  /api/system/status
      { database: {ok, detail}, broker: {ok, detail},
-       workers: [{id, hostname, started_at, last_seen_at, concurrency, docker_ok,
-                  runtimes: [{name, version, ready, image, error}]}],
+       workers: [{id, hostname, started_at, last_seen_at, concurrency,
+                  runtimes: [{name, version, ready, image, error}], version}],
+       operator: {alive, holder, renewed_at, detail} | null,
        provider: {configured, default: {id, name, kind, auth_method, last_test} | null, count},
-       public_api_url, data_dir, version }
-     (Since providers.md: `anthropic_key` and `object_store` are gone.)
-     Workers heartbeat into a `workers` table every 15 s (hostname, concurrency, docker
-     and image checks); a worker unseen for 60 s is not listed.
+       public_api_url, version }
+     (Since providers.md: `anthropic_key` and `object_store` are gone. Since kubernetes.md
+     §15: `docker_ok`, `docker_detail`, `images` and `data_dir` are gone, and `operator` is
+     the workers' view of the operator's leader Lease; `GET /api/system/images` is gone.)
+     Workers heartbeat into a `workers` table every 15 s (hostname, concurrency, configured
+     runtime bundles, the operator); a worker unseen for 60 s is not listed.
 
 GET  /api/system/integration
      { broker: {host, port, vhost, username, password_set},
@@ -227,9 +230,7 @@ exact reference):
 - `GET /api/events` without `since` returns the latest `limit` events, oldest first.
   `EventOut` carries `task_id` and `run_id`.
 - Verification steps may also be `skipped`. Resolved connections carry `references` and
-  `overridden` besides `unresolved`. Workers carry `docker_detail`, `runtimes` (which replaced `runner_image` and
-  `runner_image_ok`) and
-  `version`.
+  `overridden` besides `unresolved`. Workers carry `runtimes` and `version`.
 
 Providers (docs/providers.md §5) were added later, on 2026-11-05, with these details:
 
