@@ -43,6 +43,10 @@ log = logging.getLogger(__name__)
 
 Emit = Callable[[list[PendingEvent]], Awaitable[None]]
 
+
+async def _no_directory_check() -> None:
+    return None
+
 VERIFY_PREFIX = "verify-"
 """Run directories of project verifications are ``runs/verify-<verification_id>``."""
 WAITING_FOR_MEMORY = "memory"
@@ -94,6 +98,9 @@ class RunManager:
         self.worker_id: str | None = None
         """Stamped on runs this worker drives through preparing/running/resuming, so a
         restarting worker can tell its own dead runs from a live worker's."""
+        self.check_directory: Callable[[], Awaitable[None]] = _no_directory_check
+        """Run after this worker stored a config snapshot (docs/integration-api.md §3); the
+        worker sets it once it can publish."""
 
     # -- helpers ------------------------------------------------------------------------
 
@@ -229,6 +236,7 @@ class RunManager:
             remember(project, snapshot)
             health = await assess(session, project, snapshot)
             await session.commit()
+        await self.check_directory()
         if health.reason is not None:
             raise prepare.PreparationError(health.reason)
         config = snapshot.config

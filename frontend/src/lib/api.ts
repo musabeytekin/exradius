@@ -146,6 +146,8 @@ export const api = {
     update: (id: string, b: Partial<Pick<T.ProjectIn, "config_branch" | "config_path">>) => patch<T.Project>(`/projects/${id}`, b),
     remove: (id: string) => del(`/projects/${id}`),
     reread: (id: string) => post<T.Project>(`/projects/${id}/reread`),
+    /** A new config hook URL; the old one stops working. */
+    replaceHookToken: (id: string) => post<T.Project>(`/projects/${id}/hook-token`),
     verify: (id: string) => post<{ verification_id: string }>(`/projects/${id}/verify`),
     verifications: (id: string, limit = 5) => get<T.Verification[]>(`/projects/${id}/verifications`, { limit }),
     verification: (id: string, vid: string) => get<T.Verification>(`/projects/${id}/verifications/${vid}`),
@@ -168,6 +170,12 @@ export const api = {
     list: () => get<T.GitCredential[]>("/git-credentials"),
     create: (b: T.GitCredentialIn) => post<T.GitCredential>("/git-credentials", b),
     remove: (id: string) => del(`/git-credentials/${id}`),
+  },
+  integrationTokens: {
+    list: () => get<T.IntegrationToken[]>("/integration-tokens"),
+    /** The answer is the only time the token is shown. */
+    create: (name: string) => post<T.IntegrationTokenCreated>("/integration-tokens", { name }),
+    revoke: (id: string) => del(`/integration-tokens/${id}`),
   },
   providers: {
     list: () => get<T.Provider[]>("/providers"),

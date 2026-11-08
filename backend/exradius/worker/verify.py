@@ -99,6 +99,7 @@ class ProjectVerifier:
                 if verification is not None:
                     verification.commit = snapshot.commit  # also when the file has errors
                 await session.commit()
+            await self.runs.check_directory()
             lines = [
                 f"commit {snapshot.commit[:12]} ({snapshot.path} on {snapshot.branch})" if snapshot.commit
                 else "the config could not be read",

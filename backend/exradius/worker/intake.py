@@ -33,6 +33,9 @@ class TaskIntake:
     events: list[PendingEvent] = field(default_factory=list)
     memory: int = 0
     """What the run reserves, from the config intake read (docs/run-environment.md §4)."""
+    config_read: bool = False
+    """Intake read the project's config and stored the snapshot, so the directory may have
+    changed (docs/integration-api.md §3)."""
 
 
 def _first_error(exc: ValidationError) -> str:
@@ -67,13 +70,15 @@ async def accept_task(
         return TaskIntake(run_id=None)
     raw = raw if isinstance(raw, dict) else {}
 
+    config_read = False
+
     async with sessions() as session:
 
         def reject(reason: str) -> TaskIntake:
             task_id = raw.get("task_id")
             if not isinstance(task_id, str) or not task_id:
                 log.warning("dropping task message without task_id: %s", reason)
-                return TaskIntake(run_id=None)
+                return TaskIntake(run_id=None, config_read=config_read)
             event = make_event(
                 session,
                 task_id=task_id,
@@ -84,7 +89,7 @@ async def accept_task(
                 type="status",
                 payload=status_payload(State.REJECTED, None, reason),
             )
-            return TaskIntake(run_id=None, events=[event])
+            return TaskIntake(run_id=None, events=[event], config_read=config_read)
 
         async def rejected(reason: str) -> TaskIntake:
             result = reject(reason)
@@ -105,6 +110,7 @@ async def accept_task(
         # The agent must exist in the project's current config (config-repo.md §1, §3).
         snapshot = await read_config(session, box, data_dir, project)
         remember(project, snapshot)
+        config_read = True
         health = await assess(session, project, snapshot)
         if health.reason is not None:
             return await rejected(health.reason)
@@ -138,7 +144,9 @@ async def accept_task(
             await session.rollback()
             return await rejected(f"duplicate task_id {message.task_id!r}")
         log.info("accepted task %s as run %s", task.id, run.id)
-        return TaskIntake(run_id=run.id, events=[event], memory=snapshot.config.memory_reservation())
+        return TaskIntake(
+            run_id=run.id, events=[event], memory=snapshot.config.memory_reservation(), config_read=True
+        )
 
 
 @dataclass

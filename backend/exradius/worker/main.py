@@ -11,7 +11,7 @@ import uuid
 from aio_pika.abc import AbstractIncomingMessage
 from sqlalchemy import update
 
-from exradius import messaging
+from exradius import directory, messaging
 from exradius.config import Settings, get_settings
 from exradius.db import make_engine, make_session_factory
 from exradius.models import Event, utcnow
@@ -50,6 +50,7 @@ class Worker:
         self._background: set[asyncio.Task] = set()
         self.worker_id = new_worker_id()
         self.runs.worker_id = self.worker_id
+        self.runs.check_directory = self.check_directory
         self.presence = make_presence(self.engine, self.worker_id)
         self.heartbeat = Heartbeat(
             self.sessions,
@@ -73,6 +74,14 @@ class Worker:
                 )
                 await session.commit()
 
+    async def check_directory(self) -> None:
+        """The directory check after this worker stored a config snapshot
+        (docs/integration-api.md §3); a notice that cannot be published is retried by the
+        next check, in this process or another."""
+        if self.publisher is None:
+            return
+        await directory.check(self.sessions, self.publisher.publish_directory)
+
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
         self._background.add(task)
@@ -93,6 +102,8 @@ class Worker:
                 return
             await message.ack()  # persisted: safe to acknowledge
             await self.emit(intake.events)
+            if intake.config_read:
+                await self.check_directory()
             if intake.run_id is not None:
                 await self.runs.execute(intake.run_id, intake.memory)
 

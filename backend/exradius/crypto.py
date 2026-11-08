@@ -59,5 +59,18 @@ def new_run_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def new_hook_token() -> str:
+    """The token of a project's config hook URL (docs/integration-api.md §2)."""
+    return secrets.token_urlsafe(32)
+
+
+INTEGRATION_TOKEN_PREFIX = "exr_"
+
+
+def new_integration_token() -> str:
+    """An integration token (docs/integration-api.md §5): ``exr_`` and 32 random bytes."""
+    return INTEGRATION_TOKEN_PREFIX + secrets.token_urlsafe(32)
+
+
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()

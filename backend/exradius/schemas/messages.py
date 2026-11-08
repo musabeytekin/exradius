@@ -145,7 +145,16 @@ ROUTING_KEYS: dict[str, str] = {
     "status": "task.status",
     "info_request": "task.info_request",
     "result": "task.result",
+    "directory_changed": "directory.changed",
 }
+"""Every routing key on ``exradius.events``, by event type (the task events and the
+directory notice)."""
+
+
+def _utc_z(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 class EventEnvelope(_Message):
@@ -161,10 +170,8 @@ class EventEnvelope(_Message):
     payload: dict[str, Any]
 
     @field_serializer("timestamp")
-    def _utc_z(self, value: datetime) -> str:
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=UTC)
-        return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    def _timestamp(self, value: datetime) -> str:
+        return _utc_z(value)
 
     @property
     def routing_key(self) -> str:
@@ -175,6 +182,32 @@ class EventEnvelope(_Message):
         model = {"status": StatusPayload, "info_request": InfoRequestPayload, "result": ResultPayload}
         model[self.type].model_validate(self.payload)
         return self
+
+    def to_json(self) -> bytes:
+        return self.model_dump_json().encode()
+
+
+class DirectoryChangedPayload(BaseModel):
+    projects: list[str]
+    """Slugs whose directory entry was added, changed or removed. Informational: an
+    integration fetches the whole directory either way."""
+
+
+class DirectoryEvent(_Message):
+    """Outbound on ``exradius.events`` with routing key ``directory.changed``
+    (docs/integration-api.md §3). It belongs to no task, so it has no task fields."""
+
+    type: Literal["directory_changed"] = "directory_changed"
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    payload: DirectoryChangedPayload
+
+    @field_serializer("timestamp")
+    def _timestamp(self, value: datetime) -> str:
+        return _utc_z(value)
+
+    @property
+    def routing_key(self) -> str:
+        return ROUTING_KEYS[self.type]
 
     def to_json(self) -> bytes:
         return self.model_dump_json().encode()

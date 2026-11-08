@@ -119,6 +119,10 @@ class ProjectOut(BaseModel):
     freshness: Freshness = "never"
     """Advice, never a gate: ``current`` passed at ``commit``, ``stale`` passed at an older
     commit, ``failed``, ``running`` (pending or running) or ``never``."""
+    hook_url: str
+    """The config hook (docs/integration-api.md §2), built from ``EXRADIUS_PUBLIC_API_URL``."""
+    hook_last_at: datetime | None = None
+    """The last accepted hook call; ``null``: never."""
 
 
 class ResolvedConnection(BaseModel):
@@ -556,3 +560,50 @@ class IntegrationOut(BaseModel):
     events_exchange_type: str = "topic"
     routing_keys: list[str]
     public_api_url: str
+
+
+# Integrations (docs/integration-api.md) -----------------------------------------------------
+
+
+class IntegrationTokenIn(BaseModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+
+
+class IntegrationTokenOut(_Out):
+    id: uuid.UUID
+    name: str
+    created_at: datetime
+    last_used_at: datetime | None
+    """Written at most once a minute."""
+    revoked_at: datetime | None
+
+
+class IntegrationTokenCreated(IntegrationTokenOut):
+    token: str
+    """Shown once: only its sha256 is stored."""
+
+
+class DirectoryAgentOut(BaseModel):
+    slug: str
+    name: str
+
+
+class DirectoryRepositoryOut(BaseModel):
+    name: str
+    url: str
+    """As the config writes it, without any userinfo."""
+
+
+class DirectoryProjectOut(BaseModel):
+    slug: str
+    name: str
+    runnable: bool
+    repositories: list[DirectoryRepositoryOut]
+    """In config order."""
+    agents: list[DirectoryAgentOut]
+
+
+class DirectoryOut(BaseModel):
+    """``GET /api/integration/v1/directory`` (§4): projects by slug, agents by slug."""
+
+    projects: list[DirectoryProjectOut]

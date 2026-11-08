@@ -10,6 +10,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -23,6 +24,8 @@ from sqlalchemy import (
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from exradius.crypto import new_hook_token
 
 Json = JSON().with_variant(JSONB(), "postgresql")
 OrderedJson = JSON()
@@ -78,6 +81,11 @@ class Project(Base):
     snapshot_commit: Mapped[str | None] = mapped_column(String(64))
     snapshot_read_at: Mapped[datetime | None] = mapped_column(Timestamp)
     created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+    hook_token: Mapped[str] = mapped_column(String(64), unique=True, default=new_hook_token)
+    """The token of the config hook URL (docs/integration-api.md §2). It grants only a
+    re-read, so it is stored as is and shown in the panel."""
+    hook_last_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    """The last accepted call of the config hook."""
 
 
 class GitCredential(Base):
@@ -341,6 +349,34 @@ class ProjectVerification(Base):
     """What went wrong, from ``worker/diagnose.py``; ``None`` when passed or unrecognised."""
 
 
+# --- Integrations (docs/integration-api.md) ------------------------------------------------
+
+
+class DirectoryState(Base):
+    """The directory as last published with ``directory.changed`` (§3). One row, ``id`` 1."""
+
+    __tablename__ = "directory_state"
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    directory: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(Timestamp)
+
+
+class IntegrationToken(Base):
+    """A bearer token for ``/api/integration/v1/*`` (§5). Only its sha256 is stored."""
+
+    __tablename__ = "integration_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    """Written at most once a minute."""
+    revoked_at: Mapped[datetime | None] = mapped_column(Timestamp)
+
+
 class AdminUser(Base):
     __tablename__ = "admin_user"
 
@@ -354,10 +390,12 @@ __all__ = [
     "Artifact",
     "Attachment",
     "Base",
+    "DirectoryState",
     "Event",
     "GitCredential",
     "ImageBuild",
     "InfoRequest",
+    "IntegrationToken",
     "Project",
     "ProjectVerification",
     "Provider",

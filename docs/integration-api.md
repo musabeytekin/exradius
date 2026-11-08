@@ -64,15 +64,16 @@ it later when it creates the config repository, if it is given the URL (§7).
 
 The directory (§4) changes when one of these happens:
 
-- a config read gives a different set of agents, different names or a different runnable
-  state. Reads happen on panel re-read and PATCH, the hook, task intake, `preparing` and
-  Verify;
+- a config read gives a different set of agents or repositories, different names or
+  repository URLs, or a different runnable state. Reads happen on panel re-read and PATCH,
+  the hook, task intake, `preparing` and Verify;
 - a project is added or deleted;
 - store keys are set or deleted, or a store is deleted, since that changes which projects
   are runnable.
 
 A commit that changes anything else does not change the directory, so nothing is sent.
-That covers a Dockerfile, a service, an agent's role or the commit id itself.
+That covers a Dockerfile, a service, an agent's role, a repository's branch or the commit
+id itself.
 
 **Detection.** A single-row table `directory_state` holds `directory` (the JSON body of §4
 as last published) and `published_at`. After any of the writes above, the process that made
@@ -122,12 +123,15 @@ Authorization: Bearer <integration token>
       "slug": "plane",
       "name": "Plane",
       "runnable": true,
+      "repositories": [
+        { "name": "plane", "url": "https://github.com/acme/plane.git" }
+      ],
       "agents": [
         { "slug": "developer", "name": "Developer" },
         { "slug": "scout", "name": "Scout" }
       ]
     },
-    { "slug": "saleor", "name": "Saleor", "runnable": false, "agents": [ ... ] }
+    { "slug": "saleor", "name": "Saleor", "runnable": false, "repositories": [ ... ], "agents": [ ... ] }
   ]
 }
 ```
@@ -136,13 +140,20 @@ Authorization: Bearer <integration token>
   Intake still reads the config afresh, so the directory is only for offering choices. A
   task built from a stale directory is checked at intake like any other.
 - **`runnable`.** It is the project health's `runnable`: no config errors and no missing
-  secret keys. A project whose config has errors has no agents to list, so it appears with
-  `agents: []`.
-- **Names only.** Roles are prompts, so they stay out, as do commits, which would make
-  every commit a change, and reasons, which the admin reads in the panel. An integration
-  needs only what it offers and the slugs it sends back.
-- **Order.** Projects are sorted by slug, and agents by slug within a project, so equal
-  directories compare equal.
+  secret keys. A project whose config has errors has no repositories or agents to list, so
+  it appears with `repositories: []` and `agents: []`.
+- **Repositories.** `name` and `url` of the config's `repositories`, so an integration can
+  find the project for a repository (a GitHub bridge, from an issue's repository). The URL
+  is as written, except that any userinfo is removed as a safeguard
+  (`https://user:token@host/...` becomes `https://host/...`). An scp-like `git@host:path`
+  cannot carry a password and stays as written. Integrations normalise https and ssh forms
+  themselves.
+- **Names and repository URLs only.** Roles are prompts, so they stay out, as do commits,
+  which would make every commit a change, and reasons, which the admin reads in the panel.
+  An integration needs only what it offers, the slugs it sends back and the repositories
+  it matches on.
+- **Order.** Projects are sorted by slug, agents by slug within a project, and
+  repositories keep the config's order, so equal directories compare equal.
 - **Caching.** The response carries an `ETag` (sha256 of the body), and `If-None-Match`
   answers `304`.
 
@@ -190,7 +201,8 @@ Authorization: Bearer <integration token>
   - The hook: `404` for an unknown token, and a burst of calls coalescing into at most
     two reads.
   - The directory check: a commit that changes only a role sends nothing, a new agent
-    sends one notice, and filling a missing key flips `runnable` and sends one notice.
+    sends one notice, a repository change sends one notice, and filling a missing key
+    flips `runnable` and sends one notice.
   - A failed publish is retried on the next check.
   - Token auth: missing, wrong and revoked tokens are refused.
   - `ETag` and `304`.

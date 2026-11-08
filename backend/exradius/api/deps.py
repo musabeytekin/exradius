@@ -24,6 +24,7 @@ class AppState:
     store: ObjectStore
     box: SecretBox
     broker: Any  # BrokerPublisher
+    rereads: Any = None  # hooks.Rereads, set at startup
 
 
 def app_state(request: Request) -> AppState:

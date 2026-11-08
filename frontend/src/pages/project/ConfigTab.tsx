@@ -13,6 +13,7 @@ import {
 } from "@/lib/projectConfig";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { useConfirm } from "@/lib/confirm";
 import { qk, useCatalog } from "@/lib/queries";
 import { toast } from "@/lib/toast";
 import type { CatalogEntry, ConfigAgent, ConfigConnection, Project } from "@/lib/types";
@@ -20,6 +21,16 @@ import type { CatalogEntry, ConfigAgent, ConfigConnection, Project } from "@/lib
 export function ConfigTab({ project }: { project: Project }) {
   const qc = useQueryClient();
   const catalog = useCatalog();
+  const confirm = useConfirm();
+  const replaceHook = useMutation({
+    mutationFn: () => api.projects.replaceHookToken(project.id),
+    onSuccess: (p) => {
+      if (p && typeof p === "object" && "id" in p) qc.setQueryData(qk.project(project.id), p);
+      qc.invalidateQueries({ queryKey: qk.projects });
+      toast.ok("Hook URL replaced");
+    },
+    onError: (e) => toast.err("Could not replace the hook URL", e),
+  });
   const reread = useMutation({
     mutationFn: () => api.projects.reread(project.id),
     onSuccess: (p) => {
@@ -36,14 +47,21 @@ export function ConfigTab({ project }: { project: Project }) {
       catalog={catalog.data}
       onReread={() => reread.mutate()}
       rereading={reread.isPending}
+      onReplaceHook={async () => {
+        const ok = await confirm({ title: "Replace the hook URL?", description: "The current URL stops working.", confirmLabel: "Replace" });
+        if (ok) replaceHook.mutate();
+      }}
+      replacingHook={replaceHook.isPending}
     />
   );
 }
 
+interface HookActions { onReplaceHook?: () => void; replacingHook?: boolean }
+
 /** The snapshot rendered read-only. No queries: tests render it from fixtures. */
-export function ConfigView({ project, catalog, onReread, rereading }: {
+export function ConfigView({ project, catalog, onReread, rereading, onReplaceHook, replacingHook }: {
   project: Project; catalog?: CatalogEntry[]; onReread?: () => void; rereading?: boolean;
-}) {
+} & HookActions) {
   const config = configOf(project);
   const errors = errorsOf(project);
   const warnings = warningsOf(project);
@@ -59,7 +77,7 @@ export function ConfigView({ project, catalog, onReread, rereading }: {
 
   return (
     <div className="flex flex-col gap-4">
-      <SourceCard project={project} onReread={onReread} rereading={rereading} />
+      <SourceCard project={project} onReread={onReread} rereading={rereading} onReplaceHook={onReplaceHook} replacingHook={replacingHook} />
 
       {unreadable ? (
         <Banner tone="err" title="The config repository could not be read">
@@ -204,10 +222,13 @@ export function ConfigView({ project, catalog, onReread, rereading }: {
   );
 }
 
-function SourceCard({ project, onReread, rereading }: { project: Project; onReread?: () => void; rereading?: boolean }) {
+function SourceCard({ project, onReread, rereading, onReplaceHook, replacingHook }: {
+  project: Project; onReread?: () => void; rereading?: boolean;
+} & HookActions) {
   const commit = commitOf(project);
   const readAt = readAtOf(project);
   const store = storeNameOf(project);
+  const hook = project.hook_url;
   return (
     <Card>
       <div className="flex items-start gap-6 px-4 py-3.5">
@@ -231,6 +252,22 @@ function SourceCard({ project, onReread, rereading }: { project: Project; onRere
             <>
               <dt className="text-muted">Secret store</dt>
               <dd><Mono>{store}</Mono></dd>
+            </>
+          )}
+          {hook && (
+            <>
+              <dt className="text-muted">Hook</dt>
+              <dd className="flex min-w-0 items-center gap-1">
+                <Mono className="truncate" title={hook}>{hook}</Mono>
+                <CopyButton text={hook} label="" />
+                {onReplaceHook && <Button variant="ghost" size="xs" loading={replacingHook} onClick={onReplaceHook}>Replace</Button>}
+              </dd>
+              <dt className="text-muted">Last delivery</dt>
+              <dd>
+                {project.hook_last_at ? (
+                  <Tooltip content={absoluteTime(project.hook_last_at)}><span>{relativeTime(project.hook_last_at)}</span></Tooltip>
+                ) : <Dim>never</Dim>}
+              </dd>
             </>
           )}
         </dl>

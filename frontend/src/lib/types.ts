@@ -106,6 +106,9 @@ export interface Project {
   freshness?: Freshness | null;
   /** Disk usage of the project's caches; only on the project page, null when there are none. */
   cache_bytes?: number | null;
+  /** The config hook URL and its last accepted call (integration-api.md §2). */
+  hook_url?: string | null;
+  hook_last_at?: string | null;
 }
 export type Freshness = "current" | "stale" | "failed" | "running" | "never";
 export interface VerificationSummary {
@@ -137,6 +140,9 @@ export interface SecretStoreKey { key: string; updated_at?: string | null }
 /** Config repository access per git host (§6). */
 export type GitCredentialKind = "token" | "basic";
 export interface GitCredential { id: Uuid; host: string; kind: GitCredentialKind; created_at?: string }
+/** A bearer token for /api/integration/v1 (integration-api.md §5); the value is only in the create answer. */
+export interface IntegrationToken { id: Uuid; name: string; created_at: string; last_used_at: string | null; revoked_at: string | null }
+export interface IntegrationTokenCreated extends IntegrationToken { token: string }
 export interface GitCredentialIn { host: string; kind: GitCredentialKind; value: string }
 
 /** What a run recorded of its agent (runs.agent_snapshot, §8). */

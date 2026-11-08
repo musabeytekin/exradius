@@ -88,7 +88,7 @@ def test_system_integration_never_returns_the_password(admin, settings):
                               "password_set": True}
     assert info["tasks_queue"] == "exradius.tasks" and info["answers_queue"] == "exradius.answers"
     assert info["events_exchange"] == "exradius.events" and info["events_exchange_type"] == "topic"
-    assert info["routing_keys"] == ["task.status", "task.info_request", "task.result"]
+    assert info["routing_keys"] == ["task.status", "task.info_request", "task.result", "directory.changed"]
 
     settings.public_broker_host, settings.public_broker_port = "mq.example.com", 5671
     settings.broker_url = "amqp://guest@rabbitmq/"

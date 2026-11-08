@@ -14,9 +14,10 @@ import yaml
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 
-from exradius import catalog, config_repo
-from exradius.api.deps import DB, Admin, State, get_or_404
+from exradius import catalog, config_repo, directory
+from exradius.api.deps import DB, Admin, AppState, State, get_or_404
 from exradius.config_repo import ProjectConfigSnapshot
+from exradius.crypto import new_hook_token
 from exradius.environment import config_environment_text, workstation_label
 from exradius.models import (
     GitCredential,
@@ -64,9 +65,20 @@ async def _latest_verification(session, project_id: uuid.UUID) -> ProjectVerific
     )
 
 
-async def _project_out(session, project: Project, *, data_dir=None) -> s.ProjectOut:
-    """``data_dir`` adds the size of the project's caches (a walk of the directory, kept
+def hook_url(state: AppState, project: Project) -> str:
+    """The config hook URL (docs/integration-api.md §2)."""
+    return f"{state.settings.public_api_url.rstrip('/')}/api/hooks/config/{project.hook_token}"
+
+
+async def check_directory(state: AppState) -> None:
+    """The directory check after a write that can change it (docs/integration-api.md §3)."""
+    await directory.check(state.sessions, state.broker.publish_directory)
+
+
+async def _project_out(session, state: AppState, project: Project, *, caches_size: bool = False) -> s.ProjectOut:
+    """``caches_size`` adds the size of the project's caches (a walk of the directory, kept
     for a minute: the project page only, not the list)."""
+    data_dir = state.settings.data_dir
     snapshot = cached(project) or ProjectConfigSnapshot.unreadable("the config has not been read yet")
     latest = await _latest_verification(session, project.id)
     health = await assess(session, project, snapshot)
@@ -104,7 +116,9 @@ async def _project_out(session, project: Project, *, data_dir=None) -> s.Project
         created_at=project.created_at,
         verification=s.VerificationSummary.model_validate(latest) if latest else None,
         freshness=freshness(latest, project.snapshot_commit),
-        cache_bytes=await caches.sizes.get(data_dir, project.slug) if data_dir else None,
+        cache_bytes=await caches.sizes.get(data_dir, project.slug) if caches_size else None,
+        hook_url=hook_url(state, project),
+        hook_last_at=project.hook_last_at,
     )
 
 
@@ -139,9 +153,9 @@ def _remove_mirror(state, project_id: uuid.UUID) -> None:
 
 
 @router.get("/projects", response_model=list[s.ProjectOut])
-async def list_projects(session: DB, _: Admin):
+async def list_projects(session: DB, state: State, _: Admin):
     projects = (await session.scalars(select(Project).order_by(Project.slug))).all()
-    return [await _project_out(session, p) for p in projects]
+    return [await _project_out(session, state, p) for p in projects]
 
 
 @router.post("/projects", response_model=s.ProjectOut, status_code=201)
@@ -169,28 +183,41 @@ async def create_project(body: s.ProjectIn, session: DB, state: State, _: Admin)
     session.add(project)
     await session.commit()
     await _request_verification(session, state, project.id, strict=False)
-    return await _project_out(session, project)
+    await check_directory(state)
+    return await _project_out(session, state, project)
 
 
 @router.get("/projects/{project_id}", response_model=s.ProjectOut)
 async def get_project(project_id: uuid.UUID, session: DB, state: State, _: Admin):
-    return await _project_out(session, await get_or_404(session, Project, project_id), data_dir=state.settings.data_dir)
+    return await _project_out(session, state, await get_or_404(session, Project, project_id), caches_size=True)
 
 
 @router.post("/projects/{project_id}/reread", response_model=s.ProjectOut)
 async def reread_project(project_id: uuid.UUID, session: DB, state: State, _: Admin):
     project = await get_or_404(session, Project, project_id)
     await _reread(session, state, project)
-    return await _project_out(session, project)
+    return await _project_out(session, state, project)
 
 
 async def _reread(session, state, project: Project) -> None:
-    """Read the config again; a new commit asks for a verification (§1.1)."""
+    """Read the config again; a new commit asks for a verification (§1.1), and the
+    directory is checked (docs/integration-api.md §3). The panel's re-read, PATCH and the
+    config hook all read this way."""
     before = project.snapshot_commit
     remember(project, await read_config(session, state.box, state.settings.data_dir, project))
     await session.commit()
     if project.snapshot_commit is not None and project.snapshot_commit != before:
         await _request_verification(session, state, project.id, strict=False)
+    await check_directory(state)
+
+
+@router.post("/projects/{project_id}/hook-token", response_model=s.ProjectOut)
+async def replace_hook_token(project_id: uuid.UUID, session: DB, state: State, _: Admin):
+    """A new config hook URL; the old one stops working (docs/integration-api.md §2)."""
+    project = await get_or_404(session, Project, project_id)
+    project.hook_token = new_hook_token()
+    await session.commit()
+    return await _project_out(session, state, project)
 
 
 @router.patch("/projects/{project_id}", response_model=s.ProjectOut)
@@ -203,7 +230,7 @@ async def update_project(project_id: uuid.UUID, body: s.ProjectUpdate, session: 
     if "config_path" in data:
         project.config_path = data["config_path"]
     await _reread(session, state, project)
-    return await _project_out(session, project)
+    return await _project_out(session, state, project)
 
 
 @router.delete("/projects/{project_id}", status_code=NO_CONTENT)
@@ -214,6 +241,7 @@ async def delete_project(project_id: uuid.UUID, session: DB, state: State, _: Ad
         raise HTTPException(409, f"the project has {tasks} task{'s' if tasks != 1 else ''}; it cannot be deleted")
     await session.delete(project)
     await session.commit()
+    await check_directory(state)
     await asyncio.to_thread(_remove_mirror, state, project_id)
     await asyncio.to_thread(caches.remove, state.settings.data_dir, project.slug)
     caches.sizes.forget(state.settings.data_dir, project.slug)
@@ -350,6 +378,7 @@ async def create_store(body: s.StoreIn, session: DB, state: State, _: Admin):
     session.add(store)
     await session.commit()
     await _verify_after_keys(session, state, store.name)
+    await check_directory(state)
     return await _store_out(session, store)
 
 
@@ -359,13 +388,14 @@ async def get_store(store_id: uuid.UUID, session: DB, _: Admin):
 
 
 @router.delete("/stores/{store_id}", status_code=NO_CONTENT)
-async def delete_store(store_id: uuid.UUID, session: DB, _: Admin):
+async def delete_store(store_id: uuid.UUID, session: DB, state: State, _: Admin):
     store = await get_or_404(session, SecretStore, store_id)
     users = await _store_users(session, store.name)
     if users:
         raise HTTPException(409, f"the config of {', '.join(users)} names this store")
     await session.delete(store)
     await session.commit()
+    await check_directory(state)
     return Response(status_code=NO_CONTENT)
 
 
@@ -405,6 +435,7 @@ async def set_store_keys(store_id: uuid.UUID, body: s.StoreValuesIn, session: DB
     await session.commit()
     store = await session.get(SecretStore, store_id)
     await _verify_after_keys(session, state, store.name)
+    await check_directory(state)
     return await _entries(session, store_id)
 
 
@@ -425,12 +456,13 @@ async def set_store_key(store_id: uuid.UUID, key: str, body: s.StoreValueIn, ses
     await session.commit()
     store = await session.get(SecretStore, store_id)
     await _verify_after_keys(session, state, store.name)
+    await check_directory(state)
     await session.refresh(entry)
     return entry
 
 
 @router.delete("/stores/{store_id}/keys/{key}", status_code=NO_CONTENT)
-async def delete_store_key(store_id: uuid.UUID, key: str, session: DB, _: Admin):
+async def delete_store_key(store_id: uuid.UUID, key: str, session: DB, state: State, _: Admin):
     entry = await session.scalar(
         select(SecretStoreEntry).where(SecretStoreEntry.store_id == store_id, SecretStoreEntry.key == key)
     )
@@ -438,6 +470,7 @@ async def delete_store_key(store_id: uuid.UUID, key: str, session: DB, _: Admin)
         raise HTTPException(404, "key not found")
     await session.delete(entry)
     await session.commit()
+    await check_directory(state)
     return Response(status_code=NO_CONTENT)
 
 

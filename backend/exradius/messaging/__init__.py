@@ -9,7 +9,7 @@ from typing import Any
 import aio_pika
 from aio_pika.abc import AbstractChannel, AbstractExchange, AbstractRobustConnection
 
-from exradius.schemas.messages import EventEnvelope
+from exradius.schemas.messages import DirectoryEvent, EventEnvelope
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +50,23 @@ class EventPublisher:
             routing_key=envelope.routing_key,
         )
         log.info("published %s task=%s %s", envelope.routing_key, envelope.task_id, envelope.payload.get("state", ""))
+
+    async def publish_directory(self, event: DirectoryEvent) -> None:
+        await publish_directory(self._exchange, event)
+
+
+async def publish_directory(exchange: AbstractExchange, event: DirectoryEvent) -> None:
+    """The directory notice (docs/integration-api.md §3), from the API or a worker."""
+    await exchange.publish(
+        aio_pika.Message(
+            body=event.to_json(),
+            content_type="application/json",
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            type=event.type,
+        ),
+        routing_key=event.routing_key,
+    )
+    log.info("published %s projects=%s", event.routing_key, ",".join(event.payload.projects) or "-")
 
 
 async def publish_to_queue(channel: AbstractChannel, queue: str, body: dict[str, Any]) -> None:

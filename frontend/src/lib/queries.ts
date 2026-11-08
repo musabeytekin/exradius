@@ -13,6 +13,7 @@ export const qk = {
   stores: ["stores"] as const,
   storeKeys: (id: string) => ["stores", id, "keys"] as const,
   gitCredentials: ["git-credentials"] as const,
+  integrationTokens: ["integration-tokens"] as const,
   providers: ["providers"] as const,
   tasks: (filters: Record<string, unknown>) => ["tasks", filters] as const,
   allTasks: ["tasks"] as const,
@@ -55,4 +56,5 @@ export const useStores = () => useQuery({ queryKey: qk.stores, queryFn: api.stor
 export const useStoreKeys = (id: string | null | undefined) =>
   useQuery({ queryKey: qk.storeKeys(id ?? "-"), queryFn: () => api.stores.keys(id!), enabled: !!id });
 export const useGitCredentials = () => useQuery({ queryKey: qk.gitCredentials, queryFn: api.gitCredentials.list });
+export const useIntegrationTokens = () => useQuery({ queryKey: qk.integrationTokens, queryFn: api.integrationTokens.list });
 export const useProviders = () => useQuery({ queryKey: qk.providers, queryFn: api.providers.list });

@@ -119,6 +119,20 @@ describe("config view", () => {
     expect(within(services).getByText("512m")).toBeInTheDocument();
   });
 
+  it("shows the config hook with its last delivery, and replaces it", async () => {
+    const onReplaceHook = vi.fn();
+    const url = "https://exradius.example.com/api/hooks/config/Zm9vYmFy";
+    const { rerender } = wrap(<ConfigView project={{ ...HAPPY, hook_url: url, hook_last_at: null }} onReplaceHook={onReplaceHook} />);
+    expect(screen.getByTitle(url)).toHaveTextContent(url);
+    expect(screen.getByText("Last delivery").nextSibling).toHaveTextContent("never");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Replace" }));
+    expect(onReplaceHook).toHaveBeenCalledOnce();
+
+    rerender(<TooltipPrimitive.Provider><ConfigView project={{ ...HAPPY, hook_url: url, hook_last_at: new Date(Date.now() - 120_000).toISOString() }} /></TooltipPrimitive.Provider>);
+    expect(screen.getByText("Last delivery").nextSibling).toHaveTextContent("2m ago");
+    expect(screen.queryByRole("button", { name: "Replace" })).toBeNull();
+  });
+
   it("says when nothing is declared", () => {
     wrap(<ConfigView project={HAPPY} catalog={CATALOG} />);
     const ws = section("Workstation");

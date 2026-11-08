@@ -6,8 +6,9 @@ import { api, ApiError, refusal } from "@/lib/api";
 import { useConfirm } from "@/lib/confirm";
 import { toast } from "@/lib/toast";
 import { relativeTime } from "@/lib/format";
-import { qk, useGitCredentials, useIntegration, useStatus } from "@/lib/queries";
-import type { GitCredential, GitCredentialKind } from "@/lib/types";
+import { qk, useGitCredentials, useIntegration, useIntegrationTokens, useStatus } from "@/lib/queries";
+import type { GitCredential, GitCredentialKind, IntegrationToken, IntegrationTokenCreated } from "@/lib/types";
+import { CopyButton } from "@/components/ui/data";
 import { useTheme, type ThemePref } from "@/lib/theme";
 import { Segmented } from "@/components/ui/controls";
 
@@ -32,6 +33,7 @@ export function SettingsPage() {
       <div className="flex flex-col gap-6">
         <PasswordCard />
         <GitAccessCard />
+        <IntegrationTokensCard />
         <Card>
           <CardHeader title="Appearance" description="Stored in this browser." />
           <div className="flex items-center justify-between px-4 py-3">
@@ -276,6 +278,129 @@ function AddGitCredential({ taken, onDone }: { taken: string[]; onDone: () => vo
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={onDone}>Cancel</Button>
         <Button type="submit" variant="primary" loading={add.isPending} disabled={!ready}>Save</Button>
+      </div>
+    </form>
+  );
+}
+
+export function IntegrationTokensCard() {
+  const tokens = useIntegrationTokens();
+  const qc = useQueryClient();
+  const confirm = useConfirm();
+  const [adding, setAdding] = useState(false);
+  const [created, setCreated] = useState<IntegrationTokenCreated | null>(null);
+  const revoke = useMutation({
+    mutationFn: (t: IntegrationToken) => api.integrationTokens.revoke(t.id),
+    onSuccess: (_, t) => {
+      qc.invalidateQueries({ queryKey: qk.integrationTokens });
+      setCreated((c) => (c?.id === t.id ? null : c));
+      toast.ok(`Token ${t.name} revoked`);
+    },
+    onError: (e) => toast.err("Could not revoke the token", e),
+  });
+  const list = tokens.data ?? [];
+  return (
+    <Card>
+      <CardHeader
+        title="Integration tokens"
+        description={<>Bearer tokens for <Mono>/api/integration/v1</Mono>.</>}
+        actions={!tokens.isError && !adding && !created && <Button size="sm" variant="secondary" icon="plus" onClick={() => setAdding(true)}>New token</Button>}
+      />
+      {tokens.isLoading ? (
+        <SkeletonRows rows={2} />
+      ) : tokens.isError ? (
+        <p className="px-4 py-4 text-sm text-muted">
+          {notAvailable(tokens.error) ? "This API has no integration tokens." : `Could not load tokens: ${(tokens.error as Error).message}`}
+        </p>
+      ) : (
+        <>
+          {created && (
+            <div className="border-b border-border px-4 py-3">
+              <Banner
+                tone="ok"
+                title={<>Token <Mono>{created.name}</Mono>, shown once</>}
+                action={<Button size="sm" variant="ghost" onClick={() => setCreated(null)}>Done</Button>}
+              >
+                <span className="mt-1 flex min-w-0 items-center gap-1">
+                  <Mono className="break-all text-fg">{created.token}</Mono>
+                  <CopyButton text={created.token} label="" />
+                </span>
+              </Banner>
+            </div>
+          )}
+          {list.length > 0 && (
+            <Table.Root>
+              <Table.Head>
+                <tr><Table.Th>Name</Table.Th><Table.Th>Created</Table.Th><Table.Th>Last used</Table.Th><Table.Th className="w-24" /></tr>
+              </Table.Head>
+              <tbody>
+                {list.map((t) => (
+                  <Table.Row key={t.id}>
+                    <Table.Td><Mono className={t.revoked_at ? "text-subtle line-through" : "font-medium"}>{t.name}</Mono></Table.Td>
+                    <Table.Td className="text-xs text-subtle">{relativeTime(t.created_at)}</Table.Td>
+                    <Table.Td className="text-xs text-subtle">{t.last_used_at ? relativeTime(t.last_used_at) : "never"}</Table.Td>
+                    <Table.Td className="text-right">
+                      {t.revoked_at ? <Chip>revoked</Chip> : (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`Revoke the token ${t.name}`}
+                          onClick={async () => {
+                            const ok = await confirm({ title: `Revoke the token ${t.name}?`, description: "Requests with it are refused from now on.", confirmLabel: "Revoke" });
+                            if (ok) revoke.mutate(t);
+                          }}
+                        >
+                          Revoke
+                        </Button>
+                      )}
+                    </Table.Td>
+                  </Table.Row>
+                ))}
+              </tbody>
+            </Table.Root>
+          )}
+          {list.length === 0 && !adding && !created && <p className="px-4 py-4 text-sm text-subtle">No tokens.</p>}
+          {adding && (
+            <NewIntegrationToken
+              taken={list.map((t) => t.name)}
+              onCancel={() => setAdding(false)}
+              onCreated={(t) => { setAdding(false); setCreated(t); }}
+            />
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
+function NewIntegrationToken({ taken, onCancel, onCreated }: {
+  taken: string[]; onCancel: () => void; onCreated: (t: IntegrationTokenCreated) => void;
+}) {
+  const qc = useQueryClient();
+  const [name, setName] = useState("");
+  const [serverError, setServerError] = useState<string | null>(null);
+  const n = name.trim();
+  const nameError = taken.includes(n) ? "A token with this name exists." : null;
+  const create = useMutation({
+    mutationFn: () => api.integrationTokens.create(n),
+    onSuccess: (t) => {
+      qc.invalidateQueries({ queryKey: qk.integrationTokens });
+      onCreated(t);
+    },
+    onError: (e) => { const m = refusal(e); if (m) setServerError(m); else toast.err("Could not create the token", e); },
+  });
+  const ready = !!n && n.length <= 100 && !nameError;
+  return (
+    <form
+      className="flex items-start gap-3 border-t border-border px-4 py-4 first:border-t-0"
+      onSubmit={(e) => { e.preventDefault(); if (ready) create.mutate(); }}
+    >
+      <Field label="Name" className="flex-1" error={nameError ?? serverError}>
+        <Input mono autoFocus value={name} maxLength={100} invalid={!!nameError} onChange={(e) => { setName(e.target.value); setServerError(null); }} placeholder="jira" spellCheck={false} />
+      </Field>
+      <div className="mt-[22px] flex gap-2">
+        <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+        <Button type="submit" variant="primary" loading={create.isPending} disabled={!ready}>Create</Button>
       </div>
     </form>
   );

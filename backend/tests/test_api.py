@@ -23,6 +23,8 @@ class FakeControl:
         self.verified: list[str] = []
         self.provider_tests: list[str] = []
         self.published: list[tuple[str, dict]] = []
+        self.directory: list[dict] = []
+        """``directory.changed`` notices, as published."""
         self.healthy = True
 
     async def publish(self, queue: str, body: dict) -> None:
@@ -32,6 +34,11 @@ class FakeControl:
 
     async def cancel(self, run_id: str) -> None:
         self.cancelled.append(run_id)
+
+    async def publish_directory(self, event) -> None:
+        if not self.healthy:
+            raise ConnectionError("broker down")
+        self.directory.append(json.loads(event.to_json()))
 
     async def verify(self, verification_id: str) -> None:
         if not self.healthy:
@@ -56,7 +63,12 @@ def control():
 def client(settings, store, control):
     app = create_app(settings, store=store, broker=control)
     with TestClient(app) as c:
+        c.portal.call(_startup_done, app)  # the directory check at startup (integration-api.md §3)
         yield c
+
+
+async def _startup_done(app) -> None:
+    await app.state.directory_startup_check
 
 
 @pytest.fixture
