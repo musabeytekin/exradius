@@ -255,6 +255,8 @@ class Run(Base):
     """name, model, provider, runtime, identity and connection names of the agent."""
     waiting_for: Mapped[str | None] = mapped_column(String(30))
     """``memory`` while the run waits for its memory reservation (docs/run-environment.md §4)."""
+    routing: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
+    """How the agent was picked (docs/agent-routing.md §8)."""
 
     task: Mapped[Task] = relationship(lazy="joined", innerjoin=True)
 
@@ -364,17 +366,65 @@ class DirectoryState(Base):
 
 
 class IntegrationToken(Base):
-    """A bearer token for ``/api/integration/v1/*`` (§5). Only its sha256 is stored."""
+    """A bearer token for ``/api/integration/v1/*`` (§5), bound to one bridge. Only its
+    sha256 is stored."""
 
     __tablename__ = "integration_tokens"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(100), unique=True)
+    bridge: Mapped[str] = mapped_column(String(100), index=True)
+    """The bridge whose directory the token reads and whose status it reports."""
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
     created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(Timestamp)
     """Written at most once a minute."""
     revoked_at: Mapped[datetime | None] = mapped_column(Timestamp)
+
+
+class BridgeStatus(Base):
+    """The latest status report of a bridge (integration-api.md §7)."""
+
+    __tablename__ = "bridge_status"
+
+    bridge: Mapped[str] = mapped_column(String(100), primary_key=True)
+    report: Mapped[dict[str, Any]] = mapped_column()
+    reported_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+    token_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("integration_tokens.id", ondelete="SET NULL"))
+
+
+# --- Agent routing (docs/agent-routing.md) --------------------------------------------------
+
+
+class ConnectionTools(Base):
+    """A connection's MCP tools as the last Verify listed them (§3.1)."""
+
+    __tablename__ = "connection_tools"
+    __table_args__ = (UniqueConstraint("project_id", "connection"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    connection: Mapped[str] = mapped_column(String(100))
+    definition_hash: Mapped[str] = mapped_column(String(64))
+    """sha256 of the connection's definition as the config writes it (secret references)."""
+    tools: Mapped[list[Any]] = mapped_column(default=list)
+    commit: Mapped[str | None] = mapped_column(String(64))
+    verification_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("project_verifications.id", ondelete="SET NULL")
+    )
+    listed_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+
+
+class RoutingSettings(Base):
+    """The OpenAI key routing uses (§7). One row, ``id`` 1."""
+
+    __tablename__ = "routing_settings"
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    openai_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    key_set_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    last_test: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
 
 
 class AdminUser(Base):
@@ -390,6 +440,8 @@ __all__ = [
     "Artifact",
     "Attachment",
     "Base",
+    "BridgeStatus",
+    "ConnectionTools",
     "DirectoryState",
     "Event",
     "GitCredential",
@@ -400,6 +452,7 @@ __all__ = [
     "ProjectVerification",
     "Provider",
     "ProviderTest",
+    "RoutingSettings",
     "Run",
     "SecretStore",
     "SecretStoreEntry",

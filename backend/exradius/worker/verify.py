@@ -2,8 +2,9 @@
 
 The worker prepares the project exactly as a run would: it reads the config ("Read config":
 commit, errors, warnings, missing keys), builds the images the config builds, refreshes
-the mirrors, clones every repository, creates the attachments folder, starts the services
-and runs the setup commands in the workstation. It works in a throwaway directory, ``runs/verify-<id>``, records every
+the mirrors, clones every repository, creates the attachments folder, starts the services,
+runs the setup commands in the workstation and lists the tools of every connection an
+agent uses (docs/agent-routing.md §3.1). It works in a throwaway directory, ``runs/verify-<id>``, records every
 step in ``project_verifications.steps`` as it goes, and removes the directory at the end.
 """
 
@@ -18,9 +19,11 @@ from typing import Any
 
 from sqlalchemy import select
 
-from exradius.models import Project, ProjectVerification, utcnow
+from exradius.models import ConnectionTools, Project, ProjectVerification, utcnow
 from exradius.project_state import assess, read_config, remember, store_values
-from exradius.resolve import StoreValues, repo_specs, workstation_environment
+from exradius.resolve import StoreValues, connection_spec, repo_specs, workstation_environment
+from exradius.routing import definition_hash
+from exradius.worker.bundles import BundleUnavailable
 from exradius.schemas.project_config import ProjectConfig, ServiceDef, format_memory
 from exradius.worker import prepare
 from exradius.worker.builds import BuildFailed, BuildJob, build_jobs
@@ -158,6 +161,15 @@ class ProjectVerifier:
         for command in config.workstation.setup:
             plan.append((f"Setup: {command}", self._setup_step(images, label, paths, env, command, network, config,
                                                                  cache_mounts)))
+        # The tools agent routing sees (docs/agent-routing.md §3.1), for every connection
+        # some agent uses, after setup, with the services up.
+        for name in config.connections:
+            users = [agent for agent in config.agents.values() if name in agent.connections]
+            if users:
+                plan.append((f"List tools {name}", self._tools_step(
+                    project_id, verification_id, read["commit"], images, label, paths, env, secrets, network,
+                    config, cache_mounts, name, users[0].runtime,
+                )))
         cleanups = [("Remove directory", remove_directory)]
         if config.services:
             cleanups.insert(0, ("Stop services", self._stop_services_step(label)))
@@ -301,6 +313,59 @@ class ProjectVerifier:
             return result.logs
 
         return action
+
+    def _tools_step(
+        self,
+        project_id: uuid.UUID,
+        verification_id: uuid.UUID,
+        commit: str,
+        images: dict[str, str],
+        label: str,
+        paths: prepare.RunPaths,
+        env: dict[str, str],
+        secrets: StoreValues,
+        network: list[str],
+        config: ProjectConfig,
+        cache_mounts: list[CacheMount],
+        name: str,
+        runtime: str,
+    ):
+        """List the connection's tools in the workstation and store them for routing; a
+        server that cannot list them fails the step (decided: the agent would not get them
+        either)."""
+
+        async def action() -> str:
+            try:
+                mount = await self.containers.ensure_runtime(runtime)
+            except BundleUnavailable as exc:
+                raise StepFailed(str(exc)) from exc
+            listed = await self.containers.list_tools(
+                image=images["workstation"], run_id=label, paths=paths, env=env,
+                spec=connection_spec(config.connection_definition(name), secrets), runtime=mount,
+                service_network=network[0] if network else None, memory=config.workstation_memory,
+                caches=cache_mounts,
+            )
+            if listed.tools is None:
+                raise StepFailed("\n".join(part for part in (listed.error, listed.logs.strip()) if part))
+            await self._store_tools(project_id, verification_id, commit, name, definition_hash(config, name),
+                                    listed.tools)
+            names = ", ".join(t.get("name", "?") for t in listed.tools)
+            return f"{len(listed.tools)} {'tool' if len(listed.tools) == 1 else 'tools'}" + (f": {names}" if names else "")
+
+        return action
+
+    async def _store_tools(self, project_id, verification_id, commit, name, digest, tools) -> None:
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(ConnectionTools).where(ConnectionTools.project_id == project_id,
+                                              ConnectionTools.connection == name).with_for_update()
+            )
+            if row is None:
+                row = ConnectionTools(project_id=project_id, connection=name)
+                session.add(row)
+            row.definition_hash, row.tools, row.commit = digest, tools, commit
+            row.verification_id, row.listed_at = verification_id, utcnow()
+            await session.commit()
 
     async def _save(self, verification_id: uuid.UUID, steps: list[dict[str, Any]], **fields: Any) -> None:
         async with self.sessions() as session:

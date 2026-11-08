@@ -87,9 +87,11 @@ async def test_verification_passes(verifier, sessions, containers, project, sett
         ("Prepare attachments folder", "passed"),
         ("Setup: npm ci", "passed"),
         ("Setup: make check", "passed"),
+        ("List tools docs", "passed"),
         ("Remove directory", "passed"),
     ]
     steps = {s["name"]: s for s in verification.steps}
+    assert steps["List tools docs"]["log"] == "1 tool: search"
     assert steps["Read config"]["log"].startswith("commit ") and "(exradius.yaml on main)" in steps["Read config"]["log"]
     assert steps["Read config"]["log"].endswith("missing keys: none")
     assert steps["Setup: npm ci"]["log"] == "ran npm ci"
@@ -107,12 +109,13 @@ async def test_failing_setup_skips_the_rest_and_cleans_up(verifier, sessions, co
     verification = await get(sessions, vid)
     assert verification.state == "failed"
     assert verification.error.startswith("Setup: npm ci: exited with 2")
-    assert names_and_states(verification)[-3:] == [
+    assert names_and_states(verification)[-4:] == [
         ("Setup: npm ci", "failed"),
         ("Setup: make check", "skipped"),
+        ("List tools docs", "skipped"),
         ("Remove directory", "passed"),
     ]
-    assert "boom" in verification.steps[-3]["log"]
+    assert "boom" in verification.steps[-4]["log"]
     assert verification.diagnosis is None  # nothing recognised: the panel shows the step and its tail
     assert verification.commit
     assert containers.setup_commands == ["npm ci"]
@@ -175,9 +178,11 @@ async def test_builds_come_before_the_directory(verifier, sessions, containers, 
     assert verification.state == "passed", verification.error
     assert [n for n, _ in names_and_states(verification)] == [
         "Read config", "Build workstation", "Build service db", "Create directory", "Prepare attachments folder",
-        "Start service db", "Setup: psql -c 'select 1'", "Stop services", "Remove directory",
+        "Start service db", "Setup: psql -c 'select 1'", "List tools docs", "Stop services", "Remove directory",
     ]
     ws, db = containers.builds
+    [listed] = containers.listed
+    assert listed["image"] == ws["tag"] and listed["service_network"] is not None  # services are up
     assert db["dockerfile"] == ".exradius.Dockerfile" and db["files"] == {"init.sql", ".exradius.Dockerfile"}
     assert containers.setup_images == [ws["tag"]]
     assert containers.services == {}  # stopped
@@ -273,3 +278,59 @@ async def test_heartbeat_upserts_and_removes_its_row(sessions):
     await heartbeat.stop()
     async with sessions() as session:
         assert await session.get(Worker, "w1") is None
+
+
+# Tools for agent routing (docs/agent-routing.md §3.1) ------------------------------------------
+
+
+async def test_tools_are_listed_and_stored(verifier, sessions, containers, project):
+    from exradius.models import ConnectionTools
+    from exradius.routing import definition_hash
+    from exradius.project_state import cached
+
+    tools = [{"name": "search", "description": "Search the docs.", "annotations": {"readOnlyHint": True}},
+             {"name": "write_page", "description": "Write a page."}]
+    containers.tool_lists["docs"] = tools
+    vid = await new_verification(sessions, project.id)
+    await verifier.run(vid)
+    verification = await get(sessions, vid)
+    assert verification.state == "passed"
+    assert {s["name"]: s for s in verification.steps}["List tools docs"]["log"] == "2 tools: search, write_page"
+    [call] = containers.listed
+    assert call["spec"]["name"] == "docs" and call["spec"]["url"] == "https://mcp.example/mcp"
+    assert call["image"] == "acme/node:1" and call["run_id"] == f"verify-{vid}" and call["runtime"].name == "claude_code"
+
+    async with sessions() as session:
+        [row] = (await session.scalars(select(ConnectionTools))).all()
+        current = cached(await session.get(type(project), project.id)).config
+    assert (row.connection, row.tools, row.verification_id) == ("docs", tools, vid)
+    assert row.definition_hash == definition_hash(current, "docs") and row.commit == verification.commit
+
+    containers.tool_lists["docs"] = tools[:1]  # a second Verify replaces the row
+    vid2 = await new_verification(sessions, project.id)
+    await verifier.run(vid2)
+    async with sessions() as session:
+        [row] = (await session.scalars(select(ConnectionTools))).all()
+    assert row.tools == tools[:1] and row.verification_id == vid2
+
+
+async def test_a_connection_that_cannot_list_fails_verify(verifier, sessions, containers, project):
+    containers.tool_failures["docs"] = "McpError: Connection closed"
+    vid = await new_verification(sessions, project.id)
+    await verifier.run(vid)
+    verification = await get(sessions, vid)
+    assert verification.state == "failed"
+    assert verification.error == "List tools docs: McpError: Connection closed"
+    steps = {s["name"]: s for s in verification.steps}
+    assert steps["List tools docs"]["state"] == "failed"
+    assert steps["List tools docs"]["log"] == "McpError: Connection closed\nnpm ERR! 404 @acme/docs-mcp"
+    assert steps["Remove directory"]["state"] == "passed"
+
+
+async def test_unused_connections_are_not_listed(verifier, sessions, containers, configured, remote_repo):
+    unused = (VERIFY_CONFIG % remote_repo).replace("    connections: [docs]\n", "")
+    commit_config(configured["remote"], {"exradius.yaml": unused})
+    vid = await new_verification(sessions, configured["project"].id)
+    await verifier.run(vid)
+    assert (await get(sessions, vid)).state == "passed"
+    assert containers.listed == []

@@ -44,9 +44,12 @@ agents:
 """
 """Agents out of slug order, one without a name; a required key, ``API_KEY``."""
 
+JIRA = "projects: [PLANE]\n"
+"""``bridges/jira.yaml`` of every project ``add_plane`` adds, unless told otherwise."""
+
 PLANE_DIRECTORY = {"slug": "plane", "name": "Plane", "runnable": False, "repositories": [], "agents": [
     {"slug": "developer", "name": "Developer"}, {"slug": "scout", "name": "Scout"},
-]}
+], "bridge_config": {"projects": ["PLANE"]}, "bridge_config_error": None}
 
 
 def wait_for(predicate, timeout: float = 10.0):
@@ -63,8 +66,9 @@ def login(client) -> None:
     assert client.post("/api/auth/login", json={"username": "admin", "password": "correct horse"}).status_code == 200
 
 
-def add_plane(admin, tmp_path, config: str = PLANE) -> tuple[dict, object]:
-    remote = make_config_repo(tmp_path, {"exradius.yaml": config}, name=f"plane-{uuid.uuid4().hex[:6]}")
+def add_plane(admin, tmp_path, config: str = PLANE, bridges: dict[str, str] | None = None) -> tuple[dict, object]:
+    files = {"exradius.yaml": config, **{f"bridges/{n}.yaml": t for n, t in (bridges or {"jira": JIRA}).items()}}
+    remote = make_config_repo(tmp_path, files, name=f"plane-{uuid.uuid4().hex[:6]}")
     created = admin.post("/api/projects", json={"config_url": str(remote)})
     assert created.status_code == 201, created.text
     return created.json(), remote
@@ -78,8 +82,8 @@ def notices(control) -> list[list[str]]:
     return [n["payload"]["projects"] for n in control.directory]
 
 
-def new_token(admin, name: str = "jira") -> str:
-    created = admin.post("/api/integration-tokens", json={"name": name})
+def new_token(admin, bridge: str = "jira", name: str | None = None) -> str:
+    created = admin.post("/api/integration-tokens", json={"bridge": bridge, "name": name})
     assert created.status_code == 201, created.text
     return created.json()["token"]
 
@@ -306,8 +310,9 @@ def test_directory(admin, client, tmp_path):
 
     answer = client.get("/api/integration/v1/directory", headers=bearer(token))
     assert answer.status_code == 200 and answer.headers["content-type"] == "application/json"
-    assert answer.json() == {"projects": [
-        {"slug": "broken", "name": "broken", "runnable": False, "repositories": [], "agents": []},
+    assert answer.json() == {"bridge": "jira", "projects": [
+        {"slug": "broken", "name": "broken", "runnable": False, "repositories": [], "agents": [],
+         "bridge_config": {"projects": ["PLANE"]}, "bridge_config_error": None},  # read despite the errors
         PLANE_DIRECTORY,
         {**PLANE_DIRECTORY, "slug": "zeta", "name": "Zeta"},
     ]}
@@ -328,7 +333,8 @@ def test_directory_lists_repositories(admin, client, control, tmp_path):
     project, remote = add_plane(admin, tmp_path, PLANE + REPOS)
     headers = bearer(new_token(admin))
     [entry] = client.get("/api/integration/v1/directory", headers=headers).json()["projects"]
-    assert list(entry) == ["slug", "name", "runnable", "repositories", "agents"]
+    assert list(entry) == ["slug", "name", "runnable", "repositories", "agents", "bridge_config",
+                           "bridge_config_error"]
     assert entry["repositories"] == [  # config order, without userinfo
         {"name": "web", "url": "https://github.com/acme/plane-web.git"},
         {"name": "api", "url": "git@github.com:acme/plane-api.git"},
@@ -406,24 +412,29 @@ def test_tokens_are_not_admin_credentials(admin, client):
     admin.post("/api/auth/logout")
     assert client.get("/api/projects", headers=bearer(token)).status_code == 401
     assert client.get("/api/integration-tokens", headers=bearer(token)).status_code == 401
-    assert client.post("/api/integration-tokens", json={"name": "x"}).status_code == 401
+    assert client.post("/api/integration-tokens", json={"bridge": "x"}).status_code == 401
 
 
 def test_token_management(admin, sync_db):
-    created = admin.post("/api/integration-tokens", json={"name": "  jira "})
+    created = admin.post("/api/integration-tokens", json={"bridge": " jira ", "name": "  jira "})
     assert created.status_code == 201
     body = created.json()
-    assert body["name"] == "jira" and body["token"].startswith("exr_") and len(body["token"]) == 4 + 43
+    assert body["name"] == "jira" and body["bridge"] == "jira"
+    assert body["token"].startswith("exr_") and len(body["token"]) == 4 + 43
     assert body["last_used_at"] is None and body["revoked_at"] is None
     row = sync_db.scalar(select(IntegrationToken))
     assert row.token_hash == hashlib.sha256(body["token"].encode()).hexdigest()  # only the hash is stored
 
-    assert admin.post("/api/integration-tokens", json={"name": "jira"}).status_code == 409
-    assert admin.post("/api/integration-tokens", json={"name": " "}).status_code == 422
+    assert admin.post("/api/integration-tokens", json={"bridge": "jira"}).status_code == 409  # name defaults to it
+    assert admin.post("/api/integration-tokens", json={"bridge": "jira", "name": " "}).status_code == 422
+    for bridge in ("Jira", "1jira", "ji ra", ""):
+        assert admin.post("/api/integration-tokens", json={"bridge": bridge}).status_code == 422, bridge
+    rotated = admin.post("/api/integration-tokens", json={"bridge": "jira", "name": "jira-2"}).json()
+    assert rotated["bridge"] == "jira"  # two tokens may share a bridge
     other = new_token(admin, "slack")
     assert other != body["token"]
     listed = admin.get("/api/integration-tokens")
-    assert [t["name"] for t in listed.json()] == ["jira", "slack"]
+    assert [(t["name"], t["bridge"]) for t in listed.json()] == [("jira", "jira"), ("jira-2", "jira"), ("slack", "slack")]
     assert body["token"] not in listed.text and row.token_hash not in listed.text
     assert all("token" not in t and "token_hash" not in t for t in listed.json())
 
@@ -495,11 +506,154 @@ async def test_notice_message_on_the_wire():
 
     exchange = Exchange()
     await messaging.EventPublisher(exchange).publish_directory(
-        DirectoryEvent(payload=DirectoryChangedPayload(projects=["plane"]))
+        DirectoryEvent(payload=DirectoryChangedPayload(projects=["plane"], bridges=["jira"]))
     )
     [(message, key)] = exchange.sent
     assert key == "directory.changed"
     assert (message.content_type, message.type) == ("application/json", "directory_changed")
     body = json.loads(message.body)
     assert list(body) == ["version", "type", "timestamp", "payload"]
-    assert body["payload"] == {"projects": ["plane"]} and body["timestamp"].endswith("Z")
+    assert body["payload"] == {"projects": ["plane"], "bridges": ["jira"]} and body["timestamp"].endswith("Z")
+
+
+# Bridge files (§6, config-repo.md §2.1) -------------------------------------------------------------
+
+
+def test_bridge_files_are_read_with_the_config(tmp_path, settings):
+    remote = make_config_repo(tmp_path, {
+        "exradius.yaml": PLANE,
+        "bridges/jira.yaml": "projects: [PLANE]\nsince: 2026-11-08\n",
+        "bridges/github.yaml": "repos: [acme/plane\n",
+        "bridges/slack.yaml": "- not a mapping\n",
+        "bridges/Bad Name.yaml": "x: 1\n",
+        "bridges/notes.md": "hello\n",
+        "bridges/huge.yaml": "x: '" + "y" * (65 * 1024) + "'\n",
+    })
+    snapshot = read_snapshot(settings.data_dir, uuid.uuid4(), str(remote))
+    assert snapshot.config is not None and snapshot.errors == []  # problems are warnings only
+    assert snapshot.bridges["jira"] == {"config": {"projects": ["PLANE"], "since": "2026-11-08"}}  # as JSON
+    assert snapshot.bridges["github"]["error"].startswith("bridges/github.yaml: not valid YAML: line 2")
+    assert snapshot.bridges["slack"] == {"error": "bridges/slack.yaml: must be a mapping"}
+    assert snapshot.bridges["huge"] == {"error": "bridges/huge.yaml: larger than 64 KiB"}
+    assert set(snapshot.bridges) == {"jira", "github", "slack", "huge"}
+    assert "bridges/Bad Name.yaml: ignored; a bridge file is a regular file <name>.yaml, the name in [a-z][a-z0-9-]*" in snapshot.warnings
+    assert any(w.startswith("bridges/notes.md: ignored") for w in snapshot.warnings)
+    assert any(w.startswith("bridges/github.yaml: not valid YAML") for w in snapshot.warnings)
+    again = snapshot.from_json(snapshot.to_json())
+    assert again.bridges == snapshot.bridges
+
+
+def test_bridge_files_next_to_a_nested_config_and_despite_errors(tmp_path, settings):
+    remote = make_config_repo(tmp_path, {
+        ".exradius/exradius.yaml": PLANE + "notez: x\n",
+        ".exradius/bridges/jira.yaml": JIRA,
+        "bridges/jira.yaml": "projects: [OTHER]\n",  # not next to the config: not read
+    })
+    snapshot = read_snapshot(settings.data_dir, uuid.uuid4(), str(remote))
+    assert snapshot.config is None and snapshot.errors
+    assert snapshot.bridges == {"jira": {"config": {"projects": ["PLANE"]}}}
+
+
+def test_a_view_per_bridge(admin, client, tmp_path):
+    add_plane(admin, tmp_path, bridges={"jira": JIRA, "github": "repos: [acme/plane]\n"})
+    add_plane(admin, tmp_path, PLANE.replace("slug: plane", "slug: saleor").replace("name: Plane", "name: Saleor"),
+              bridges={"github": "repos: [acme/saleor]\n"})
+    add_plane(admin, tmp_path, PLANE.replace("slug: plane", "slug: zeta"), bridges={"jira": "projects: [ZE\n"})
+    jira = client.get("/api/integration/v1/directory", headers=bearer(new_token(admin, "jira"))).json()
+    github = client.get("/api/integration/v1/directory", headers=bearer(new_token(admin, "github"))).json()
+    slack = client.get("/api/integration/v1/directory", headers=bearer(new_token(admin, "slack"))).json()
+    assert [p["slug"] for p in jira["projects"]] == ["plane", "zeta"]
+    assert jira["projects"][0]["bridge_config"] == {"projects": ["PLANE"]}
+    broken = jira["projects"][1]
+    assert broken["bridge_config"] is None and broken["bridge_config_error"].startswith("bridges/jira.yaml: not valid YAML")
+    assert [(p["slug"], p["bridge_config"]) for p in github["projects"]] == [
+        ("plane", {"repos": ["acme/plane"]}), ("saleor", {"repos": ["acme/saleor"]})]
+    assert "PLANE" not in json.dumps(github)  # only its own file
+    assert slack == {"bridge": "slack", "projects": []}
+
+
+def test_a_changed_bridge_file_sends_a_notice_naming_it(admin, control, tmp_path):
+    project, remote = add_plane(admin, tmp_path, bridges={"jira": JIRA, "github": "repos: [acme/plane]\n"})
+    assert control.directory[-1]["payload"] == {"projects": ["plane"], "bridges": ["github", "jira"]}
+
+    def reread():
+        assert admin.post(f"/api/projects/{project['id']}/reread").status_code == 200
+
+    commit_config(remote, {"bridges/jira.yaml": "projects: [PLANE, PLN]\n"})
+    reread()
+    assert control.directory[-1]["payload"] == {"projects": ["plane"], "bridges": ["jira"]}
+    sent = len(control.directory)
+    commit_config(remote, {"bridges/jira.yaml": "projects: [PLANE, PLN]  # comment\n"})
+    reread()
+    assert len(control.directory) == sent  # same content
+    commit_config(remote, {"bridges/github.yaml": None})
+    reread()
+    assert control.directory[-1]["payload"] == {"projects": ["plane"], "bridges": ["github"]}
+
+
+def test_project_page_lists_bridge_files(admin, tmp_path):
+    project, _ = add_plane(admin, tmp_path, bridges={"jira": JIRA, "github": "repos: [x\n"})
+    page = admin.get(f"/api/projects/{project['id']}").json()
+    assert [(b["name"], b["config"], b["error"] is not None) for b in page["bridges"]] == [
+        ("github", None, True), ("jira", {"projects": ["PLANE"]}, False)]
+    assert any(w.startswith("bridges/github.yaml: not valid YAML") for w in page["warnings"])
+    assert page["runnable"] is False and page["health"] == "missing_secrets"  # unchanged by bridge files
+    assert page["bridge_problems"] == []
+
+
+# Bridge status (§7) ----------------------------------------------------------------------------------
+
+
+def report(*problems, software="exradius-jira 0.2.0 (exradius-bridge-kit 0.1.0)") -> dict:
+    return {"version": 1, "software": software, "started_at": "2026-11-08T17:00:00Z",
+            "problems": [{"project": p, "message": m} for p, m in problems]}
+
+
+def test_status_is_stored_per_bridge_and_replaced(admin, client, tmp_path):
+    project, _ = add_plane(admin, tmp_path)
+    jira = new_token(admin, "jira")
+    url = "/api/integration/v1/status"
+    assert client.put(url, json=report(("plane", "bridges/jira.yaml: projects: PLANE is also claimed by bank"),
+                                       (None, "Jira answered 401 for the bot account")),
+                      headers=bearer(jira)).status_code == 204
+    [bridge] = admin.get("/api/bridges").json()
+    assert (bridge["bridge"], bridge["tokens"], bridge["projects"], bridge["reporting"]) == ("jira", 1, ["plane"], True)
+    assert bridge["software"] == "exradius-jira 0.2.0 (exradius-bridge-kit 0.1.0)"
+    assert [p["message"] for p in bridge["problems"]] == [
+        "bridges/jira.yaml: projects: PLANE is also claimed by bank", "Jira answered 401 for the bot account"]
+    page = admin.get(f"/api/projects/{project['id']}").json()
+    assert [(p["bridge"], p["message"]) for p in page["bridge_problems"]] == [
+        ("jira", "bridges/jira.yaml: projects: PLANE is also claimed by bank")]
+
+    assert client.put(url, json=report(), headers=bearer(jira)).status_code == 204  # replaces
+    [bridge] = admin.get("/api/bridges").json()
+    assert bridge["problems"] == []
+    assert admin.get(f"/api/projects/{project['id']}").json()["bridge_problems"] == []
+
+
+def test_status_limits_and_auth(admin, client):
+    url = "/api/integration/v1/status"
+    token = new_token(admin, "jira")
+    assert client.put(url, json=report()).status_code == 401
+    too_many = report(*[(None, f"problem {i}") for i in range(101)])
+    assert client.put(url, json=too_many, headers=bearer(token)).status_code == 413
+    assert client.put(url, json=report((None, "x" * 1001)), headers=bearer(token)).status_code == 413
+    huge = {**report(), "software": "", "padding": "x" * (65 * 1024)}
+    assert client.put(url, json=huge, headers=bearer(token)).status_code == 413
+    assert client.put(url, json={"version": 2}, headers=bearer(token)).status_code == 422
+    assert client.put(url, content=b"not json", headers=bearer(token)).status_code == 422
+    assert admin.put(url, json=report()).status_code == 401  # the admin session does not count
+
+
+def test_bridges_list_covers_tokens_files_and_silence(admin, client, sync_db, tmp_path):
+    from exradius.models import BridgeStatus
+
+    add_plane(admin, tmp_path, bridges={"github": "repos: [acme/plane]\n"})
+    slack = new_token(admin, "slack")
+    client.put("/api/integration/v1/status", json=report(), headers=bearer(slack))
+    sync_db.execute(update(BridgeStatus).values(reported_at=utcnow() - timedelta(minutes=16)))
+    sync_db.commit()
+    bridges = {b["bridge"]: b for b in admin.get("/api/bridges").json()}
+    assert set(bridges) == {"github", "slack"}
+    assert (bridges["github"]["tokens"], bridges["github"]["projects"], bridges["github"]["reported_at"]) == (0, ["plane"], None)
+    assert bridges["slack"]["reporting"] is False and bridges["slack"]["reported_at"] is not None

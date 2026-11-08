@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 
 from exradius import catalog, config_repo, directory
+from exradius.api import integration_routes
 from exradius.api.deps import DB, Admin, AppState, State, get_or_404
 from exradius.config_repo import ProjectConfigSnapshot
 from exradius.crypto import new_hook_token
@@ -119,6 +120,9 @@ async def _project_out(session, state: AppState, project: Project, *, caches_siz
         cache_bytes=await caches.sizes.get(data_dir, project.slug) if caches_size else None,
         hook_url=hook_url(state, project),
         hook_last_at=project.hook_last_at,
+        bridges=[s.BridgeFileOut(name=name, config=file.get("config"), error=file.get("error"))
+                 for name, file in sorted(snapshot.bridges.items())],
+        bridge_problems=await integration_routes.bridge_problems(session, project.slug),
     )
 
 

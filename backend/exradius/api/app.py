@@ -14,7 +14,16 @@ from sqlalchemy.exc import IntegrityError
 from starlette.middleware.sessions import SessionMiddleware
 
 from exradius import messaging
-from exradius.api import config_routes, hooks, integration_routes, internal, provider_routes, system_routes, task_routes
+from exradius.api import (
+    config_routes,
+    hooks,
+    integration_routes,
+    internal,
+    provider_routes,
+    routing_routes,
+    system_routes,
+    task_routes,
+)
 from exradius.api.deps import DB, Admin, AppState
 from exradius.config import Settings, get_settings
 from exradius.crypto import SecretBox, hash_password, verify_password
@@ -135,6 +144,7 @@ def create_app(
     settings: Settings | None = None,
     store: ObjectStore | None = None,
     broker: Any = None,
+    router: Any = None,
 ) -> FastAPI:
     settings = settings or get_settings()
 
@@ -151,6 +161,7 @@ def create_app(
             store=object_store,
             box=SecretBox(settings.secret_key),
             broker=publisher,
+            router=router,
         )
         app.state.exradius.rereads = hooks.make_rereads(app.state.exradius)
         await ensure_admin(sessions, settings)
@@ -194,5 +205,7 @@ def create_app(
     app.include_router(hooks.router)
     app.include_router(integration_routes.router)
     app.include_router(integration_routes.admin_router)
+    app.include_router(integration_routes.bridges_router)
+    app.include_router(routing_routes.router)
     app.include_router(internal.router)
     return app

@@ -1,5 +1,5 @@
 """Container entrypoint: ``exradius-runner <run_id>`` (or ``exradius-runner --probe <runtime>``
-to test a provider).
+to test a provider, or ``exradius-runner --list-tools`` to list a connection's tools).
 
 Fetches the run spec, hosts the ``exradius`` MCP server, drives the runtime session and
 streams every event to the internal API. Exits after reporting the outcome; on
@@ -164,6 +164,11 @@ def run() -> None:
         runtime_name = args[0] if args and not args[0].startswith("--") else "claude_code"
         model = args[args.index("--model") + 1] if "--model" in args[:-1] else None
         raise SystemExit(asyncio.run(probe(runtime_name, environment, model)))
+    if len(sys.argv) > 1 and sys.argv[1] == "--list-tools":
+        # exradius-runner --list-tools (docs/agent-routing.md §3.1)
+        from exradius.runner import list_tools
+
+        raise SystemExit(asyncio.run(list_tools.main(dict(environment.container))))
     run_id = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("EXRADIUS_RUN_ID", "")
     if not run_id:
         print("usage: exradius-runner <run_id>", file=sys.stderr)

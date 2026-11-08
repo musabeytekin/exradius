@@ -119,6 +119,12 @@ class ProviderCredential:
     settings: dict[str, Any] = field(default_factory=dict)
 
 
+LIST_TOOLS_SPEC = "EXRADIUS_LIST_TOOLS"
+"""``exradius-runner --list-tools`` reads the connection, secrets substituted, from this
+variable (docs/agent-routing.md §3.1); MCP servers never see it."""
+LIST_TOOLS_FILE = "exradius-list-tools.json"
+"""...and writes ``{"ok": ..., "tools": [...], "error": ...}`` to this file in ``/tmp``."""
+
 PROBE_PREFIX = "EXRADIUS_PROBE "
 """The provider probe prints its result as one line ``EXRADIUS_PROBE {"ok": ..., ...}``."""
 

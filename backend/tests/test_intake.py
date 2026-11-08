@@ -33,7 +33,7 @@ async def test_accepts_and_persists_task(sessions, store, configured, accept):
     [event] = intake.events
     envelope = event.envelope
     assert envelope.routing_key == "task.status"
-    assert envelope.payload == {"state": "queued", "previous": None, "reason": None}
+    assert envelope.payload == {"state": "queued", "previous": None, "reason": None, "routing": {"method": "named"}}
     assert (envelope.project, envelope.agent, envelope.correlation) == ("billing-platform", "bug-fixer", {"ticket": 1})
     assert envelope.run_id == str(intake.run_id)
 

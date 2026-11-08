@@ -70,11 +70,12 @@ A profile is what the decision knows about one agent:
   some agent uses: "List tools github". It runs in the workstation image with the run's
   environment, the run network (so a `postgres` connection reaches the service) and the
   runtime bundle mounted read-only, as the agent would. The bundle's
-  `exradius-runner list-tools` reads the connection spec with secrets substituted from a
-  file in the throwaway directory (mode 600, removed with it), starts the server, sends
-  `initialize` and `tools/list` (following `nextCursor`), and prints the tools as JSON. It
-  uses the `mcp` client that the Agent SDK already brings into the bundle. Each step times
-  out after 60 seconds.
+  `exradius-runner --list-tools` reads the connection spec with secrets substituted from
+  `EXRADIUS_LIST_TOOLS` (removed before the server starts, so the server never sees it),
+  starts the server, sends `initialize` and `tools/list` (following `nextCursor`), and
+  writes the tools to `/tmp/exradius-list-tools.json` in the throwaway directory, since a
+  long list does not fit a log line. It uses the `mcp` client that the Agent SDK already
+  brings into the bundle. Each step times out after 60 seconds.
 - **A failure fails Verify** (decided): the agent would not get those tools in a run either.
   The step's log shows the error, as other steps do.
 - **Stored per connection,** in a new table:
@@ -147,8 +148,9 @@ OpenAI key.
 - **Profiles first, the ticket last.** The developer message and the profiles are the same
   for every task of the project, so they end at an explicit cache breakpoint
   (`input_json` parts cannot carry one, hence the closing text part). Profiles are sorted
-  by slug and serialised deterministically, so the prefix only changes when a role, a
-  connection or a tool list does. `prompt_cache_key` keeps each project's prefix apart.
+  by slug and sent without `tools_listed_at`, so the prefix only changes when a role, a
+  connection or a tool does. `prompt_cache_key` keeps each project's prefix apart. When
+  the profiles pass `input_json`'s limits they go as text, like a large context.
 - **The developer message** is fixed text in `exradius/routing.py`: what the profiles are,
   that the role is the agent's job description and the tools are what it can act with,
   and that the choice is the agent best able to do the whole task.
@@ -259,7 +261,7 @@ task", "the project's only agent", or "picked automatically" with the confidence
   retries over httpx, the answer's checks, `GUESS_BELOW`.
 - **Intake:** route when `agent` is missing; store `tasks.agent` (the chosen slug) and
   `runs.routing`; put `routing` on the `queued` event.
-- **Verify:** the "List tools" steps; `exradius-runner list-tools` in the runner package.
+- **Verify:** the "List tools" steps; `exradius-runner --list-tools` in the runner package.
 - **Models and migration** (`0005`): `connection_tools`, `routing_settings`, `runs.routing`.
 - **API:** the routing settings routes; the project's agent profiles
   (`GET /api/projects/{id}/agents`); `routing` on the task and run views.

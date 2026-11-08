@@ -13,6 +13,7 @@ from sqlalchemy import update
 
 from exradius import directory, messaging
 from exradius.config import Settings, get_settings
+from exradius.routing import Router
 from exradius.db import make_engine, make_session_factory
 from exradius.models import Event, utcnow
 from exradius.storage import make_store
@@ -45,6 +46,7 @@ class Worker:
         self.slots = asyncio.Semaphore(settings.worker_concurrency)
         self.containers = ContainerManager(settings)
         self.runs = RunManager(settings, self.sessions, self.store, self.containers, self.emit)
+        self.router = Router(settings.openai_base_url)
         self.verifier = ProjectVerifier(self.runs)
         self.provider_tester = ProviderTester(self.runs)
         self._background: set[asyncio.Task] = set()
@@ -93,7 +95,8 @@ class Worker:
         async with self.slots:
             try:
                 intake = await accept_task(
-                    self.sessions, self.store, message.body, box=self.runs.box, data_dir=self.settings.data_dir
+                    self.sessions, self.store, message.body, box=self.runs.box, data_dir=self.settings.data_dir,
+                    router=self.router,
                 )
             except Exception:
                 log.exception("task intake failed; message will be redelivered")

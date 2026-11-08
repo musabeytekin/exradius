@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("publish-task", help="publish a task to exradius.tasks")
     p.add_argument("--project", required=True)
-    p.add_argument("--agent", required=True)
+    p.add_argument("--agent", help="an agent of the project; without it Exradius picks one (docs/agent-routing.md)")
     p.add_argument("--instructions", required=True)
     p.add_argument("--task-id")
     p.add_argument("--context", help="JSON value")

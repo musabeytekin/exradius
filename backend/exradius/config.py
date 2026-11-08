@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     """Seeds the admin user at API start when none exists. It does not change an existing
     password; that is done in the panel."""
 
+    openai_base_url: str = "https://api.openai.com/v1"
+    """Where agent routing calls OpenAI's Decisions API (docs/agent-routing.md §7): a proxy
+    the installer runs, or a fake in tests. The key itself is set in the panel."""
+
     anthropic_api_key: str | None = None
     """Legacy: read once, at API start, to create the default provider "Anthropic
     (migrated)" when no provider exists (docs/providers.md §3). Never passed to runs."""

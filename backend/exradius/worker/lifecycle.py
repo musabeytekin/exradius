@@ -67,9 +67,10 @@ def run_event(session: AsyncSession, run: Run, type: EventType, payload: dict[st
 
 
 def transition(
-    session: AsyncSession, run: Run, new: State, reason: str | None = None
+    session: AsyncSession, run: Run, new: State, reason: str | None = None, *, routing: dict[str, Any] | None = None
 ) -> PendingEvent:
-    """Move the run and its task to ``new`` and record the ``task.status`` event."""
+    """Move the run and its task to ``new`` and record the ``task.status`` event;
+    ``routing`` is for the ``queued`` event of an accepted task (docs/agent-routing.md §8)."""
     previous = State(run.state) if run.state else None
     check_transition(previous, new)
     run.state = new
@@ -78,4 +79,4 @@ def transition(
     # ended_at is set by finalisation (worker/runs.py), which also guards it.
     if new == State.PREPARING and run.started_at is None:
         run.started_at = utcnow()
-    return run_event(session, run, "status", status_payload(new, previous, reason))
+    return run_event(session, run, "status", status_payload(new, previous, reason, routing))

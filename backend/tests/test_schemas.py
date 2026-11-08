@@ -50,7 +50,7 @@ def test_version_defaults_to_1_when_building_messages():
     assert TaskMessage(task_id="t", project="p", agent="a", instructions="i").version == 1
 
 
-@pytest.mark.parametrize("field", ["task_id", "project", "agent", "instructions"])
+@pytest.mark.parametrize("field", ["task_id", "project", "instructions"])
 def test_required_fields(field):
     data = dict(TASK)
     data.pop(field)
@@ -145,3 +145,26 @@ def test_result_urls_must_be_http(url):
         ResultPayload(state="completed", artifacts=[{"name": "a", "content_type": "t", "url": url}])
     ok = ResultPayload(state="completed", transcript_url="https://exradius.example.com/api/runs/r/transcript?sig=x")
     assert ok.transcript_url.startswith("https://")
+
+
+@pytest.mark.parametrize("agent", [None, "absent"])
+def test_agent_is_optional(agent):
+    """A task without an agent is routed (docs/agent-routing.md §2)."""
+    data = dict(TASK)
+    if agent is None:
+        data["agent"] = None
+    else:
+        data.pop("agent")
+    assert TaskMessage.model_validate(data).agent is None
+    with pytest.raises(ValidationError):
+        TaskMessage.model_validate({**TASK, "agent": ""})
+
+
+def test_routing_on_the_status_payload():
+    named = status_payload(State.QUEUED, None, routing={"method": "named"})
+    assert named["routing"] == {"method": "named"}
+    decided = status_payload(State.QUEUED, None, routing={
+        "method": "decided", "confidence": 0.48, "guess": True, "probabilities": {"a": 0.6, "b": 0.4}})
+    assert decided["routing"] == {"method": "decided", "confidence": 0.48, "guess": True,
+                                  "probabilities": {"a": 0.6, "b": 0.4}}
+    assert "routing" not in status_payload(State.RUNNING, State.PREPARING)

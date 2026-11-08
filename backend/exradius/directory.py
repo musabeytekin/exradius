@@ -1,5 +1,5 @@
-"""The directory of projects and agents for integrations, and the notice sent when it
-changes (docs/integration-api.md §3, §4).
+"""The directory of projects for bridges, and the notice sent when it changes
+(docs/integration-api.md §3, §4).
 
 The directory is built from the snapshots cached on ``projects.snapshot``, so it is only
 for offering choices: intake still reads the config afresh. ``check`` runs after every
@@ -50,9 +50,9 @@ def without_userinfo(url: str) -> str:
 
 
 async def build(session: AsyncSession) -> dict[str, Any]:
-    """The body of ``GET /api/integration/v1/directory``: projects by slug, each with its
-    name, ``runnable`` (the project health's), its repositories in config order and its
-    agents by slug: names and repository URLs only."""
+    """The full directory: projects by slug, each with its name, ``runnable`` (the project
+    health's), its repositories in config order, its agents by slug (names and repository
+    URLs only) and every bridge file of its config. A bridge sees its ``view`` of it."""
     entries = []
     for project in (await session.scalars(select(Project))).all():
         snapshot = cached(project) or ProjectConfigSnapshot.unreadable("the config has not been read yet")
@@ -69,8 +69,37 @@ async def build(session: AsyncSession) -> dict[str, Any]:
             "agents": [] if config is None else [
                 {"slug": slug, "name": config.agent_name(slug)} for slug in sorted(config.agents)
             ],
+            # Read even when the config has errors (config-repo.md §2.1).
+            "bridges": {name: snapshot.bridges[name] for name in sorted(snapshot.bridges)},
         })
     return {"projects": sorted(entries, key=lambda e: e["slug"])}
+
+
+def view(directory: dict[str, Any], bridge: str) -> dict[str, Any]:
+    """What a token bound to ``bridge`` reads (integration-api.md §4): the projects whose
+    config has ``bridges/<bridge>.yaml``, each with that file only."""
+    projects = []
+    for entry in directory.get("projects", []):
+        file = (entry.get("bridges") or {}).get(bridge)
+        if file is None:
+            continue
+        projects.append({
+            **{k: v for k, v in entry.items() if k != "bridges"},
+            "bridge_config": file.get("config"),
+            "bridge_config_error": file.get("error"),
+        })
+    return {"bridge": bridge, "projects": projects}
+
+
+def bridge_names(directory: dict[str, Any]) -> list[str]:
+    """Every bridge that some project's config has a file for."""
+    return sorted({name for entry in directory.get("projects", []) for name in entry.get("bridges") or {}})
+
+
+def changed_bridges(previous: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    """Bridges whose view differs."""
+    names = set(bridge_names(previous)) | set(bridge_names(current))
+    return sorted(name for name in names if view(previous, name) != view(current, name))
 
 
 def encode(directory: dict[str, Any]) -> bytes:
@@ -121,7 +150,9 @@ async def check(sessions: SessionFactory, publish: Publish) -> bool:
             if previous == current:
                 await session.commit()
                 return False
-            event = DirectoryEvent(payload=DirectoryChangedPayload(projects=changed_projects(previous, current)))
+            event = DirectoryEvent(payload=DirectoryChangedPayload(
+                projects=changed_projects(previous, current), bridges=changed_bridges(previous, current),
+            ))
             try:
                 await publish(event)
             except Exception as exc:  # noqa: BLE001 - logged; the next check publishes again

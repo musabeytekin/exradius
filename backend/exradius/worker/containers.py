@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -14,6 +15,7 @@ from docker.errors import APIError, NotFound
 from docker.types import Mount
 
 from exradius.config import Settings
+from exradius.runtimes.base import LIST_TOOLS_FILE, LIST_TOOLS_SPEC
 from exradius.worker.bundles import ENTRYPOINT, LABEL_ROLE, ROLE_BUNDLE, RuntimeBundles, RuntimeMount
 from exradius.worker import caches as cache_dirs
 from exradius.worker import git_identity, prepare
@@ -39,6 +41,8 @@ SERVICE_POLL_INTERVAL = 1.0
 SERVICE_RUNNING_GRACE = 1.0
 """A service without a readiness check counts as ready once it has run this long."""
 INSPECT_TIMEOUT = 60
+LIST_TOOLS_TIMEOUT = 60
+"""Seconds for one connection's "List tools" step (docs/agent-routing.md §3.1)."""
 
 INSPECT_CLONES_SCRIPT = r"""
 cd /work || exit 0
@@ -110,6 +114,14 @@ def listening_ports(proc_net: str) -> set[int]:
             except ValueError:
                 continue
     return ports
+
+
+@dataclass
+class ListedTools:
+    tools: list[dict] | None
+    """``None`` when the server could not list them; ``error`` says why."""
+    error: str | None
+    logs: str
 
 
 @dataclass
@@ -324,6 +336,54 @@ class ContainerManager:
             caches=caches,
         )
         return await self.wait(container.id)
+
+    async def list_tools(
+        self,
+        *,
+        image: str,
+        run_id: str,
+        paths: RunPaths,
+        env: dict[str, str],
+        spec: dict,
+        runtime: RuntimeMount,
+        service_network: str | None = None,
+        memory: int | None = None,
+        caches: list[CacheMount] = (),
+        timeout: float = LIST_TOOLS_TIMEOUT,
+    ) -> ListedTools:
+        """``exradius-runner --list-tools`` in the workstation, as the agent's container
+        is set up (docs/agent-routing.md §3.1): the connection's tools, or why not."""
+        output = paths.tmp / LIST_TOOLS_FILE
+        output.unlink(missing_ok=True)
+        container = await asyncio.to_thread(
+            self._create,
+            image=image,
+            run_id=run_id,
+            kind="tools",
+            paths=paths,
+            env={**env, LIST_TOOLS_SPEC: json.dumps(spec)},
+            entrypoint=[self.entrypoint],
+            command=["--list-tools"],
+            runtime=runtime,
+            service_network=service_network,
+            memory=memory,
+            caches=caches,
+        )
+        try:
+            async with asyncio.timeout(timeout):
+                exited = await self.wait(container.id)
+        except TimeoutError:
+            await self.remove_containers([container.id])
+            return ListedTools(None, f"the server did not list its tools within {timeout:.0f}s", "")
+        try:
+            report = json.loads(output.read_text())
+        except (OSError, ValueError):
+            return ListedTools(None, f"exited with {exited.exit_code} without a tool list", exited.logs)
+        finally:
+            output.unlink(missing_ok=True)
+        if not report.get("ok"):
+            return ListedTools(None, report.get("error") or "failed", exited.logs)
+        return ListedTools(list(report.get("tools") or []), None, exited.logs)
 
     async def inspect_clones(self, *, image: str, run_id: str, paths: RunPaths) -> ContainerExit:
         """Run the delivery check over ``/work`` mounted read-only, with no network, no

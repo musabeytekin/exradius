@@ -566,6 +566,15 @@ def _check(config: ProjectConfig, config_dir: str, lookup: Lookup | None, errors
             seen.add(name)
 
 
+def load_yaml(text: str) -> Any:
+    """YAML with the safe loader, refusing a key given twice."""
+    return yaml.load(text, Loader=_UniqueKeyLoader)  # noqa: S506 - a SafeLoader subclass
+
+
+def yaml_error(exc: Exception) -> str:
+    return _yaml_error(exc) if isinstance(exc, yaml.YAMLError) else str(exc)
+
+
 def _yaml_error(exc: yaml.YAMLError) -> str:
     if isinstance(exc, yaml.MarkedYAMLError) and exc.problem_mark is not None:
         mark = exc.problem_mark

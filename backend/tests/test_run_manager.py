@@ -16,7 +16,14 @@ from exradius.crypto import hash_token
 from exradius.models import Artifact, ImageBuild, InfoRequest, Run, SecretStore, SecretStoreEntry, Task, TranscriptChunk
 from exradius.states import State
 from exradius.worker.bundles import RuntimeMount
-from exradius.worker.containers import ContainerExit, RunContainer, ServiceFailed, ServiceStarted, run_network_name
+from exradius.worker.containers import (
+    ContainerExit,
+    ListedTools,
+    RunContainer,
+    ServiceFailed,
+    ServiceStarted,
+    run_network_name,
+)
 from exradius.worker.intake import accept_answer
 from exradius.worker.runs import RunManager
 from tests.conftest import BASE_CONFIG, commit_config
@@ -47,6 +54,9 @@ class FakeContainers:
         self.build_ok = True
         self.setup_images: list[str] = []
         self.setup_limits: list[tuple] = []  # (memory, caches) per setup command
+        self.tool_lists: dict[str, list[dict]] = {}  # connection -> tools it lists
+        self.tool_failures: dict[str, str] = {}  # connection -> why it cannot list them
+        self.listed: list[dict] = []  # every list_tools call
 
     async def ensure_runtime(self, runtime):
         self.runtimes_ensured.append(runtime)
@@ -81,6 +91,15 @@ class FakeContainers:
         self.setup_images.append(image)
         self.setup_networks.append(service_network)
         return ContainerExit(self.setup_exit, "setup output\nboom" if self.setup_exit else "ok")
+
+    async def list_tools(self, *, image, run_id, paths, env, spec, runtime, service_network=None, memory=None,
+                         caches=(), timeout=60):
+        self.listed.append({"image": image, "run_id": run_id, "spec": spec, "runtime": runtime,
+                            "service_network": service_network, "env": env})
+        name = spec["name"]
+        if name in self.tool_failures:
+            return ListedTools(None, self.tool_failures[name], "npm ERR! 404 @acme/docs-mcp")
+        return ListedTools(self.tool_lists.get(name, [{"name": "search", "description": "Search."}]), None, "")
 
     async def wait(self, container_id):
         behaviour, run_id, env = self._pending.pop(container_id)

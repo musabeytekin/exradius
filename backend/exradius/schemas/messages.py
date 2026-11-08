@@ -7,7 +7,7 @@ import binascii
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_serializer, model_validator
 
 from exradius.states import State
 
@@ -68,7 +68,8 @@ class TaskMessage(_Message):
 
     task_id: str = Field(min_length=1, max_length=255)
     project: str = Field(min_length=1)
-    agent: str = Field(min_length=1)
+    agent: str | None = Field(default=None, min_length=1)
+    """Optional: without it Exradius picks one of the project's agents (agent-routing.md)."""
     instructions: str
     context: Any = None
     attachments: list[AttachmentIn] = Field(default_factory=list)
@@ -97,10 +98,36 @@ class AnswerMessage(_Message):
 # --- Outbound -----------------------------------------------------------------
 
 
+class RoutingPayload(BaseModel):
+    """How the agent was picked (agent-routing.md §8), on the ``queued`` event only."""
+
+    method: Literal["named", "only_agent", "decided"]
+    confidence: float | None = None
+    guess: bool = False
+    probabilities: dict[str, float] | None = None
+    """Agent slug to probability, for ``decided``."""
+
+    @model_serializer(mode="wrap")
+    def _decided_fields_only(self, handler):
+        data = handler(self)
+        if data.get("method") != "decided":
+            return {"method": data["method"]}
+        return data
+
+
 class StatusPayload(BaseModel):
     state: State
     previous: State | None = None
     reason: str | None = None
+    routing: RoutingPayload | None = None
+    """Only on the ``queued`` event of an accepted task."""
+
+    @model_serializer(mode="wrap")
+    def _omit_routing(self, handler):
+        data = handler(self)
+        if data.get("routing") is None:
+            data.pop("routing", None)
+        return data
 
 
 class InfoRequestPayload(BaseModel):
@@ -191,6 +218,8 @@ class DirectoryChangedPayload(BaseModel):
     projects: list[str]
     """Slugs whose directory entry was added, changed or removed. Informational: an
     integration fetches the whole directory either way."""
+    bridges: list[str] = Field(default_factory=list)
+    """Bridges whose view of the directory changed (integration-api.md §3)."""
 
 
 class DirectoryEvent(_Message):
@@ -213,5 +242,7 @@ class DirectoryEvent(_Message):
         return self.model_dump_json().encode()
 
 
-def status_payload(state: State, previous: State | None, reason: str | None = None) -> dict:
-    return StatusPayload(state=state, previous=previous, reason=reason).model_dump(mode="json")
+def status_payload(
+    state: State, previous: State | None, reason: str | None = None, routing: dict | None = None
+) -> dict:
+    return StatusPayload(state=state, previous=previous, reason=reason, routing=routing).model_dump(mode="json")

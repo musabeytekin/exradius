@@ -725,13 +725,15 @@ async def test_verification_starts_and_stops_services(manager, sessions, contain
         ("Start service postgres", "passed"),
         ("Start service redis", "passed"),
         ("Setup: make migrate", "passed"),
+        ("List tools docs", "passed"),
         ("Stop services", "passed"),
         ("Remove directory", "passed"),
     ]
     assert verification.state == "passed"
     assert "postgres:16 is ready after 0.5s (running); host name postgres" in verification.steps[3]["log"]
-    assert verification.steps[6]["log"] == "removed 2 service containers and the run network"
+    assert verification.steps[7]["log"] == "removed 2 service containers and the run network"
     assert containers.setup_networks == [f"exradius-run-verify-{vid}"]
+    assert [c["service_network"] for c in containers.listed] == [f"exradius-run-verify-{vid}"]  # services are up
     assert containers.services == {} and containers.networks == set()
 
 

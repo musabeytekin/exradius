@@ -13,7 +13,9 @@ workers under the same file lock as code mirrors. Builds read their context from
 from __future__ import annotations
 
 import io
+import json
 import posixpath
+import re
 import subprocess
 import tarfile
 import uuid
@@ -24,7 +26,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from exradius.models import utcnow
-from exradius.schemas.project_config import CONFIG_FILES, ParseResult, ProjectConfig, parse_config
+from exradius.schemas.project_config import CONFIG_FILES, ParseResult, ProjectConfig, load_yaml, parse_config, yaml_error
 from exradius.worker import prepare
 
 READ_TIMEOUT = 60
@@ -51,6 +53,9 @@ class ProjectConfigSnapshot:
     """The file read, from the repository root."""
     raw: str | None = None
     """The file's text, for the panel."""
+    bridges: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Bridge files (config-repo.md §2.1), by bridge name: ``{"config": {...}}`` or
+    ``{"error": "..."}``. Read even when the config itself has errors."""
 
     @property
     def config_dir(self) -> str:
@@ -68,6 +73,7 @@ class ProjectConfigSnapshot:
             "branch": self.branch,
             "path": self.path,
             "raw": self.raw,
+            "bridges": dict(self.bridges),
         }
 
     @classmethod
@@ -83,6 +89,7 @@ class ProjectConfigSnapshot:
             branch=data.get("branch"),
             path=data.get("path"),
             raw=data.get("raw"),
+            bridges=dict(data.get("bridges") or {}),
         )
 
     @classmethod
@@ -186,19 +193,77 @@ def read_at_commit(mirror: Path, commit: str, *, branch: str | None, path: str |
         text = _git(mirror, "cat-file", "blob", f"{commit}:{found}")
     except prepare.PreparationError as exc:
         raise ConfigReadError(str(exc)) from exc
-    result: ParseResult = parse_config(text, config_dir=posixpath.dirname(found), lookup=lookup)
+    config_dir = posixpath.dirname(found)
+    result: ParseResult = parse_config(text, config_dir=config_dir, lookup=lookup)
+    bridges, bridge_warnings = read_bridges(mirror, commit, config_dir, lookup)
     return ProjectConfigSnapshot(
         commit=commit,
         read_at=utcnow(),
         config=result.config,
         errors=result.errors,
-        warnings=result.warnings,
+        warnings=[*result.warnings, *bridge_warnings],
         required_keys=result.required_keys,
         store=result.store,
         branch=branch,
         path=found,
         raw=text,
+        bridges=bridges,
     )
+
+
+# -- bridge files (config-repo.md §2.1) ------------------------------------------------
+
+BRIDGES_DIR = "bridges"
+BRIDGE_NAME = re.compile(r"[a-z][a-z0-9-]*")
+MAX_BRIDGE_FILE = 64 * 1024
+
+
+def parse_bridge_file(text: bytes) -> tuple[dict[str, Any] | None, str | None]:
+    """The file's content as JSON-compatible data, or the problem with it. Exradius checks
+    only that it is YAML with a mapping on top, at most ``MAX_BRIDGE_FILE`` bytes."""
+    if len(text) > MAX_BRIDGE_FILE:
+        return None, f"larger than {MAX_BRIDGE_FILE // 1024} KiB"
+    try:
+        raw = load_yaml(text.decode())
+    except UnicodeDecodeError:
+        return None, "not UTF-8 text"
+    except Exception as exc:  # noqa: BLE001 - every YAML problem is reported the same way
+        return None, f"not valid YAML: {yaml_error(exc)}"
+    if not isinstance(raw, dict):
+        return None, "must be a mapping"
+    # As JSON: dates and other YAML-only values become strings, keys become strings.
+    return json.loads(json.dumps(raw, default=str)), None
+
+
+def read_bridges(
+    mirror: Path, commit: str, config_dir: str, lookup
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Every ``bridges/<name>.yaml`` next to the config file at ``commit``, and warnings
+    for entries that are not bridge files or files that are broken."""
+    folder = posixpath.join(config_dir, BRIDGES_DIR) if config_dir else BRIDGES_DIR
+    if lookup(folder) != "tree":
+        return {}, []
+    listing = subprocess.run(
+        ["git", "ls-tree", "-z", _rev(commit, folder)], cwd=mirror, capture_output=True, text=True, check=False,
+    ).stdout
+    bridges: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
+    for entry in sorted(e for e in listing.split("\0") if e):
+        meta, _, name = entry.partition("\t")
+        mode = meta.split(" ", 1)[0]
+        where = f"{folder}/{name}"
+        stem = name.removesuffix(".yaml")
+        if not name.endswith(".yaml") or not BRIDGE_NAME.fullmatch(stem) or not mode.startswith("100"):
+            warnings.append(f"{where}: ignored; a bridge file is a regular file <name>.yaml, the name in [a-z][a-z0-9-]*")
+            continue
+        content, problem = parse_bridge_file(_git_bytes(mirror, "cat-file", "blob", f"{commit}:{where}"))
+        if problem is not None:
+            message = f"{where}: {problem}"
+            warnings.append(message)
+            bridges[stem] = {"error": message}
+        else:
+            bridges[stem] = {"config": content}
+    return bridges, warnings
 
 
 # -- builds (§4) -----------------------------------------------------------------------

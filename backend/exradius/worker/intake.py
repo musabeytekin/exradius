@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from exradius import routing
 from exradius.crypto import SecretBox
 from exradius.db import SessionFactory
 from exradius.models import Attachment, InfoRequest, Project, Run, Task, utcnow
@@ -59,10 +60,18 @@ async def _store_attachment(store: ObjectStore, prefix: str, attachment: Attachm
 
 
 async def accept_task(
-    sessions: SessionFactory, store: ObjectStore, body: bytes, *, box: SecretBox, data_dir: Path
+    sessions: SessionFactory,
+    store: ObjectStore,
+    body: bytes,
+    *,
+    box: SecretBox,
+    data_dir: Path,
+    router: routing.Router | None = None,
 ) -> TaskIntake:
     """Persist a valid task for a runnable project, or record its rejection. The project's
-    config is read afresh (and cached on the project) to check the agent."""
+    config is read afresh (and cached on the project) to check the agent; a task that names
+    no agent is routed to one (docs/agent-routing.md §4)."""
+    router = router or routing.Router()
     try:
         raw = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -115,17 +124,45 @@ async def accept_task(
         if health.reason is not None:
             return await rejected(health.reason)
         assert snapshot.config is not None
-        agent = snapshot.config.agents.get(message.agent)
-        if agent is None:
-            known = ", ".join(snapshot.config.agents)
-            return await rejected(f"unknown agent {message.agent!r} in project {project.slug!r} (it defines {known})")
+        config = snapshot.config
+        if message.agent is not None:
+            if message.agent not in config.agents:
+                known = ", ".join(config.agents)
+                return await rejected(f"unknown agent {message.agent!r} in project {project.slug!r} (it defines {known})")
+            picked = routing.Routing(method="named", agent=message.agent)
+        elif len(config.agents) == 1:
+            picked = routing.Routing(method="only_agent", agent=next(iter(config.agents)))
+        else:
+            key = await router.key(session, box)
+            if key is None:
+                return await rejected(
+                    f"agent routing is not configured (no OpenAI API key), and project {project.slug} "
+                    f"has {len(config.agents)} agents"
+                )
+            request = routing.build_request(
+                project_slug=project.slug,
+                project_name=config.project.display_name,
+                agent_profiles=routing.profiles(config, await routing.stored_tools(session, project.id)),
+                task_id=message.task_id,
+                instructions=message.instructions,
+                context=message.context,
+                attachments=[(a.name, a.content_type) for a in message.attachments],
+            )
+            # The snapshot is stored first, so the call holds no transaction (or row lock).
+            await session.commit()
+            try:
+                picked = await router.decide(key, request)
+            except routing.RoutingFailed as exc:
+                return await rejected(str(exc))
+            log.info("routed task %s to %s (confidence %s)", message.task_id, picked.agent, picked.confidence)
+        agent = config.agents[picked.agent]
         if await resolve_provider(session, agent.provider) is None:
             return await rejected(provider_problem(agent.provider))
 
         task = Task(
             id=message.task_id,
             project=project,
-            agent=message.agent,
+            agent=picked.agent,
             instructions=message.instructions,
             context=message.context,
             correlation=message.correlation,
@@ -135,9 +172,9 @@ async def accept_task(
         for attachment in message.attachments:
             record = await _store_attachment(store, f"tasks/{task.id}/attachments", attachment)
             task.attachments.append(Attachment(**record))
-        run = Run(id=uuid.uuid4(), task=task, state=None)
+        run = Run(id=uuid.uuid4(), task=task, state=None, routing=picked.record())
         session.add_all([task, run])
-        event = transition(session, run, State.QUEUED)
+        event = transition(session, run, State.QUEUED, routing=picked.payload())
         try:
             await session.commit()
         except IntegrityError:  # the same task_id raced in through another worker
@@ -145,7 +182,7 @@ async def accept_task(
             return await rejected(f"duplicate task_id {message.task_id!r}")
         log.info("accepted task %s as run %s", task.id, run.id)
         return TaskIntake(
-            run_id=run.id, events=[event], memory=snapshot.config.memory_reservation(), config_read=True
+            run_id=run.id, events=[event], memory=config.memory_reservation(), config_read=True
         )
 
 

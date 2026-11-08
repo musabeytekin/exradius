@@ -25,6 +25,7 @@ class AppState:
     box: SecretBox
     broker: Any  # BrokerPublisher
     rereads: Any = None  # hooks.Rereads, set at startup
+    router: Any = None  # routing.Router; None: one for settings.openai_base_url
 
 
 def app_state(request: Request) -> AppState:

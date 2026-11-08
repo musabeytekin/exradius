@@ -123,6 +123,10 @@ class ProjectOut(BaseModel):
     """The config hook (docs/integration-api.md §2), built from ``EXRADIUS_PUBLIC_API_URL``."""
     hook_last_at: datetime | None = None
     """The last accepted hook call; ``null``: never."""
+    bridges: list["BridgeFileOut"] = Field(default_factory=list)
+    """The config's bridge files (config-repo.md §2.1)."""
+    bridge_problems: list["BridgeProblemOut"] = Field(default_factory=list)
+    """What the bridges last reported about this project (integration-api.md §7)."""
 
 
 class ResolvedConnection(BaseModel):
@@ -381,6 +385,8 @@ class RunOut(_Out):
     """name, model, provider, runtime, identity and connections of the agent at run start."""
     waiting_for: str | None = None
     """``memory`` while the run waits for its memory reservation."""
+    routing: dict[str, Any] | None = None
+    """How the agent was picked (docs/agent-routing.md §8)."""
 
 
 class TaskSummaryOut(BaseModel):
@@ -565,13 +571,20 @@ class IntegrationOut(BaseModel):
 # Integrations (docs/integration-api.md) -----------------------------------------------------
 
 
+BridgeName = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^[a-z][a-z0-9-]*$", max_length=100)]
+"""A bridge's name, as in ``bridges/<name>.yaml`` (config-repo.md §2.1)."""
+
+
 class IntegrationTokenIn(BaseModel):
-    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+    bridge: BridgeName
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)] | None = None
+    """A unique label; defaults to the bridge."""
 
 
 class IntegrationTokenOut(_Out):
     id: uuid.UUID
     name: str
+    bridge: str
     created_at: datetime
     last_used_at: datetime | None
     """Written at most once a minute."""
@@ -601,9 +614,113 @@ class DirectoryProjectOut(BaseModel):
     repositories: list[DirectoryRepositoryOut]
     """In config order."""
     agents: list[DirectoryAgentOut]
+    bridge_config: dict[str, Any] | None
+    """The token's bridge file, as written."""
+    bridge_config_error: str | None
+    """Set instead of ``bridge_config`` when the file is broken."""
 
 
 class DirectoryOut(BaseModel):
-    """``GET /api/integration/v1/directory`` (§4): projects by slug, agents by slug."""
+    """``GET /api/integration/v1/directory`` (§4): the token's bridge's projects by slug."""
 
+    bridge: str
     projects: list[DirectoryProjectOut]
+
+
+MAX_PROBLEMS = 100
+MAX_PROBLEM_MESSAGE = 1000
+
+
+class BridgeProblem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    project: str | None = None
+    """The project slug the problem is about; ``null`` for the bridge as a whole."""
+    message: str
+
+
+class BridgeStatusIn(BaseModel):
+    """``PUT /api/integration/v1/status`` (integration-api.md §7)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    version: Literal[1] = 1
+    software: Annotated[str, StringConstraints(max_length=200)] = ""
+    started_at: datetime | None = None
+    problems: list[BridgeProblem] = Field(default_factory=list)
+
+
+class BridgeOut(BaseModel):
+    """A bridge as the panel shows it: from its tokens, its files and its reports."""
+
+    bridge: str
+    tokens: int
+    """Tokens bound to it that are not revoked."""
+    projects: list[str]
+    """Projects whose config has its file."""
+    reported_at: datetime | None
+    reporting: bool
+    """A report in the last 15 minutes."""
+    software: str | None
+    started_at: datetime | None
+    problems: list[BridgeProblem]
+
+
+class BridgeFileOut(BaseModel):
+    name: str
+    config: dict[str, Any] | None
+    error: str | None
+
+
+class BridgeProblemOut(BaseModel):
+    bridge: str
+    message: str
+    reported_at: datetime
+
+
+# Agent routing (docs/agent-routing.md) --------------------------------------------------------
+
+
+class RoutingTestOut(BaseModel):
+    ok: bool
+    at: datetime
+    ms: int | None = None
+    detail: str
+    """The answer (``web, confidence 0.97``) or the error."""
+
+
+class RoutingOut(BaseModel):
+    key_set: bool
+    key_set_at: datetime | None
+    last_test: RoutingTestOut | None
+    model: str
+    guess_below: float
+
+
+class RoutingKeyIn(BaseModel):
+    key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
+
+
+class ToolOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+    description: str | None = None
+    annotations: dict[str, Any] | None = None
+
+
+class ProfileConnectionOut(BaseModel):
+    name: str
+    kind: str
+    tools: list[ToolOut] | None
+    tools_listed_at: datetime | None = None
+    tools_note: str | None = None
+
+
+class AgentProfileOut(BaseModel):
+    """What routing sees of an agent (docs/agent-routing.md §3)."""
+
+    slug: str
+    name: str
+    role: str | None
+    connections: list[ProfileConnectionOut]
