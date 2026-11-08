@@ -160,6 +160,17 @@ Payloads:
 
 Artifact `url` and `transcript_url` are HTTP download URLs served by the API server, built from its public base URL (`EXRADIUS_PUBLIC_API_URL`). Each carries a signature (`sig`), so the integration layer can download without an admin session; the transcript is JSON lines, one runtime event per line. The URLs do not depend on which object store is configured.
 
+### 4.4 Directory and config hook
+
+`docs/integration-api.md` (agreed 2026-11-08) adds three things integrations can use:
+- **Config hook:** `POST /api/hooks/config/<token>`, one per project. A git host calls it on
+  push, and Exradius re-reads the config.
+- **Directory notice:** a `directory_changed` event on `exradius.events` with routing key
+  `directory.changed`. It is sent only when the list of projects and agents changes, and it
+  belongs to no task.
+- **Directory:** `GET /api/integration/v1/directory`, the projects and their agents,
+  authenticated by an integration token created in the panel.
+
 ## 5. Run lifecycle
 
 States of a task (and its single run):
