@@ -1,7 +1,7 @@
 # Exradius on Kubernetes
 
 Status: agreed design, 2026-11-08; details settled by phase 1 folded in the same day (§23),
-and by phase 2 on 2026-11-09 (§24). Supersedes the Docker-based execution of `architecture.md`
+by phase 2 on 2026-11-09 (§24) and by phase 3 the same day (§25). Supersedes the Docker-based execution of `architecture.md`
 (§3, §5, §9, §10, the run-container parts of §12), `runtime-bundles.md` §2.2, the services
 lifecycle and networks of `environment-and-services.md` §2, and the memory budget and cache
 mounts of `run-environment.md` §4 and §5. The phases are in `kubernetes-plan.md`. The last
@@ -159,7 +159,7 @@ spec:
     env:                            # file order; secret values by key only
       - {name: DJANGO_SETTINGS_MODULE, value: saleor.settings}
       - {name: DATABASE_URL, secretKey: env.DATABASE_URL}
-    caches: [/home/runner/.cache/uv]
+    caches: [{path: /home/runner/.cache/uv, name: 0-cache_uv}]   # caches/<name> on the project volume
   repositories:
     - {folder: saleor, url: "https://github.com/acme/saleor.git", branch: main, push: true}
   services:
@@ -168,7 +168,7 @@ spec:
       command: null
       env: [{name: POSTGRES_PASSWORD, secretKey: service.db.POSTGRES_PASSWORD}]
       ports: [5432]
-      ready: {exec: [pg_isready, -U, app]}        # or {tcp: 5432}, or null
+      ready: {exec: [pg_isready, -U, app]}        # or {tcp: 5432}; absent: started when it runs
       memory: 512Mi
   git:                               # computed by git_identity.py, non-secret
     env: [{name: GIT_AUTHOR_NAME, value: Developer}, ...]
@@ -184,7 +184,8 @@ status:
     - {type: Scheduled, status: "False", reason: Unschedulable, message: "0/1 nodes: insufficient memory"}
   steps:                             # one per init container, in order
     - {name: "Clone saleor (main)", state: passed, startedAt: ..., finishedAt: ..., log: "..."}
-    - {name: "Start service db", state: running}
+    - {name: "Start service db", container: service-db, state: failed, reason: NotReady,
+       message: "did not become ready within 120s waiting for command pg_isready -U app", log: "..."}
   workstation: {state: terminated, exitCode: 137, reason: OOMKilled}
   observedGeneration: 3
 ```
@@ -208,8 +209,10 @@ status:
 - **Failures the operator decides itself:**
   - An image that cannot be pulled after three attempts fails the Run with the registry's
     message.
-  - A service not started within 120 s of its container start, or restarted before it was
-    ready, fails the Run. Kubernetes would otherwise restart a failing sidecar forever.
+  - A service not started within 120 s of its container start, or that exits or restarts
+    before it was ready, fails the Run (`reason: ServiceFailed`) with the service's log, the
+    previous instance's after a restart. Kubernetes would otherwise restart a failing
+    sidecar forever.
   - A Run that cannot be scheduled waits without a deadline (no run limits).
 - **Log tails.** The operator reads `pods/log` of each step container when it ends, and of a
   failed service, and stores the last 4000 characters on the step. Termination messages are not
@@ -222,8 +225,9 @@ status:
   over its limit is killed by its own cgroup, and `OOMKilled` becomes today's diagnosis:
   "exceeded its declared memory (6g)".
 - Undeclared memory gets the values default request (`runs.defaults.memoryRequest`, for
-  example 1 Gi) and no limit, as today.
-- CPU: a request from values and no CPU limit, because limits throttle builds and tests.
+  example 1 Gi; for a service `serviceMemoryRequest`, 256 Mi) and no limit, as today.
+- CPU: a request from values (`cpuRequest`, `serviceCpuRequest`) and no CPU limit, because
+  limits throttle builds and tests.
 - `memory.py`, `EXRADIUS_RUN_MEMORY_BUDGET` and the "Reserve memory" step go. The scheduler
   places pods by their requests. A Run that does not fit waits in `Pending`, and the panel's
   task row says "waiting for cluster capacity" (`runs.waiting_for = 'capacity'`) where it said
@@ -239,8 +243,8 @@ The worker turns the config into a Run spec (§5); the operator turns a Run spec
 
 | Order | Container | Image | Does | Mounts |
 |---|---|---|---|---|
-| init 1 | `prepare` | workstation + bundle | creates the workspace directories on first start, writes the task's attachments (fetched from the internal API) read-only, writes the marker `state/steps/prepare.done` | workspace PVC (whole) |
-| init 2..n | `clone-<n>` (n: the repository's index) | workstation + bundle | refreshes the mirror on the project volume, `git clone --local`, checks out the branch, resets `origin`; writes `state/steps/clone-<n>.done` | workspace `work`, project volume `mirrors` |
+| init 1 | `prepare` | workstation + bundle | creates the workspace directories on first start, the project volume's `mirrors/` and `caches/<name>/` and the caches' mount points below the home and `/tmp` (as the run user), writes the task's attachments (fetched from the internal API) read-only, writes the marker `state/steps/prepare.done` | workspace PVC (whole), project volume (whole) |
+| init 2..n | `clone-<n>` (n: the repository's index) | workstation + bundle | refreshes the mirror on the project volume, `git clone --no-hardlinks` from it, checks out the branch, resets `origin`; writes `state/steps/clone-<n>.done` | workspace `work`, project volume `mirrors` |
 | sidecar | `service-<name>` | the service's image | the service, with its startup probe | none |
 | init | `setup-<n>` | workstation | `/bin/sh -c <command>`, as today | workspace, caches, identity files |
 | sidecar | `files` | workstation + bundle | writes answer attachments as they arrive (§8.2) | workspace `attachments` |
@@ -312,15 +316,22 @@ worker does today.
 
   | `ready` | Startup probe |
   |---|---|
-  | `{command: [...]}` | `exec` with that command |
-  | `{tcp: p}` | `tcpSocket` on `p` |
-  | `null` | the image's `HEALTHCHECK` command when it has one, else none (started when its process starts) |
+  | `{command: [...]}` | `exec` with that command (timeout 10 s) |
+  | `{tcp: p}` | `tcpSocket` on `p`: the kubelet connects to the pod's address, so a service that listens only on 127.0.0.1 needs a command |
+  | `null` | the image's `HEALTHCHECK` command when it has one (`CMD` as is, `CMD-SHELL` as `/bin/sh -c`), else none (started when its process starts) |
 
   - Kubernetes ignores Docker's `HEALTHCHECK`. The worker reads the image config from the
-    registry and maps it, so `null` keeps today's meaning. When the config cannot be read, the
-    service counts as started.
+    registry (`worker/registry.py`: the manifest, the platform's manifest from an index, the
+    config blob; anonymous bearer tokens; the registries in `builds.insecureRegistries` over
+    HTTP; an hour's cache per reference) and writes the mapped command as `ready.exec`, so
+    `null` keeps today's meaning. When the config cannot be read, the service counts as
+    started.
   - Probes run every second, with a deadline of 120 s from container start enforced by the
-    operator (§5).
+    operator (§5). The probe's own `failureThreshold` (240) is only a backstop for an
+    operator that is down.
+  - A service's step passes once its container is `started`, or once a later container
+    has started, and then stays passed: a service that crashes later is restarted by its
+    policy, and every sidecar is stopped (exit 143) when the workstation ends.
 - **Host names.** A pod has one network namespace: services listen on `localhost`. The pod gets
   `hostAliases` mapping every service name to `127.0.0.1`, so `postgres:5432` still resolves.
   This is kubelet-managed `/etc/hosts`, which a project cannot change.
@@ -329,8 +340,13 @@ worker does today.
   - The config check gains: ports unique across services (today they are unique only within
     one service), and `localhost` a reserved service name.
   - An undeclared port two services both listen on fails in Verify.
-- `command`, env (non-secret inline, secret by Secret key), the image's own entrypoint and user:
-  as today.
+- `command`, env (non-secret inline, secret by Secret key `service.<name>.<KEY>`), the image's
+  own entrypoint and user: as today. A config's `command` is Docker's `CMD`, so it becomes the
+  container's `args`; Kubernetes' `command` would replace the entrypoint.
+- **The run user is per container.** A pod-level `runAsUser` cannot be unset by a container,
+  so the operator sets the run uid, gid and `runAsNonRoot` on each of Exradius's containers
+  and leaves the pod's security context with `fsGroup`, `supplementalGroupsPolicy` and
+  seccomp only.
 - **Security context**, the same capability set as today:
   - capabilities: drop `ALL`, add `CHOWN SETUID SETGID FOWNER DAC_OVERRIDE NET_BIND_SERVICE`;
   - `allowPrivilegeEscalation: false`;
@@ -347,8 +363,10 @@ worker does today.
   under a file lock by the first `clone-*` container that needs them, as `sync_mirror` does
   today. The code moves from `worker/prepare.py` into the runner package, which runs in the pod
   with the workstation's `git`.
-- The clone is `git clone --local` from the mirror. The mirror and the clone are on different
-  volumes, so objects are copied rather than hardlinked; that is still local.
+- The clone is a local clone of the mirror with `--no-hardlinks`. The mirror and the clone are
+  on different volumes, so objects are copied rather than hardlinked; that is still local.
+  An explicit `--local` would fail instead: git then refuses to fall back to copying when a
+  hard link fails (`EXDEV` between mounts).
 - Without a project volume, each clone fetches straight from the remote.
 - **Credentials:**
   - Phases 1–3: the repository's credential comes from the per-run Secret as `http.extraHeader`
@@ -369,7 +387,14 @@ Run and not owned by any Run. The worker deletes it when the project is deleted.
 | `enabled: false` | no mirrors (direct clones) and no caches (each `workstation.cache` path is an empty directory on the workspace). |
 
 - Each `workstation.cache` entry is the subPath `caches/<n>-<sanitised path>`, mounted at its
-  path in `setup-*` and `workstation`. The naming is the one in `caches.py`.
+  path in `setup-*` and `workstation`. The worker names it (`caches.py`) and the Run spec
+  carries `{path, name}`; `prepare` creates the directory and, for a path below the home or
+  `/tmp` (workspace subPaths), its mount point, as the run user.
+- **Deletion.** The api sends `{"action": "project_deleted", "project_id", "project"}` on
+  `exradius.control` when it deletes a project, and the worker deletes the PVC (it goes once
+  no pod uses it). The worker's sweep also deletes, every minute, a project volume whose
+  project no longer exists. An operator that finds the volume of its Run's project still
+  terminating waits until it is gone, then creates it anew.
 - The panel's cache size (`ProjectOut.cache_bytes`) goes: no Exradius process mounts the volume
   any more.
 - Trust is unchanged: a cache and a mirror are per project, the boundary the repository already
@@ -815,7 +840,7 @@ broker: {existingSecret: ..., publicHost: ..., publicPort: 5672}
 worker: {replicas: 1, concurrency: 4}
 runs:
   user: {uid: 1000, gid: 1000}
-  defaults: {memoryRequest: 1Gi, cpuRequest: 500m}
+  defaults: {memoryRequest: 1Gi, cpuRequest: 500m, serviceMemoryRequest: 256Mi, serviceCpuRequest: 100m}
   workspace: {storageClass: "", size: 50Gi}
   projectVolume: {enabled: true, accessMode: ReadWriteOnce, storageClass: "", size: 100Gi}
   bundleMount: image            # or copy
@@ -1048,7 +1073,8 @@ Details the earlier sections left open or got wrong, decided while building phas
 - **The bundle image's root is the bundle.** An image volume mounts the image's root, so
   the bundle is at `/` in `exradius-runtime-claude-code`, not under `/opt/exradius/runtime`
   (found on kind: the runner was not found at its path).
-- **Without a project volume** (until phase 3) each clone fetches straight from the remote.
+- **Without a project volume** (until phase 3; since then with `runs.projectVolume.enabled:
+  false`) each clone fetches straight from the remote.
 - **Reports and transitions.** `/reported` stores `reported_status` (`waiting_for_input` or
   `resumed`); the worker resets it to `null` when it moves a run to `resuming`, so a report
   in `resuming` always means the runner resumed. The runner keeps the ids of the answers it
@@ -1146,3 +1172,45 @@ the list.
   rootless BuildKit.
 - **Diagnosis** reads BuildKit's plain progress (`#10 0.044 /bin/sh: 1: corepack: not
   found`) without its step and time prefix.
+
+## 25. Settled in phase 3
+
+Details decided while building services, resources, caches and Verify parity (2026-11-09).
+§5–§7 are written to match; this is the list.
+
+- **The Run spec** gains `services[]` (`name`, `image`, `command`, `env`, `ports`, `ready`
+  with exactly one of `exec` or `tcp`, `memory`), and `workstation.caches` becomes a list of
+  `{path, name}`. A step gains `message`, the operator's one line when it fails a step
+  itself. The worker builds both in `worker/run_objects.py`; the per-run Secret gains
+  `service.<name>.<KEY>`.
+- **Services** are sidecars `service-<name>` after the clones (so a service name is at most
+  55 characters), with `command` as `args`, the image's user (the run user moved from the
+  pod to each Exradius container), and resources from `serviceMemoryRequest` and
+  `serviceCpuRequest` unless declared.
+- **Readiness.** The step passes when the container is `started` or a later one started, and
+  stays passed. The operator fails the Run 120 s after the service's container started, or at
+  its first exit or restart before it was ready; the run's error is v0.1.0's line
+  (`service <name> (<image>) did not become ready within 120s waiting for port 6379`) and the
+  service's log. A `tcp` check connects to the pod's address, not 127.0.0.1 as v0.1.0's
+  `/proc/net/tcp` check did; the diagnosis says so.
+- **HEALTHCHECK** is read by the worker from the registry (`worker/registry.py`), not by the
+  operator: the operator never reaches registries or the network beyond the API server.
+  Images on Docker Hub, ghcr.io and the kind registry were read; a private registry's are
+  not (the worker has no pull secret), and such a service counts as started.
+- **Ports and names.** The config check refuses a port two services list and the name
+  `localhost`.
+- **The project volume** is `exradius-project-<slug>`, labelled `exradius.dev/volume:
+  project`, created by the operator with no owner and mounted whole by `prepare`, by subPath
+  `mirrors` in the clones and `caches/<name>` in setup and the workstation; values
+  `runs.projectVolume` (`enabled`, `accessMode`, `storageClass`, `size`). The api's
+  `project_deleted` control message and a minute's sweep in the worker delete it.
+- **Mirrors** are `mirrors/<folder>.git`, refreshed under a file lock beside each by the clone
+  containers; the clone is `--no-hardlinks`, because an explicit `--local` fails across
+  volumes.
+- **Verify** has "Start service <name>" steps between the clones and setup, logging what
+  the service waits for, then `ready (<check>)` or the failure. Diagnoses: a probe deadline
+  (with the `tcp`/127.0.0.1 hint), an exit before ready (with the shared-ports hint), out
+  of memory with or without a declared limit, and a service image that cannot be pulled
+  (naming `services.<name>.image`).
+- **Removed:** the panel's cache size, `ProjectConfig.memory_reservation`, the warning that
+  caches are ignored, the "services are not available yet" block.

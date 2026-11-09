@@ -50,9 +50,10 @@ flowchart LR
    a reason if the config has errors or the secret store lacks a key it references, and
    stores the task before acknowledging the message.
 2. **Preparing.** It creates a `Run` object, and the operator turns it into one pod on a
-   fresh workspace volume: the repositories are cloned, then the setup commands run
-   (`pnpm install`, `uv sync`, ...) in the workstation image. Image builds and services
-   (Postgres, Redis, ...) come back in the next phases of the move to Kubernetes.
+   fresh workspace volume: images the config builds are built first, the repositories are
+   cloned from the project's mirrors, the services (Postgres, Redis, ...) start next to the
+   agent on the pod's `localhost`, then the setup commands run (`pnpm install`,
+   `uv sync`, ...) in the workstation image with the project's caches.
 3. **Running.** The agent works in `/work`, where every folder is a git clone. Its system
    prompt holds Exradius's operating rules and a generated description of the environment:
    image, repositories with branch and push rights, services with their settings, the
@@ -84,11 +85,11 @@ Several runs of one project can go at once, each in its own pod and workspace.
   the task trailers. The hooks path now comes from git's command-line config, which outranks
   every config file, and a dispatcher runs the project's own hooks after Exradius's
   ([docs/run-environment.md](docs/run-environment.md)).
-- **Hardened, isolated runs.** One container per run: an unprivileged user, read-only root
-  filesystem, all capabilities dropped, an optional memory limit reserved against the
-  machine's budget. A run joins only its own service network and a runs network where
-  nothing but the Exradius API answers, so a project service called `postgres` can never
-  resolve to Exradius's database.
+- **Hardened, isolated runs.** One pod per run: an unprivileged user, read-only root
+  filesystem, all capabilities dropped, no Kubernetes credentials, and a declared memory as
+  the pod's request and limit, so the scheduler places it where it fits. A run's services
+  are sidecars of its own pod, reached by name on its `localhost`, so a project service
+  called `postgres` can never resolve to Exradius's database or another run's.
 - **Any image can be the workstation.** The agent runtime (a relocatable Python with the
   Claude Agent SDK and a pinned Claude Code binary) is a bundle mounted read-only into the
   container. A project's image needs only bash and git on glibc; `node:22`, `python:3.14`
@@ -192,10 +193,10 @@ services and runs setup; when that fails, it names the cause.
 
 Exradius runs on Kubernetes (since 0.2.0; [docs/kubernetes.md](docs/kubernetes.md)). The
 same Helm chart installs it on a local kind cluster and, with another values file, on a
-cloud cluster. This version runs projects without services, whose workstation is an image
-or is built from a Dockerfile in the config repository; services come in the next phase
-([docs/kubernetes-plan.md](docs/kubernetes-plan.md)). v0.1.0 is the last Docker Compose
-version.
+cloud cluster. It runs everything v0.1.0 ran: workstation and service images or
+Dockerfiles, services, declared memory and per-project caches
+([docs/kubernetes-plan.md](docs/kubernetes-plan.md) has the phases still to come). v0.1.0
+is the last Docker Compose version.
 
 ### Locally, on kind
 
@@ -345,7 +346,7 @@ docs/           design notes
 | [config-repo.md](docs/config-repo.md) | projects as config repositories and the `exradius.yaml` format |
 | [run-environment.md](docs/run-environment.md) | what is enforced inside a run, and how: hooks, credentials, memory, caches |
 | [runtime-bundles.md](docs/runtime-bundles.md) | the relocatable agent runtime, mounted into run pods |
-| [environment-and-services.md](docs/environment-and-services.md) | service containers and the environment section of the prompt |
+| [environment-and-services.md](docs/environment-and-services.md) | services (sidecars of the run's pod) and the environment section of the prompt |
 | [agent-identity.md](docs/agent-identity.md) | agents' git identities, trailers and push credentials |
 | [setup-and-verify.md](docs/setup-and-verify.md) | Verify with diagnosis, and the setup skill |
 | [providers.md](docs/providers.md) | model providers and credential tests |

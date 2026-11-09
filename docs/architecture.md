@@ -209,17 +209,22 @@ Every transition emits a `task.status` event.
 
 The worker reads the config afresh, records the commit, then creates the run's `Run` object
 and its per-run Secret in `exradius-runs` (`docs/kubernetes.md` §5, §8.1). The Run spec is a
-secret-free description: the workstation image, setup commands, memory, the project's
-variables (secret values by Secret key), the repositories, the agent's git variables and the
-runtime bundle image. The operator creates a workspace PVC and one pod:
+secret-free description: the workstation image, setup commands, memory, caches, the
+project's variables (secret values by Secret key), the repositories, the services, the
+agent's git variables and the runtime bundle image. The operator creates a workspace PVC,
+the project's volume of mirrors and caches on its first run, and one pod:
 
-1. `prepare` lays out the workspace and writes the task's attachments, read-only, under
-   `/work/.exradius/attachments/`;
-2. one `clone-<n>` per repository clones it into `/work/<folder>` and checks out the
-   configured branch (the remote's default without one);
-3. one `setup-<n>` per setup command runs it with `/work` as working directory, inside the
-   workstation image (so toolchains match). A non-zero exit fails the run;
-4. the `files` sidecar starts, then the workstation container (§5.2).
+1. `prepare` lays out the workspace, creates the cache directories and writes the task's
+   attachments, read-only, under `/work/.exradius/attachments/`;
+2. one `clone-<n>` per repository refreshes its mirror on the project volume, clones it into
+   `/work/<folder>` and checks out the configured branch (the remote's default without one);
+3. one sidecar `service-<name>` per service starts, in order, and must become ready
+   (`docs/environment-and-services.md` §2); services stay up until the pod ends and are
+   reached by name on the pod's `localhost`;
+4. one `setup-<n>` per setup command runs it with `/work` as working directory, inside the
+   workstation image (so toolchains match), with the caches mounted. A non-zero exit fails
+   the run;
+5. the `files` sidecar starts, then the workstation container (§5.2).
 
 The workspace PVC holds `/work`, the run user's home `/home/runner`, `/tmp` and the runtime
 state. Home and `/tmp` are on disk, like an engineer's home directory, because package
@@ -231,8 +236,8 @@ Each init container is a step in the Run's status, which Verify shows the same w
 that cannot be scheduled waits, and the panel says "waiting for cluster capacity"; the run
 stays `preparing`.
 
-Nothing is shared between concurrent runs. Any number of agents can work on the same project
-at once.
+Nothing is shared between concurrent runs but the project's caches and mirrors: each has its
+own pod, workspace and services. Any number of agents can work on the same project at once.
 
 ### 5.2 Running
 
@@ -447,12 +452,11 @@ any worker replica can settle any run (`docs/kubernetes.md`).
 Details the design left open, and the simplest choice made for each in version one.
 
 Since 0.2.0 Exradius runs on Kubernetes (`docs/kubernetes.md`), in phases
-(`docs/kubernetes-plan.md`). Phase 1 runs image-based projects without services; phase 2
-adds workstation Dockerfiles, built as `Build` objects (`docs/kubernetes.md` §12). A config
-with `services` is valid but not runnable yet, its health reason says so ("services.db:
-services are not available yet"), and `workstation.cache` is accepted and ignored with a
-warning. The notes below on services, memory and caches describe v0.1.0 until phase 3
-rewrites them.
+(`docs/kubernetes-plan.md`). Phase 1 runs image-based projects; phase 2 adds Dockerfiles,
+built as `Build` objects (`docs/kubernetes.md` §12); phase 3 adds services as sidecars, the
+project volume of mirrors and caches, and Verify's service steps, so every valid config
+runs again (`capabilities.py` blocks nothing). The notes below describe 0.2.0; where v0.1.0
+did it with Docker, the Kubernetes section is named instead.
 
 **Layout and images**
 
@@ -512,10 +516,10 @@ rewrites them.
 **Run pods and workspaces** (`docs/kubernetes.md` §5, §7)
 
 - The worker builds the Run spec in `worker/run_objects.py`: it is secret-free, and every value that holds a secret is a key of the per-run Secret (`token`, `env.<NAME>`, `provider.<NAME>`, `repo.<n>`, `push.<n>`). The Secret is created right after the Run with an ownerReference to it, so it goes with the Run.
-- The operator writes the pod's security itself: the run uid and gid (`runs.user`, default `1000:1000`), `runAsNonRoot`, a read-only root filesystem, no privilege escalation, all capabilities dropped, seccomp `RuntimeDefault`, no ServiceAccount token, no service links, `fsGroup` with `OnRootMismatch`, and a 30-second grace period. The Run spec cannot change any of it.
+- The operator writes the pod's security itself. Exradius's own containers (prepare, clones, setup, the files sidecar, the workstation) get the run uid and gid (`runs.user`, default `1000:1000`), `runAsNonRoot`, a read-only root filesystem, no privilege escalation and all capabilities dropped; the run user is set per container, not on the pod, because services keep their image's user (`docs/kubernetes.md` §7.4). The pod has seccomp `RuntimeDefault`, no ServiceAccount token, no service links, `fsGroup` with `OnRootMismatch`, `supplementalGroupsPolicy: Strict` and a 30-second grace period. The Run spec cannot change any of it.
 - The workspace is one PVC per Run (`runs.workspace.size`, default 50 Gi): `work` at `/work` (attachments read-only at `/work/.exradius/attachments`), `home` at `/home/runner`, `tmp` at `/tmp` (1777) and `state` at `/exradius/state`. `ClaudeCodeRuntime` sets `CLAUDE_CONFIG_DIR=/exradius/state/claude`, so session files survive a recreated pod. The working directory is always `/work`. Removing a workspace is deleting the PVC; there is no Exradius code for read-only trees, sockets or deep `node_modules` any more.
 - `prepare` (the runner, as the run user) creates the layout on the first start of a pod and writes the task's attachments, fetched from `GET /internal/runs/{id}/attachments/{id}`, with mode `0444`. URL attachments are downloaded into the object store by the worker before it creates the Run. Answer attachments are written by the `files` sidecar (run uid + 1, the run's group) into `.exradius/attachments/<request_id>/` with mode `0444` as they are delivered; the runner resumes once they are there. Steps leave markers in `state/steps/`, so a recreated pod skips `prepare` and the clones.
-- `clone-<n>` clones straight from the remote with `git clone --branch <branch>` (the remote's default branch without one), then resets `origin` to the plain URL. A repository's `credential` comes from the per-run Secret and is used for that command only as an HTTP Basic `extraHeader` (a bare token becomes `x-access-token:<token>`); for pushing only through the credential helper of `push: true` (Agent identity below). It is never written into the clone. Mirrors on a project volume come in phase 3.
+- `clone-<n>` refreshes the repository's bare mirror on the project volume (`mirrors/<folder>.git`, under a file lock next to it, which serialises concurrent runs of the project), then clones it with `git clone --no-hardlinks --branch <branch>` (the remote's default branch without one) and resets `origin` to the plain URL. Without a project volume (`runs.projectVolume.enabled: false`) it clones straight from the remote. A repository's `credential` comes from the per-run Secret and is used for those commands only as an HTTP Basic `extraHeader` (a bare token becomes `x-access-token:<token>`); for pushing only through the credential helper of `push: true` (Agent identity below). It is never written into the clone or the mirror.
 - The run token is generated when the worker creates the Run, kept hashed on the run (`runs.token_hash`), carried by the per-run Secret, and revoked at finalisation. The runner removes it from its own environment before starting the SDK, so the agent's tools do not inherit it.
 - The api's internal port (8001, Service `exradius-api-internal`) serves only `/internal/*`; port 8000 refuses those paths. New routes for run pods: `POST /internal/runs/{id}/reported`, `GET /internal/runs/{id}/answers?wait=` (long-poll, up to 60 s), `GET /internal/runs/{id}/attachments` and `/attachments/{id}` (a task attachment's id, or `<request id>.<n>` for an answer attachment); `/outcome` gains `warnings` and the status `cancelled`. Verify Runs use `/internal/verifications/{id}/spec` and `/tools`, probe Runs `/internal/probes/{id}/result`, each with its own token (`project_verifications.token_hash`, `provider_tests.token_hash`).
 
@@ -633,19 +637,12 @@ rewrites them.
 - **Model.** `agents.<name>.model` in the config; absent is the runtime's default. Ids are validated loosely (`^[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]*$`), so any id the provider accepts works. The run spec carries `model`; `ClaudeCodeRuntime` passes it as `ClaudeAgentOptions.model` and to the provider probe. The model catalog is `providers.MODELS` (anthropic: `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`, each with a one-line description), returned as `models: [{id, description}]` on each provider kind of `GET /api/system/runtimes` and on `ProviderOut`.
   - `POST /api/providers/{id}/test` takes an optional body `{model}`. For `api_key` it calls `GET /v1/models/{model}` (free; the id or alias must exist for the key) instead of listing models. For `oauth_token` the worker's probe runs `exradius-runner --probe claude_code --model <id>`. A test with a model is stored as `last_test` only when it passes, since a wrong id says nothing against the credential.
 - **Secret references** in `env` and in services' `env` resolve from the store when the Run is created, for setup containers and the workstation alike. A missing key fails the run in `preparing` (in Verify, "Read config" already fails).
-- **Services in a run** (`ContainerManager.create_run_network`, `start_service`, `remove_run_services`).
-  - In `preparing`, after cloning and attachments and before setup commands, the worker creates the bridge network `exradius-run-<run_id>` (labels `exradius.run_id`, `exradius.kind=network`). It then starts each service in order on that network, with the alias and hostname `name`, labels `exradius.run_id`, `exradius.kind=service`, `exradius.service=<name>`, `cap_drop ALL` plus `CHOWN SETUID SETGID FOWNER DAC_OVERRIDE NET_BIND_SERVICE`, `no-new-privileges`, no mounts and no published ports. The env is decrypted at that moment. The image's own user, root filesystem and entrypoint are kept, and `containers.run` pulls a missing image.
-  - Readiness is polled every second for 120 s, counted from container start, so a pull does not count. `{"command"}` runs `docker exec` in the service until it exits 0. `{"tcp": p}` runs `cat /proc/net/tcp /proc/net/tcp6` in the service and waits for a LISTEN socket on `p`; the worker is not on the run network, so it cannot connect itself, and this needs only `cat` in the image. `null` waits for `Health.Status=healthy` when the image has a HEALTHCHECK, otherwise for one second of "running". A service that exits or times out fails the run with `service <name> (<image>) …`, the last check's output and the container's last 40 log lines.
-  - Setup and run containers are created on `EXRADIUS_RUN_NETWORK` and the run network together, through `networking_config` at create (Docker API 1.44+), so neither network is missing when the command starts. Runs of projects without services get no network of their own.
-- **Networks** (fix after BANK-204, 2026-11-07). Runs used to join the stack network `exradius`, where the compose service `postgres` carries the alias `postgres`; Docker resolved a run's `postgres` to Exradius's own database instead of the run's service. Now:
-  - `exradius` (compose `default`): api, worker, frontend, postgres, rabbitmq. No run container joins it.
-  - `exradius-runs` (compose `runs`; not internal, runs need outbound access): the API, with the alias `exradius-api`, and every run, setup and provider-probe container. The worker is not on it; it talks to the Docker daemon, not to runs.
-  - `exradius-run-<run_id>`: the run's services, its setup containers and its run container, only when the project has services.
-  - The delivery check has `network_mode=none`.
-  - Settings: `run_network` defaults to `exradius-runs` and `run_api_url` to `http://exradius-api:8000`; the compose file sets both for the worker. `run_network=None` uses Docker's bridge (the Docker integration tests do so, as they need no API). Runs on `exradius-runs` can still resolve each other's containers by name; they are separate from the stack, not from each other.
-  - `waiting_for_input` leaves services running. A resume calls `start_service` again for each service, which keeps a running container and recreates a missing one (for example after a daemon restart), then joins the network. `finalize` removes the services with their anonymous volumes (`remove(v=True)`; images such as postgres declare `VOLUME`s) and the network, after publishing the result and before deleting the directory.
-  - `reconcile` no longer removes `service` containers of runs it re-attaches or settles. `sweep_orphans` first removes services and run networks whose label is neither an unfinished run nor an open verification.
-- **Verify.** After "Read config", the builds and "Prepare attachments folder" come "Start service <name>" steps (the first creates the network; the log reads `<image> is ready after <s>s (<check>); host name <name>`). Setup commands then join the network, and before "Remove directory" a cleanup step "Stop services" always runs when the project has services. A dead worker's verification is cleaned up with its services and network.
+- **Services in a run** (`docs/kubernetes.md` §7.4, `docs/environment-and-services.md` §2). Each service is a native sidecar `service-<name>` of the run's pod, after the clones, in file order, from its image (or its built image), with its image's user and entrypoint, `command` as the container's arguments, the capability set `CHOWN SETUID SETGID FOWNER DAC_OVERRIDE NET_BIND_SERVICE`, no privilege escalation, a writable root and no mounts. Its env holds plain values inline and values with a secret as `service.<name>.<KEY>` of the per-run Secret.
+  - Readiness is the sidecar's startup probe, every second: `{"command"}` an exec probe (10 s timeout), `{"tcp": p}` a TCP probe on the pod's address, `null` the image's `HEALTHCHECK`, which `worker/registry.py` reads from the image's registry (anonymous bearer tokens; the registries in `EXRADIUS_INSECURE_REGISTRIES` over HTTP; cached an hour per reference) and gives as `ready.exec` (`CMD-SHELL` through `/bin/sh -c`). An image whose config cannot be read counts as started once it runs, and the worker logs why.
+  - The operator fails the Run (`reason: ServiceFailed`) when a service is not started 120 s after its container started, or exits or restarts before; the kubelet's own failure threshold (240 probes) is only a backstop. The step keeps the service's log (the previous instance's after a restart) and a one-line `message`; the run's error is `service <name> (<image>) <message>` and the log tail, with "exceeded its declared memory (512m)" for an `OOMKilled` under a declared limit. A service step that passed stays passed: Kubernetes restarts a service that crashes later, and stops every sidecar when the workstation ends.
+  - The pod's `hostAliases` map every service name to `127.0.0.1`: the services and the workstation share one network namespace, as compose publishes ports on `localhost`. The config check refuses a port listed by two services and the service name `localhost`. There are no Docker networks, labels or orphan sweeps any more: deleting the Run deletes the pod.
+  - `waiting_for_input` leaves the services running, because the pod keeps running. Only a pod recreated after it was lost (`docs/kubernetes.md` §8.3) starts them empty.
+- **Verify.** After "Read config" and the builds, the verify Run's steps: "Prepare workspace", "Clone …", "Start service <name>" (log "waiting for <check>", then "ready (<check>)" or the failure), "Setup: …", "List tools …" (`docs/setup-and-verify.md` §1.4). There is no "Stop services" step.
 - **Delivery warning** (`exradius/worker/delivery.py`). Before claiming the finalize, the worker runs `INSPECT_CLONES_SCRIPT` when the run directory holds clones. The script reports, per clone, `git --no-optional-locks status --porcelain` and, for each local branch (and a detached HEAD), `git rev-list --count <branch> --not --remotes`.
   - It runs in a container from the project image as the run user, with only `/work` mounted read-only, `network_mode=none`, no project variables or secrets, and a 60-second limit. It never runs in the worker, because the clone's `.git/config` is the agent's and options such as `core.fsmonitor` would run commands as the worker.
   - The resulting `warnings` (always present in `task.result`, empty when there is nothing to report) read, for example, "app: 2 commits on T-1-fix were not pushed and were discarded with the task directory" or "app: uncommitted changes in 3 files were discarded with the task directory". A failed check gives no warnings and is logged.
@@ -704,45 +701,9 @@ rewrites them.
   `--settings`, and a project's workstation image could bake one. Mounting our own file
   there would close it but was not done: it is a Docker-level change to a system path of
   the project's image, for a case no project has.
-- **Memory** (`worker/memory.py`, `MemoryGate` on `RunManager.memory`, shared by runs and
-  verifications). The budget is `EXRADIUS_RUN_MEMORY_BUDGET` (a Docker size) or the
-  daemon's `MemTotal` less 1 GiB, set at worker start; a daemon that does not answer leaves
-  it unknown and nothing waits. Intake returns the reservation from the config it read
-  (`ProjectConfig.memory_reservation()`); `execute` waits inside the concurrency slot, so
-  the broker keeps the backlog, but the task message was already acknowledged by intake
-  (the design said unacknowledged: intake must persist the task before it knows the size).
-  While it waits the run stays `queued` with `runs.waiting_for = 'memory'` and the
-  worker's id (migration `0003`), and no status event is published; `task.status` is
-  unchanged. `TaskSummaryOut` and `RunOut` carry `waiting_for`, and the panel's task row
-  says "waiting for memory". A restarted worker takes over queued runs with
-  `waiting_for` whose worker is dead (`waiting_runs`, in `recover`). A waiter rechecks
-  every 10 s whether its run is still queued, so a cancelled run stops waiting. A resume
-  reserves the same amount (the run stays `waiting_for_input` meanwhile); a re-attached
-  container takes its reservation without waiting. More than the whole budget fails the
-  run at once ("the project declares 12g of memory, more than this worker's budget for
-  runs (7g, EXRADIUS_RUN_MEMORY_BUDGET)"). While a run waits for an answer its services
-  keep running but nothing is reserved.
-  - Declared memory is `mem_limit` and an equal `memswap_limit` on the setup, run and
-    resume containers and on services; undeclared sets neither. Exit 137 under a declared
-    limit becomes "the run exceeded its declared memory (6g) and was killed (exit 137)",
-    "setup command '…' exceeded its declared memory (6g) …", or for a service that dies
-    before it is ready "service <name> (<image>) exceeded its declared memory (512m): …".
-  - Verify adds "Reserve memory (6.5g)" as its first step after "Read config" when anything
-    is declared, held until the verification ends; its log is "reserved 6.5g of the
-    worker's 14g". `diagnose.py` names a declared limit that was exceeded and a reservation
-    larger than the budget.
-- **Caches** (`worker/caches.py`). `<data_dir>/caches/<slug>/<n>-<sanitised path>` (index
-  in the list, the path's characters outside `[A-Za-z0-9._-]` as `_`), created for the run
-  user and bind-mounted into setup, run and resume containers and Verify's setup steps. A
-  cache below the home gets its mount point created in the run's home directory for the
-  run user first: Docker would create the missing parents as root and `~/.cache` would no
-  longer be writable. `ProjectOut.cache_bytes` (allocated blocks, hard links once) is
-  computed on `GET /api/projects/{id}` only, not on the list; `null` without a cache
-  directory. The walk took 4 s for Plane's 1.2 GB (75,000 files) where the data directory
-  is a Docker Desktop file share, so the API keeps a size for a minute and then returns it
-  while a background walk refreshes it (`caches.SizeMemo`); only the first view of a
-  project waits. `DELETE /api/projects/{id}` removes the project's caches.
-- **Service `command`** is the container's `command`; the entrypoint is the image's.
+- **Memory** (`docs/kubernetes.md` §6, `docs/run-environment.md` §4). A declared size is request and limit of its containers (`quantity()` turns `6g` into `6Gi`); undeclared gets the operator's default request (`--memory-request`, `--service-memory-request`) and no limit, and every container a CPU request without a limit. The scheduler places pods by their requests; one that fits nowhere is `Pending`, and `settle` sets `runs.waiting_for = 'capacity'` while the Run's `Scheduled` condition says `Unschedulable` (the task row says "waiting for cluster capacity"; no status event). `OOMKilled` under a declared limit becomes "the run exceeded its declared memory (6g) and was killed (exit 137)", "setup command '…' exceeded its declared memory (6g) …", or "service <name> (<image>) exceeded its declared memory (512m): …". v0.1.0's `MemoryGate`, budget and "Reserve memory" step are gone.
+- **Caches** (`worker/caches.py`, `docs/kubernetes.md` §7.6). `cache_specs` names each entry `<n>-<sanitised path>` (its index in the list, the path's characters outside `[A-Za-z0-9._-]` as `_`); the Run spec carries `{path, name}`. The operator mounts `caches/<name>` of the project volume (or, without one, of the run's workspace) at the path in the setup containers and the workstation. `prepare`, as the run user, creates the directories and every mount point below the home or `/tmp`: the kubelet would create a missing `~/.cache` as root. The panel's cache size (`ProjectOut.cache_bytes`) is gone. The project volume `exradius-project-<slug>` is created by the operator on the project's first Run (owned by no Run; a deleted one still terminating is waited for) and deleted by the worker on the api's `project_deleted` control message, or by its sweep every minute when the project no longer exists.
+- **Service `command`** is the container's `args`; the entrypoint is the image's.
 - **Store changes** (`config_routes._verify_after_keys`). After `POST /api/stores`,
   `PUT /api/stores/{id}/keys` and `PUT /api/stores/{id}/keys/{key}`, every project whose
   latest read names the store, is runnable now and whose freshness is neither `current`
@@ -797,7 +758,7 @@ the guide panel shows the operating rules verbatim so an admin knows they are in
 
 > From the inside, a run looks like a developer's own workstation. Exradius deviates only
 > where security requires it, and every deviation, and everything Exradius needs to stay
-> true inside a run, is enforced at the level of the kernel, Docker or the command line,
+> true inside a run, is enforced at the level of the kernel, Kubernetes or the command line,
 > never through a setting a project, a tool or the agent can reset.
 
 Across the first four projects (bank, Outline, Saleor, Plane) one finding kept its shape: a
@@ -813,15 +774,18 @@ charge, to one where they cannot interfere:
 | Commit trailers missing (Plane) | `core.hooksPath` set in the run's global git config; husky's `prepare` script wrote a repo-local one, which wins | the hooks path at the git command-line level, with a dispatcher that also runs the project's own hooks |
 
 Where each thing Exradius sets inside a run lives now (the audit of
-`docs/run-environment.md` §2.1, after that batch):
+`docs/run-environment.md` §2.1; the first half rewritten for Kubernetes in phase 3, the
+network part comes with NetworkPolicy and the egress proxy in phase 4):
 
 | What | Level |
 |---|---|
-| uid 1000 as `runner`, home `/home/runner` | passwd and group files bind-mounted |
-| read-only root, no capabilities, no-new-privileges | Docker |
-| networks (`exradius-runs` + the run's own) | Docker |
-| `/work`, home, `/tmp`, state, attachments, caches | bind mounts |
-| declared memory | cgroup limit (Docker) |
+| uid 1000 as `runner`, home `/home/runner` | passwd and group files from a ConfigMap, mounted read-only by subPath |
+| read-only root, no capabilities, no privilege escalation, the run user | the container's security context, written by the operator |
+| no ServiceAccount token, no service links, supplementary groups | the pod spec, written by the operator |
+| services on `localhost` by name | the pod's one network namespace and `hostAliases` (kubelet-managed `/etc/hosts`) |
+| `/work`, home, `/tmp`, state, attachments | subPaths of the run's workspace PVC |
+| caches, git mirrors | subPaths of the project volume |
+| declared memory | the container's request and limit (its cgroup) |
 | `safe.directory`, `core.hooksPath`, push credential helpers | git command line (`GIT_CONFIG_*`) |
 | author and committer identity | `GIT_AUTHOR_*`/`GIT_COMMITTER_*`, plus the managed global config |
 | `push.autoSetupRemote`, `init.defaultBranch` | managed global config (conveniences a project may change) |

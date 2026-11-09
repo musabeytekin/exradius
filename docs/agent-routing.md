@@ -69,8 +69,8 @@ A profile is what the decision knows about one agent:
 - **Fetched at Verify.** After the setup steps, Verify adds one step per connection that
   some agent uses: "List tools github". It runs in the verify pod (`kubernetes.md` §13): the
   workstation container of a Run with `purpose: verify`, with the run's environment, after
-  its setup, the runtime bundle mounted read-only, as the agent would (services, on
-  `localhost`, come in phase 3). The bundle's `exradius-runner --verify <id>` reads the
+  its setup, the runtime bundle mounted read-only, as the agent would, with the services up
+  on the pod's `localhost`. The bundle's `exradius-runner --verify <id>` reads the
   connection specs with secrets substituted from `GET /internal/verifications/{id}/spec`,
   starts each server, sends `initialize` and `tools/list` (following `nextCursor`), and
   posts the tools (or the error and the tail of a stdio server's stderr) to

@@ -103,7 +103,8 @@ and `root:x:0:` and `runner:x:<gid>:` in the group file. The run still uses the 
 and gid (values `runs.user`, default `1000:1000`); only the names and the home change, and
 other users of the image disappear for the run. With the stock `maven:3-eclipse-temurin-21`
 image, `user.home` is `/home/ubuntu` without the mount and `/home/runner` with it. Services
-(phase 3) keep their image's users.
+keep their image's users: they get neither the files nor the run uid
+(`docs/kubernetes.md` §7.4).
 
 Every session gets the settings Exradius needs (`includeCoAuthoredBy: false` and empty
 `attribution.commit` and `attribution.pr`) as the SDK's `settings` option, which the CLI

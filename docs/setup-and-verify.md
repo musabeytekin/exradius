@@ -55,7 +55,17 @@ table of patterns, first match wins, each giving the sentence and what to change
   (`packageManager`, corepack), pnpm, npm `lockfileVersion` → the tool in the image is
   older than the lockfile needs; name the tool.
 - service readiness timeout → the service never became ready; name it, suggest checking
-  its env and `ready`.
+  its env and `ready`, and for a `tcp` check that a service listening only on 127.0.0.1
+  needs a `ready` command (the check connects to the run's own address).
+- a service that exits before it is ready → name it and its exit code; point at its env,
+  its `command` and its ports (services share the run's `localhost`).
+- a container killed under a declared limit → which limit (`resources.memory` or the
+  service's `memory`) to raise; a service that ran out of memory without one → declare it.
+- an image that cannot be pulled → the config key that names it (`workstation.image`,
+  `services.<name>.image`) and the install's `runs.imagePullSecrets`.
+- a pod that fits on no node ("waiting for cluster capacity", the scheduler's message) →
+  lower `resources.memory`, or add a node with room; otherwise the install's node selector
+  and tolerations.
 - clone failures: authentication → the repository credential; not found → the URL or
   branch.
 - missing store keys / config errors → the errors themselves (already text).
@@ -63,7 +73,29 @@ table of patterns, first match wins, each giving the sentence and what to change
 
 Patterns are plain substring and regex checks on the tail; no model call.
 
-### 1.4 Panel
+### 1.4 The steps
+
+Since 0.2.0 Verify is a Run like a task's (docs/kubernetes.md §13), so its steps are the
+pod's:
+
+1. "Read config" (the worker): commit, errors, warnings, missing keys;
+2. "Build workstation", "Build service <name>": one per Dockerfile, each a Build object
+   with its log as it grows, or "… is up to date (context unchanged)";
+3. "Prepare workspace";
+4. "Clone <repo> (<branch>)" per repository, which refreshes its mirror on the project
+   volume first;
+5. "Start service <name>" per service, with what it waits for, then "ready (…)" or the
+   failure with the service's log tail;
+6. "Setup: <command>" per setup command, with the services up;
+7. "List tools <name>" per connection an agent uses, in the pod, so a stdio server can
+   reach the services on `localhost`.
+
+v0.1.0's "Create directory", "Fetch mirror", "Prepare attachments folder", "Reserve
+memory", "Stop services" and "Remove directory" are gone: the steps that remain cover them,
+and deleting the verify Run removes everything it made. A pod that waits for cluster capacity
+shows it on the first step.
+
+### 1.5 Panel
 
 The Verify tab leads with the outcome: for a failure, the failed step's name, the
 diagnosis, the command (for setup steps) and the log tail, then the other steps collapsed
@@ -87,10 +119,11 @@ files first.
 `references/` holds, in the skill's own words (not links into Exradius):
 
 - the `exradius.yaml` schema and rules (docs/config-repo.md §2), with the defaults;
-- the run conditions a workstation must survive (runtime-bundles.md §2.3, §2.4;
-  containers.py): glibc image with bash and git, uid 1000 named `runner` with home
-  `/home/runner`, read-only root filesystem with `/work`, the home and `/tmp` writable,
-  no capabilities, services reachable by name;
+- the run conditions a workstation must survive (runtime-bundles.md §2.3, §2.4; the
+  operator's pod builder, docs/kubernetes.md §7): glibc image with bash and git, uid 1000
+  named `runner` with home `/home/runner`, read-only root filesystem with `/work`, the home
+  and `/tmp` writable, no capabilities, services reachable by name on the run's
+  `localhost`;
 - the pitfalls found so far, each with its fix: node images without corepack; uv older
   than the lockfile's syntax; `python3` not on PATH; tools that read the home from
   passwd; Alpine images; Maven caches that must be copied into the home in `setup`;
@@ -143,18 +176,28 @@ Exradius installed:
 - builds `workstation.dockerfile` and every service Dockerfile from the declared
   contexts;
 - checks the workstation image: glibc, `bash`, `git`;
-- starts the services on a temporary network with their `ready` checks (image
-  HEALTHCHECK, `tcp`, or `command`), with the same timeouts as the worker;
+- mirrors the run's pod (docs/kubernetes.md §7): one container holds the network
+  namespace, with every service name mapped to `127.0.0.1` (`--add-host`, as the pod's
+  `hostAliases`), and everything else joins it with `--network container:<it>`, so the
+  services and the workstation share `localhost`;
+- starts the services there, in order, with their image's user, the capabilities the
+  operator gives them (`--cap-drop ALL --cap-add CHOWN,SETUID,SETGID,FOWNER,DAC_OVERRIDE,NET_BIND_SERVICE`,
+  `no-new-privileges`), `command` as their arguments and declared `memory` as
+  `--memory`, and waits for each one's `ready` check (`command` with `docker exec`, `tcp` by
+  connecting to the shared address, or the image's HEALTHCHECK) with the operator's 120 s
+  deadline from its start, printing its log tail when it fails;
 - runs the setup commands in the workstation with the run's conditions: `--user
   1000:1000`, `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`,
   generated `/etc/passwd` and `/etc/group`, the repositories mounted at `/work`, a
   temporary home at `/home/runner` and a temporary `/tmp`, `HOME=/home/runner`, the
-  project `env`, joined to the services' network;
+  project `env`, `resources.memory` as `--memory`, and each `workstation.cache` from a
+  local cache directory;
 - stops and removes everything, prints the first failing step with its output.
 
-The flags mirror `backend/exradius/worker/containers.py` in the Exradius repository; a
-comment in both places names the other, and changing one means changing the other. The check does not cover the
-runtime bundle, providers, or pushes, which only a real run exercises.
+The flags mirror the operator's pod builder (`operator/internal/podspec/podspec.go` in the
+Exradius repository); a comment in both places names the other, and changing one means
+changing the other. The check does not cover the runtime bundle, providers, the egress
+proxy and its allowlist (phase 4), or pushes, which only a real run exercises.
 
 ### 2.5 Update mode
 

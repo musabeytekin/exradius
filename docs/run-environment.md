@@ -64,47 +64,55 @@ A project hook that fails still fails the commit, as it would for a developer. T
 dispatcher runs as the run user with the project's environment, so it can only do what the
 agent could do anyway.
 
-## 4. Memory: declared, reserved, enforced
+## 4. Memory: declared, placed, enforced
 
 Two findings are the same gap: the Outline kill, and Plane being run one task at a time by
-hand because its install needs several gigabytes. The worker admits runs by count
-(`EXRADIUS_WORKER_CONCURRENCY`) and knows nothing about size.
+hand because its install needs several gigabytes. The worker admitted runs by count and knew
+nothing about size.
 
-`exradius.yaml` gains:
+`exradius.yaml` has:
 
 ```yaml
 resources:
-  memory: 6g          # the workstation (setup, run, resume containers); optional
+  memory: 6g          # the workstation: its setup commands and the agent's container; optional
 services:
   postgres:
     image: postgres:16
     memory: 512m      # optional, per service
 ```
 
-- **Reservation.** The worker keeps a memory budget, `EXRADIUS_RUN_MEMORY_BUDGET`
-  (default: the Docker daemon's `MemTotal` minus 1 GiB, read at start). A run's reservation
-  is `resources.memory` plus every declared service `memory`. A run starts only when the
-  reservations of the runs and verifications in progress plus its own fit the budget;
-  otherwise it stays `queued` (message unacknowledged, as with the concurrency slot) and
-  the panel's task row says `waiting for memory`. Undeclared means zero reserved, so a
-  project that declares nothing behaves as today.
-- **Enforcement.** A declared `memory` is also the container's cgroup limit (`mem_limit`,
-  and `memswap_limit` equal to it, so swap does not hide an overrun). A run that exceeds it
-  is killed by its own cgroup, not by the host killing a neighbour, and ends `failed` with
-  the diagnosis "exceeded its declared memory (6g)"; the same for a service. Undeclared
-  means no limit, as today.
-- Verify reserves and limits the same way, so a limit that is too low shows up in Verify,
-  not in the first task.
-- The environment section does not mention memory. The skill estimates it and writes it
-  (it already does, in the README; now in the file).
+Sizes are binary (`6g` is 6 GiB). Rewritten for Kubernetes in phase 3 (2026-11-09;
+`docs/kubernetes.md` §6); v0.1.0's per-worker budget, `EXRADIUS_RUN_MEMORY_BUDGET` and the
+"Reserve memory" step are gone.
 
-This revisits the earlier "no run limits" decision deliberately: an undeclared run is
-still unlimited, and a declared limit is the project's own statement, enforced so that it
-means something for the other runs on the machine.
+- **Placement.** A declared `memory` is the request and the limit of its containers: the
+  setup containers and the workstation for `resources.memory`, the service's sidecar for a
+  service's. The scheduler places a run's pod on a node whose free requests fit it. A pod
+  that fits nowhere waits in `Pending`: the task stays `preparing`, no status event is
+  published, and the panel's task row says "waiting for cluster capacity"
+  (`runs.waiting_for = 'capacity'`). It starts when another run ends and frees its requests.
+  There is no deadline for that wait (no run limits).
+- **Enforcement.** A container over its declared limit is killed by its own cgroup, not by
+  the node killing a neighbour, and the run ends `failed` with the diagnosis "exceeded its
+  declared memory (6g)": "setup command '…' exceeded its declared memory (6g) and was killed
+  (exit 137)", "the run exceeded its declared memory (6g) …", or for a service that dies
+  before it is ready "service <name> (<image>) exceeded its declared memory (512m): …".
+- **Undeclared** memory gets the install's default request (`runs.defaults.memoryRequest`
+  for the workstation, `serviceMemoryRequest` for a service) and no limit. CPU gets a request
+  from values and never a limit, because limits throttle builds and tests.
+- `worker.concurrency` still caps the runs one worker has in flight, so RabbitMQ keeps the
+  backlog. Kueue (quota-based admission) can come later.
+- Verify uses the same pod, so a limit that is too low shows up in Verify, not in the first
+  task.
+- The environment section does not mention memory. The skill estimates it and writes it.
+
+This revisits the earlier "no run limits" decision deliberately: an undeclared run is still
+unlimited, and a declared limit is the project's own statement, enforced so that it means
+something for the other runs on the cluster.
 
 ## 5. Per-project caches
 
-Every Plane run spends about 65 s in `pnpm install` and every Outline run longer in
+Every Plane run spent about 65 s in `pnpm install` and every Outline run longer in
 `yarn install`, downloading the same packages into a home that is deleted with the run.
 
 ```yaml
@@ -115,17 +123,30 @@ workstation:
     - ~/.m2/repository
 ```
 
+Rewritten for Kubernetes in phase 3 (2026-11-09; `docs/kubernetes.md` §7.6).
+
 - Each entry is a path inside the container, `~`-relative or absolute, outside `/work`.
-  Each is bind-mounted from `<data_dir>/caches/<project slug>/<n>-<sanitised path>/`,
-  created on first use and owned by the run user, into the setup, run and resume
-  containers and into Verify. The same directories are shared by every run of the project,
-  concurrent ones included; package managers that write their stores concurrently (pnpm,
-  uv, npm, Maven, Go) are built for that.
-- Nothing cleans them. The size per project is shown on the project page (one `du` at
-  read time is enough); an admin removes the directory to reset. A later "Clear caches"
-  button is out of scope.
-- Hard links do not cross bind mounts, so pnpm copies from its store into `/work`
-  instead of linking. That is still a download saved; the skill notes it.
+  Each is the directory `caches/<n>-<sanitised path>` of the project's **project volume**, a
+  PVC (`exradius-project-<slug>`) that the operator creates on the project's first run and
+  the worker deletes with the project. It is mounted at its path in the setup containers and
+  the workstation, of tasks and of Verify. The same directories are shared by every run of
+  the project, concurrent ones included; package managers that write their stores
+  concurrently (pnpm, uv, npm, Maven, Go) are built for that.
+- The run's first container creates the directories, and the mount point of every cache
+  below the home or `/tmp`, as the run user; otherwise the kubelet would create a missing
+  `~/.cache` as root and other tools could no longer write there.
+- The same volume holds the repositories' git mirrors (`docs/kubernetes.md` §7.5), so a
+  clone fetches only what is new.
+- Values `runs.projectVolume`: `ReadWriteOnce` for one node (kind), `ReadWriteMany` with an
+  RWX storage class (EFS, Filestore, Azure Files, NFS) for several, or `enabled: false`: then
+  clones fetch from the remote and each cache is an empty directory of the run's own
+  workspace.
+- Nothing cleans the caches, and the panel no longer shows their size: no Exradius process
+  mounts the volume. Resetting a project's caches means deleting its PVC while no run of the
+  project is active (`kubectl -n exradius-runs delete pvc exradius-project-<slug>`); the
+  next run creates it again, empty.
+- Hard links do not cross mounts, so pnpm copies from its store into `/work` instead of
+  linking. That is still a download saved; the skill notes it.
 - Trust: a cache is per project, so a run can only affect later runs of the same project,
   the same boundary the repository itself already has.
 
@@ -138,7 +159,8 @@ services:
     command: [server, /data]
 ```
 
-`command: list[str]` is passed as the container command; the image's entrypoint is kept.
+`command: list[str]` is the container's arguments (Docker's `CMD`); the image's entrypoint
+is kept.
 Plane's bucket bootstrap no longer needs a Dockerfile. No `entrypoint` key: an image that
 needs its entrypoint replaced is a Dockerfile, as today.
 
@@ -173,6 +195,14 @@ installed at run time outside the home; what a run needs goes in the Dockerfile)
 check script accepts and applies the new keys (`memory` as a `--memory` flag, `cache` as
 bind mounts from a local cache directory, `command`). The four example configs in the
 skill's references gain `resources` and `cache` lines.
+
+Since phase 3 of the move to Kubernetes the check script mirrors the run's pod rather than
+v0.1.0's containers: one container holds the network namespace, with every service name
+mapped to `127.0.0.1`, and the services, the setup commands and the workstation join it
+(`docker run --network container:<it>`), so services are reached on `localhost` by name and
+two services on one port collide as they would in a run. A service's `command` is its
+arguments, its `tcp` check connects to the shared address, and the 120 s deadline counts
+from its start. The egress proxy variables and `network.allow` come with phase 4.
 
 ## 10. Out of scope
 

@@ -58,21 +58,21 @@ workstation:                      # the agent's container image; one of image / 
     - ~/.m2/repository            # ~-relative or absolute, outside /work
 
 resources:                        # optional
-  memory: 6g                      # the workstation (setup, run, resume); reserved and enforced
+  memory: 6g                      # the workstation (setup, run); its request and limit
 
-services:                         # dependencies started next to the agent, by host name
+services:                         # dependencies started next to the agent, by host name on localhost
   postgres:
     image: postgres:16            # or dockerfile: + context: as above
     env:
       POSTGRES_USER: app
       POSTGRES_DB: app
       POSTGRES_PASSWORD: ${secret:DB_PASSWORD}
-    ports: [5432]                 # documentation for the agent; nothing is published
+    ports: [5432]                 # documentation for the agent; unique across services
     ready: {command: [pg_isready, -U, app]}   # or {tcp: 5432}; default: image HEALTHCHECK or "running"
-    memory: 512m                  # optional; reserved and enforced like resources.memory
+    memory: 512m                  # optional; its request and limit, like resources.memory
   minio:
     image: minio/minio
-    command: [server, /data]      # optional; the container command, the entrypoint is kept
+    command: [server, /data]      # optional; the container's arguments, the entrypoint is kept
 
 env:                              # project environment, in the workstation and setup
   DATABASE_URL: postgres://app:${secret:DB_PASSWORD}@postgres:5432/app
@@ -117,22 +117,26 @@ Rules:
   the way `environment.py` already does for service settings.
 - `dockerfile` and `context` paths are relative to the config file's directory and must
   stay inside the repository (no `..`, no absolute paths, no symlinks leaving it).
-- Service names: `[a-z][a-z0-9-]*`, not `api`, `exradius-api`, nor any repository folder
-  name. Agent and connection names: `[a-z][a-z0-9-]*`.
-- `resources.memory` and a service's `memory` are Docker sizes with a unit (`512m`, `6g`,
-  `1.5g`; at least `6m`). Each is reserved before a run or verification starts (it waits
-  in `queued` until the worker's budget fits) and is the container's memory limit, swap
-  included; a container killed by it fails with "exceeded its declared memory (6g)".
-  Undeclared reserves nothing and limits nothing (docs/run-environment.md §4).
+- Service names: `[a-z][a-z0-9-]*`, at most 55 characters (the sidecar is
+  `service-<name>`), not `api`, `localhost`, `workstation`, anything starting with
+  `exradius`, nor any repository folder name. Agent and connection names: `[a-z][a-z0-9-]*`.
+- Services share the run's `localhost` (docs/environment-and-services.md §2), so a port is
+  listed by one service only: `services.b.ports: 5432 is also a port of service a`.
+- `resources.memory` and a service's `memory` are sizes with a binary unit (`512m`, `6g`,
+  `1.5g`; at least `6m`). Each is the request and the limit of its containers: the run's pod
+  is placed on a node with room for it, waiting as "waiting for cluster capacity" until one
+  has, and a container over it is killed and fails with "exceeded its declared memory
+  (6g)". Undeclared gets the install's default request and no limit
+  (docs/run-environment.md §4).
 - `workstation.cache` entries start with `~/` or `/`, name a directory below the home or
   the root (not `~`, `/tmp` or `/home/runner` themselves), use no `..`, lie outside `/work`
   and outside `/exradius`, `/opt/exradius`, `/proc`, `/sys`, `/dev`, `/etc/passwd` and
-  `/etc/group`, and are listed once. Each is bind-mounted from
-  `<data_dir>/caches/<slug>/<n>-<sanitised path>/` into the setup, run and resume
-  containers and Verify; nothing cleans them, the project page shows their size, and they
-  are deleted with the project (docs/run-environment.md §5).
+  `/etc/group`, and are listed once. Each is the directory `caches/<n>-<sanitised path>` of
+  the project volume, mounted at its path in the setup containers and the workstation of
+  tasks and Verify; nothing cleans them, and they are deleted with the project
+  (docs/run-environment.md §5).
 - A service's `command` is a non-empty list of strings (numbers quoted; `""` is an
-  argument); there is no `entrypoint` key.
+  argument), the container's arguments; there is no `entrypoint` key.
 - Unknown keys anywhere are errors (typos must not pass silently). `version` must be 1.
 
 ### 2.1 Bridge files
@@ -218,8 +222,8 @@ Each Build is recorded in `image_builds` (`project_id`, `name`, `tree_hash`, `im
 Verify builds every image first ("Build workstation", "Build service postgres") and shows
 the build's log as it grows, or says the image is up to date; a run waits for its images in
 `preparing` ("building images") and a run whose build fails ends `failed` in `preparing`
-with the log tail in the error. Services stay unavailable until phase 3, so only workstation
-Dockerfiles are built for now.
+with the log tail in the error. Service Dockerfiles are built the same way, as
+`exradius/<project>/<service>:<hash>`.
 
 Images named with `image:` are pulled as today.
 
@@ -284,16 +288,17 @@ migration chain may be replaced by a single initial migration.
 ## 9. Worker changes
 
 `preparing`: read the config at the branch head (§3) → reject/fail with the reason if not
-runnable → build images (§4) → create the run directory, clone the `repositories` →
-start services on the per-run network (environment-and-services.md §2 unchanged) →
-setup commands → start the workstation. The environment section (environment-and-
+runnable → build images (§4) → create the Run, whose pod (docs/kubernetes.md §7) clones the
+`repositories` from their mirrors, starts the services as sidecars on its `localhost`
+(environment-and-services.md §2), runs the setup commands and starts the workstation. The environment section (environment-and-
 services.md §1) is generated from the snapshot: image name (or `built from
 <dockerfile>`), repositories, services with their non-secret settings, notes. The
 operating rules (architecture §13) are unchanged. The agent's `role` is the system
 prompt's last part when present.
 
-Verify: "Read config" (commit, errors, warnings, missing keys) → "Build …" → the existing
-steps.
+Verify: "Read config" (commit, errors, warnings, missing keys) → "Build …" → the verify Run's
+steps: "Prepare workspace", "Clone …", "Start service …", "Setup: …", "List tools …"
+(docs/setup-and-verify.md §1).
 
 ## 10. Admin panel
 

@@ -2,6 +2,11 @@
 // pod (docs/kubernetes.md §7). Everything here is a pure function of the Run and the
 // operator's configuration. The security context is written here and nothing in a Run
 // can change it (§7.8).
+//
+// The setup skill's local check (scripts/check.sh in github.com/musabeytekin/exradius-skill,
+// docs/setup-and-verify.md §2.4) mirrors this pod with the Docker CLI: the shared network
+// namespace, the services' security and readiness, the run user's conditions. Changing one
+// means changing the other.
 package podspec
 
 import (

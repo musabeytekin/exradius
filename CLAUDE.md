@@ -14,8 +14,8 @@ job of an integration layer outside this repo.
 The design lives in `docs/` and is the source of truth when code and prose disagree:
 `architecture.md` (system, message contracts, run lifecycle, state machine, §12 implementation
 notes, §13 operating rules), `kubernetes.md` (the Run resource, pods, operator, chart, local
-loop) and `kubernetes-plan.md` (the phases: phase 1 runs image-based projects without
-services; builds and services come in phases 2 and 3), `config-repo.md` (the current project
+loop) and `kubernetes-plan.md` (the phases: 1 runs, 2 image builds, 3 services, memory,
+caches and Verify parity with v0.1.0; 4 to 6 egress, isolation, clouds), `config-repo.md` (the current project
 model), `environment-and-services.md`,
 `runtime-bundles.md`, `providers.md`, `agent-identity.md`, `onboarding.md` (panel),
 `integration-api.md` (hook, directory, bridge files, bridge status), `agent-routing.md`. These are
@@ -95,11 +95,16 @@ The schema is strict pydantic with `extra="forbid"` in `schemas/project_config.p
   the API caches the latest snapshot on `projects.snapshot` for the panel only.
 - The worker never trusts that cache: intake and `preparing` read the file afresh and
   record `runs.config_commit`. Tasks for a project with errors or missing keys are rejected
-  with the reason. `capabilities.py` says what this version cannot run yet (`services`);
-  that is the health reason too.
+  with the reason. `capabilities.py` is the hook for keys a version accepts before it can
+  run them (empty since phase 3); its reason would be the health reason too.
 - `worker/builds.py` turns each Dockerfile into a `Build` object (create-if-absent, tag by
   tree hash, context tar in the object store, served by `/internal/builds/{id}/context`)
   and waits on it in `preparing` and in Verify's "Build workstation" step.
+- Services are native sidecars of the run's pod on its `localhost` (`hostAliases`);
+  `worker/registry.py` reads an image's `HEALTHCHECK` from its registry for a service
+  without `ready`. Each project has a PVC `exradius-project-<slug>` for git mirrors and
+  `workstation.cache` (`worker/caches.py` names them); the worker deletes it with the
+  project.
 - `resolve.py` turns the config into run inputs; secrets are decrypted only there, when the
   Run and its per-run Secret are created. Everything shown to the panel, the agent's environment section, events and logs
   uses `$NAME` placeholders.

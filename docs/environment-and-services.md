@@ -3,11 +3,14 @@
 > **Since the config-repo change (`docs/config-repo.md`, 2026-11-07)** the project's file provides
 > what this document puts in tables and panel tabs: `services` (with `image` or a `dockerfile`
 > built from the config repository), `env`, `notes`, `workstation` (image or Dockerfile, and
-> `setup`), and each agent's `model`. The environment section, the services' lifecycle, the
-> networks, the delivery warning and the passwd fix below are unchanged; the `project_services`
-> table, the Services API and tab, `projects.notes` and `agents.model` columns are gone. A
-> `${secret:NAME}` now resolves from the config's secret store, and the workstation carries every
-> secret its services' settings use under its own name, which is what `$NAME` in the section means.
+> `setup`), and each agent's `model`. The `project_services` table, the Services API and tab,
+> `projects.notes` and `agents.model` columns are gone. A `${secret:NAME}` resolves from the
+> config's secret store, and the workstation carries every secret its services' settings use
+> under its own name, which is what `$NAME` in the section means.
+>
+> **Since phase 3 of the move to Kubernetes (2026-11-09)** services are sidecars of the run's
+> pod on its `localhost`; §2 is rewritten for it. The environment section, the delivery
+> warning and the passwd fix are unchanged.
 
 Agreed 2026-11-07 after the Bank of Anthos live tests. Four problems and the decisions:
 
@@ -73,59 +76,75 @@ section as the worker would build it, so the panel can show it.
 ## 2. Services
 
 A project may list services, the dependencies an engineer would run in Docker Desktop.
-GitHub Actions `services:` is the model: an image and its settings, nothing to build,
-nothing to parse from the repository.
+GitHub Actions `services:` is the model: an image (or a Dockerfile in the config repository)
+and its settings, nothing to parse from the repository. They are declared in the config's
+`services` (docs/config-repo.md §2): `name` (the host name, `[a-z][a-z0-9-]*`, at most 55
+characters), `image` or `dockerfile`, `env` (values may use `${secret:NAME}`), `ports`
+(integers, documentation for the agent; nothing is published), `ready`, `command` and
+`memory`.
 
-`project_services` table: `id`, `project_id`, `name` (host name on the run network,
-`[a-z][a-z0-9-]*`, unique per project), `image`, `env` JSON (values may use
-`${secret:NAME}` like connections), `ports` JSON (integers, documentation for the agent;
-nothing is published), `ready` JSON (`null` = the image's HEALTHCHECK when it has one,
-else "container is running"; or `{"tcp": 5432}` to wait for a port; or
-`{"command": ["pg_isready", "-U", "app"]}`), `position` for ordering.
+Rewritten for Kubernetes in phase 3 (2026-11-09; `docs/kubernetes.md` §7.4). Until v0.1.0
+each service was a container on a per-run Docker network; now it is part of the run's pod.
 
-Lifecycle, per run:
+**Lifecycle, per run.** Each service is a native sidecar of the run's pod: an init container
+with `restartPolicy: Always`, after the clones and before the setup commands, in file order.
+Kubernetes starts them one by one and starts the next container only when the service is
+started, so setup commands and the agent always find their services up. They keep running
+while the run waits for input (the pod keeps running), and they stop with the pod. Deleting
+the Run at the end removes them with everything else; there is no network, label or sweep of
+Exradius's own.
 
-1. In `preparing`, after cloning and before setup commands: the worker creates a network
-   `exradius-run-<run_id>` and starts each service on it with the alias `name`, labels
-   `exradius.run_id` and `exradius.kind=service`, `cap_drop ALL` plus the capabilities
-   common server images need (`CHOWN`, `SETUID`, `SETGID`, `FOWNER`, `DAC_OVERRIDE`,
-   `NET_BIND_SERVICE`), `no-new-privileges`, no mounts, env decrypted at that moment.
-2. It waits for `ready` (timeout 120 s per service, configurable later). A service that
-   does not become ready fails the run in `preparing` with the service name and its log
-   tail.
-3. Setup commands and the agent container join the same network. Project env vars can
-   therefore say `DATABASE_URL=postgres://app:${secret:DB_PASSWORD}@postgres:5432/app`;
-   secret references in project env vars are resolved like connection values.
-4. While the run waits for input the services stay up; resume joins the same network.
-5. At finalize: stop and remove the services and the network. `reconcile` and
-   `sweep_orphans` remove services and networks whose run is finished or unknown, by label.
+**Readiness.** `ready` becomes the sidecar's startup probe, tried every second:
 
-Networks (changed after BANK-204, where a run's `postgres` resolved to Exradius's own
-database because runs were on the stack network):
+| `ready` | startup probe |
+|---|---|
+| `{command: [...]}` | that command, run in the service's container (no shell) |
+| `{tcp: p}` | a TCP connection to port `p` from the kubelet. It connects to the pod's address, so a service that listens only on 127.0.0.1 needs a `command` instead |
+| `null` | the image's `HEALTHCHECK` (`CMD` as is, `CMD-SHELL` through `/bin/sh -c`), which the worker reads from the image's registry because Kubernetes ignores it; without one, or when the image's config cannot be read, the service counts as started once its process runs |
 
-- `exradius`: the stack (api, worker, frontend, postgres, rabbitmq). Runs never join it.
-- `exradius-runs` (`run_network`): the API, with the alias `exradius-api`, and every run,
-  setup and provider-probe container. Runs reach the API at `http://exradius-api:8000`
-  (`run_api_url`). The worker is not on it.
-- `exradius-run-<run_id>`: with services, the run's own network, so parallel runs never
-  share a database. Setup and run containers are on it and on `exradius-runs`.
-- The delivery check (§4) runs with no network.
+A service that is not started 120 s after its container started (an image pull does not
+count), or that exits or restarts before it is started, fails the run in `preparing` with the
+service's name and image, what happened and its log tail:
 
-Service names that would shadow a name runs already resolve are refused: `api`, the host of
-`run_api_url`, and anything starting with `exradius`.
+```
+service cache (valkey/valkey:8.1-alpine) did not become ready within 120s waiting for port 6379
+<the service's last log lines>
+```
 
-Verify: steps "Start service <name>" (with readiness) for each service, before the setup
-commands, and "Stop services" at the end. There is no image probe or "Inspect image" step:
-agents discover tools themselves.
+The operator decides this, not Kubernetes, which would restart a failing sidecar forever. A
+service that crashes after it started is restarted by Kubernetes and the run goes on.
 
-API: `GET/POST /api/projects/{id}/services`, `PATCH/DELETE /api/projects/{id}/services/{sid}`,
-`PUT /api/projects/{id}/services/order`. `ProjectServiceIn/Out` carry the columns above.
+**One network namespace.** A pod's containers share one network namespace, so the services
+and the workstation share `localhost`, as on an engineer's machine where compose publishes
+every service's ports there:
 
-Panel: a **Services** tab on the project. "Add service" opens a small catalog (Postgres,
-MySQL, Redis, RabbitMQ, MongoDB, Elasticsearch, Mailpit, MinIO) that prefills image, env
-with sensible defaults and the secret-backed password field labelled as such, ports and
-readiness; a "Custom image" entry leaves the fields empty. Rows show name, image, ports,
-readiness and the last verify outcome for the service. Pick, don't type.
+- The pod's `hostAliases` map every service name to `127.0.0.1`, so `postgres:5432` resolves
+  as before. This is the kubelet-managed `/etc/hosts`, which a project cannot change.
+- Ports are shared: the config check refuses a port listed by two services, and `localhost`
+  is a reserved service name. Two services that listen on the same undeclared port collide;
+  the second fails in Verify.
+- Parallel runs never share a service: each run is its own pod.
+
+**What a service gets.** Its image's own user, entrypoint and writable root filesystem; the
+config's `command` as the container's arguments (Docker's `CMD`; the image's `ENTRYPOINT` is
+kept); its `env`, with plain values inline and values holding a secret from the run's
+Secret; the capabilities common server images need (`CHOWN`, `SETUID`, `SETGID`, `FOWNER`,
+`DAC_OVERRIDE`, `NET_BIND_SERVICE`, every other one dropped), no privilege escalation and
+seccomp `RuntimeDefault`; no mounts (an image's `VOLUME` lives in the writable layer). A
+declared `memory` is its request and limit; without one it gets the install's default request
+and no limit.
+
+Names that would shadow something runs resolve are refused: `api`, `localhost`,
+`workstation` and anything starting with `exradius`.
+
+**Verify** shows a "Start service <name>" step per service, after the clones and before the
+setup commands, with what it waits for ("waiting for command pg_isready -h 127.0.0.1 -U app"),
+then "ready (...)" or the failure with the log tail. There is no "Stop services" step: the
+verify Run is deleted at the end.
+
+**The panel** shows services read-only in the project's Config tab (name, image or
+Dockerfile, ports, readiness, memory, env with secrets as placeholders). Nothing about them
+is edited there.
 
 ## 3. Model on the agent
 
