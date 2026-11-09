@@ -10,12 +10,14 @@ import (
 	"os"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -127,9 +129,16 @@ func main() {
 		LeaderElectionNamespace: leaderNamespace,
 		// Release the Lease on a clean exit, so a new replica takes over at once.
 		LeaderElectionReleaseOnCancel: true,
-		// Runs, pods and PVCs live in the runs namespace, Builds and their pods in the
-		// builds namespace; nothing else is watched.
-		Cache: cache.Options{DefaultNamespaces: map[string]cache.Config{runsNamespace: {}, buildsNamespace: {}}},
+		// Runs and PVCs live in the runs namespace, Builds in the builds namespace, pods in
+		// both; nothing else is watched (and RBAC allows no more).
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{runsNamespace: {}, buildsNamespace: {}},
+			ByObject: map[client.Object]cache.ByObject{
+				&v1.Run{}:                       {Namespaces: map[string]cache.Config{runsNamespace: {}}},
+				&corev1.PersistentVolumeClaim{}: {Namespaces: map[string]cache.Config{runsNamespace: {}}},
+				&v1.Build{}:                     {Namespaces: map[string]cache.Config{buildsNamespace: {}}},
+			},
+		},
 	})
 	if err != nil {
 		fail(logger, err)
