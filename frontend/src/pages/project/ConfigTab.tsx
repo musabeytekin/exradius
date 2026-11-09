@@ -6,7 +6,7 @@ import { CodeBlock, CopyButton } from "@/components/ui/data";
 import { Icon } from "@/components/ui/icons";
 import { Tooltip } from "@/components/ui/overlays";
 import { Banner, Button, Card, CardHeader, Chip, Mono } from "@/components/ui/primitives";
-import { absoluteTime, bytes, pretty, relativeTime } from "@/lib/format";
+import { absoluteTime, pretty, relativeTime } from "@/lib/format";
 import {
   agentsOf, catalogKeyNames, commitOf, configOf, connectionsOf, errorsOf, projectHealth, rawOf, readAtOf,
   readErrorOf, readyLabel, servicesOf, shortCommit, storeNameOf, warningsOf,
@@ -151,9 +151,6 @@ export function ConfigView({ project, catalog, onReread, rereading, onReplaceHoo
                 ["Cache", ws?.cache?.length ? (
                   <div key="k" className="flex flex-col gap-1">
                     {ws.cache.map((c) => <Mono key={c} className="break-all text-xs">{c}</Mono>)}
-                    <span className="text-xs text-muted">
-                      {project.cache_bytes != null ? `${bytes(project.cache_bytes)} on disk` : "empty"}
-                    </span>
                   </div>
                 ) : <Dim key="k">none</Dim>],
               ]}

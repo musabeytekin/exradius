@@ -22,6 +22,20 @@ spec:
 status: {}
 ---
 metadata:
+  labels:
+    exradius.dev/project: saleor
+    exradius.dev/volume: project
+  name: exradius-project-saleor
+  namespace: exradius-runs
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+status: {}
+---
+metadata:
   annotations:
     exradius.dev/task-id: SAL-101
   labels:
@@ -96,7 +110,9 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /work
       name: workspace
@@ -125,8 +141,20 @@ spec:
       name: identity
       readOnly: true
       subPath: group
+    - mountPath: /home/runner/.cache/uv
+      name: project
+      subPath: caches/0-cache_uv
+    - mountPath: /opt/pnpm-store
+      name: project
+      subPath: caches/1-opt_pnpm-store
     workingDir: /work
   enableServiceLinks: false
+  hostAliases:
+  - hostnames:
+    - postgres
+    - cache
+    - mail
+    ip: 127.0.0.1
   initContainers:
   - command:
     - /opt/exradius/runtime/bin/exradius-runner
@@ -145,6 +173,10 @@ spec:
       value: task
     - name: EXRADIUS_ID
       value: 3f2c
+    - name: EXRADIUS_CACHES
+      value: '[{"path":"/home/runner/.cache/uv","name":"0-cache_uv"},{"path":"/opt/pnpm-store","name":"1-opt_pnpm-store"}]'
+    - name: EXRADIUS_PROJECT_DIR
+      value: /exradius/project
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: prepare
@@ -155,13 +187,17 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /exradius/workspace
       name: workspace
     - mountPath: /opt/exradius/runtime
       name: runtime
       readOnly: true
+    - mountPath: /exradius/project
+      name: project
   - command:
     - /opt/exradius/runtime/bin/exradius-runner
     - --clone
@@ -196,6 +232,8 @@ spec:
         secretKeyRef:
           key: repo.0
           name: run-3f2c
+    - name: EXRADIUS_MIRROR_DIR
+      value: /exradius/mirrors
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: clone-0
@@ -206,7 +244,9 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /work
       name: workspace
@@ -231,6 +271,9 @@ spec:
       name: identity
       readOnly: true
       subPath: group
+    - mountPath: /exradius/mirrors
+      name: project
+      subPath: mirrors
     workingDir: /work
   - command:
     - /opt/exradius/runtime/bin/exradius-runner
@@ -260,6 +303,8 @@ spec:
     - name: EXRADIUS_CLONE_BRANCH
     - name: EXRADIUS_CLONE_INDEX
       value: "1"
+    - name: EXRADIUS_MIRROR_DIR
+      value: /exradius/mirrors
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: clone-1
@@ -270,7 +315,9 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /work
       name: workspace
@@ -295,7 +342,112 @@ spec:
       name: identity
       readOnly: true
       subPath: group
+    - mountPath: /exradius/mirrors
+      name: project
+      subPath: mirrors
     workingDir: /work
+  - env:
+    - name: POSTGRES_USER
+      value: saleor
+    - name: POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: service.postgres.POSTGRES_PASSWORD
+          name: run-3f2c
+    image: postgres:16
+    imagePullPolicy: IfNotPresent
+    name: service-postgres
+    resources:
+      limits:
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 512Mi
+    restartPolicy: Always
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        add:
+        - CHOWN
+        - SETUID
+        - SETGID
+        - FOWNER
+        - DAC_OVERRIDE
+        - NET_BIND_SERVICE
+        drop:
+        - ALL
+      readOnlyRootFilesystem: false
+      seccompProfile:
+        type: RuntimeDefault
+    startupProbe:
+      exec:
+        command:
+        - pg_isready
+        - -h
+        - 127.0.0.1
+        - -U
+        - saleor
+      failureThreshold: 240
+      periodSeconds: 1
+      successThreshold: 1
+      timeoutSeconds: 10
+  - args:
+    - valkey-server
+    - --save
+    - ""
+    image: valkey/valkey:8.1-alpine
+    imagePullPolicy: IfNotPresent
+    name: service-cache
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+    restartPolicy: Always
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        add:
+        - CHOWN
+        - SETUID
+        - SETGID
+        - FOWNER
+        - DAC_OVERRIDE
+        - NET_BIND_SERVICE
+        drop:
+        - ALL
+      readOnlyRootFilesystem: false
+      seccompProfile:
+        type: RuntimeDefault
+    startupProbe:
+      failureThreshold: 240
+      periodSeconds: 1
+      successThreshold: 1
+      tcpSocket:
+        port: 6379
+      timeoutSeconds: 1
+  - image: axllent/mailpit
+    imagePullPolicy: IfNotPresent
+    name: service-mail
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+    restartPolicy: Always
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        add:
+        - CHOWN
+        - SETUID
+        - SETGID
+        - FOWNER
+        - DAC_OVERRIDE
+        - NET_BIND_SERVICE
+        drop:
+        - ALL
+      readOnlyRootFilesystem: false
+      seccompProfile:
+        type: RuntimeDefault
   - command:
     - /bin/sh
     - -c
@@ -335,7 +487,9 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /work
       name: workspace
@@ -361,6 +515,12 @@ spec:
       name: identity
       readOnly: true
       subPath: group
+    - mountPath: /home/runner/.cache/uv
+      name: project
+      subPath: caches/0-cache_uv
+    - mountPath: /opt/pnpm-store
+      name: project
+      subPath: caches/1-opt_pnpm-store
     workingDir: /work
   - command:
     - /bin/sh
@@ -401,7 +561,9 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /work
       name: workspace
@@ -427,6 +589,12 @@ spec:
       name: identity
       readOnly: true
       subPath: group
+    - mountPath: /home/runner/.cache/uv
+      name: project
+      subPath: caches/0-cache_uv
+    - mountPath: /opt/pnpm-store
+      name: project
+      subPath: caches/1-opt_pnpm-store
     workingDir: /work
   - command:
     - /opt/exradius/runtime/bin/exradius-runner
@@ -475,9 +643,6 @@ spec:
   securityContext:
     fsGroup: 1000
     fsGroupChangePolicy: OnRootMismatch
-    runAsGroup: 1000
-    runAsNonRoot: true
-    runAsUser: 1000
     seccompProfile:
       type: RuntimeDefault
     supplementalGroupsPolicy: Strict
@@ -495,6 +660,9 @@ spec:
       defaultMode: 292
       name: exradius-run-identity
     name: identity
+  - name: project
+    persistentVolumeClaim:
+      claimName: exradius-project-saleor
   - emptyDir: {}
     name: files-tmp
 status: {}

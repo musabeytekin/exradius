@@ -161,7 +161,7 @@ func (c BuildConfig) contextContainer(build *v1.Build) corev1.Container {
 			}}},
 		},
 		VolumeMounts:    []corev1.VolumeMount{{Name: volBuildWorkspace, MountPath: BuildWorkspace}},
-		SecurityContext: securityContext(),
+		SecurityContext: restricted(),
 	}
 }
 

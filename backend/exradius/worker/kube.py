@@ -3,8 +3,8 @@ runs namespace, Builds and their token Secrets in the builds namespace, and the 
 Lease.
 
 What the worker may do there is its RBAC: create, patch, delete, get, list and watch Runs;
-create, get and delete Builds; create, patch and delete Secrets (never read them); get the
-operator's Lease. It never creates pods. The client speaks to the API server over HTTPS with the pod's
+create, get and delete Builds; create, patch and delete Secrets (never read them); list
+and delete PVCs (project volumes, deleted with their project); get the operator's Lease. It never creates pods. The client speaks to the API server over HTTPS with the pod's
 ServiceAccount token, which the kubelet rotates, so the token file is re-read.
 
 ``Cluster`` is the protocol ``RunManager`` uses; the tests give it a fake.
@@ -86,6 +86,14 @@ class Cluster(Protocol):
         ...
 
     async def get_lease(self, namespace: str, name: str) -> dict[str, Any] | None: ...
+
+    async def list_pvcs(self, selector: str) -> list[dict[str, Any]]:
+        """PVCs of the runs namespace matching a label selector."""
+        ...
+
+    async def delete_pvc(self, name: str) -> bool:
+        """Delete a PVC of the runs namespace (it goes once no pod uses it); ``False`` if absent."""
+        ...
 
 
 class KubeCluster:
@@ -252,6 +260,24 @@ class KubeCluster:
                     code = int(obj.get("code") or 500)
                     raise (Gone if code == 410 else KubeError)(code, str(obj.get("message") or ""))
                 yield kind, obj
+
+    def _pvcs(self, name: str | None = None) -> str:
+        path = f"/api/v1/namespaces/{self.namespace}/persistentvolumeclaims"
+        return f"{path}/{name}" if name else path
+
+    async def list_pvcs(self, selector: str) -> list[dict[str, Any]]:
+        response = await self._request("GET", self._pvcs(), params={"labelSelector": selector})
+        if response.status_code >= 300:
+            raise self._error(response)
+        return list(response.json().get("items") or [])
+
+    async def delete_pvc(self, name: str) -> bool:
+        response = await self._request("DELETE", self._pvcs(name))
+        if response.status_code == 404:
+            return False
+        if response.status_code >= 300:
+            raise self._error(response)
+        return True
 
     async def get_lease(self, namespace: str, name: str) -> dict[str, Any] | None:
         response = await self._request("GET", f"/apis/coordination.k8s.io/v1/namespaces/{namespace}/leases/{name}")

@@ -199,6 +199,87 @@ spec:
                 description: SecretName is the per-run Secret, in the Run's namespace.
                 minLength: 1
                 type: string
+              services:
+                description: Services start in order after the clones and run until
+                  the workstation ends.
+                items:
+                  description: |-
+                    ServiceSpec is one service: a native sidecar on the pod's network, reached by its name
+                    through hostAliases (docs/kubernetes.md §7.4).
+                  properties:
+                    command:
+                      description: Command replaces the image's CMD (the container's
+                        args); its ENTRYPOINT is kept.
+                      items:
+                        type: string
+                      type: array
+                    env:
+                      items:
+                        description: 'EnvVar is one environment variable: a literal
+                          value, or a key of the Run''s Secret.'
+                        properties:
+                          name:
+                            minLength: 1
+                            type: string
+                          secretKey:
+                            description: SecretKey names a key of spec.secretName.
+                            type: string
+                          value:
+                            type: string
+                        required:
+                        - name
+                        type: object
+                        x-kubernetes-validations:
+                        - message: value and secretKey are exclusive
+                          rule: '!(has(self.value) && has(self.secretKey))'
+                      type: array
+                    image:
+                      minLength: 1
+                      type: string
+                    memory:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: Memory becomes request and limit of the sidecar.
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    name:
+                      description: Name is the host name the workstation reaches it
+                        by; its container is service-<name>.
+                      maxLength: 55
+                      pattern: ^[a-z][a-z0-9-]*$
+                      type: string
+                    ports:
+                      description: Ports are documentation for the agent; nothing
+                        is published.
+                      items:
+                        format: int32
+                        type: integer
+                      type: array
+                    ready:
+                      description: |-
+                        Ready becomes the startup probe; absent, the service counts as started once its
+                        process runs.
+                      properties:
+                        exec:
+                          items:
+                            type: string
+                          minItems: 1
+                          type: array
+                        tcp:
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                      type: object
+                      x-kubernetes-validations:
+                      - message: give exactly one of exec or tcp
+                        rule: has(self.exec) != has(self.tcp)
+                  required:
+                  - image
+                  - name
+                  type: object
+                type: array
               taskId:
                 type: string
               workstation:
@@ -206,10 +287,27 @@ spec:
                   and its setup commands.
                 properties:
                   caches:
-                    description: Caches are accepted and not used yet (the project
-                      volume comes later).
+                    description: |-
+                      Caches are directories kept across the project's runs: on the project volume, or
+                      empty directories on the workspace when there is none (docs/kubernetes.md §7.6).
                     items:
-                      type: string
+                      description: CacheSpec is one workstation.cache entry.
+                      properties:
+                        name:
+                          description: Name is its directory, caches/<name>, named
+                            by the worker.
+                          maxLength: 100
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*$
+                          type: string
+                        path:
+                          description: Path is where setup commands and the workstation
+                            see it.
+                          pattern: ^/
+                          type: string
+                      required:
+                      - name
+                      - path
+                      type: object
                     type: array
                   env:
                     description: Env is the project's environment, for setup commands
@@ -387,6 +485,11 @@ spec:
                     log:
                       description: Log is the last 4000 characters of the container's
                         log, read when it ended.
+                      type: string
+                    message:
+                      description: |-
+                        Message says, in one line, why the operator failed the step itself (a service that
+                        did not become ready).
                       type: string
                     name:
                       type: string

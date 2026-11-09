@@ -270,3 +270,147 @@ func TestTail(t *testing.T) {
 		t.Fatal("short logs are kept, trimmed")
 	}
 }
+
+func serviceRun() *v1.Run {
+	r := run()
+	r.Spec.Services = []v1.ServiceSpec{
+		{Name: "db", Image: "postgres:16", Ready: &v1.ReadySpec{Exec: []string{"pg_isready", "-U", "app"}}},
+		{Name: "cache", Image: "valkey/valkey:8", Ready: &v1.ReadySpec{TCP: 6379}},
+	}
+	r.Status = Reset(r, "run-1-0")
+	return r
+}
+
+func started(cs corev1.ContainerStatus, value bool) corev1.ContainerStatus {
+	cs.Started = &value
+	return cs
+}
+
+func runningSince(name string, since time.Time) corev1.ContainerStatus {
+	return corev1.ContainerStatus{Name: name, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(since)}}}
+}
+
+func stepOf(st v1.RunStatus, container string) v1.Step {
+	for _, s := range st.Steps {
+		if s.Container == container {
+			return s
+		}
+	}
+	return v1.Step{}
+}
+
+// A service's step runs while its startup probe waits, passes once it is started, and
+// stays passed when the pod's end stops it.
+func TestServiceSteps(t *testing.T) {
+	r := serviceRun()
+	db, cache := podspec.ServiceContainer("db"), podspec.ServiceContainer("cache")
+	inits := []corev1.ContainerStatus{
+		terminated(podspec.ContainerPrepare, 0, "Completed"), terminated(podspec.CloneContainer(0), 0, "Completed"),
+		started(runningSince(db, now.Add(-10*time.Second)), false), waiting(cache, "PodInitializing", ""),
+	}
+	obs := Observe(r, pod(corev1.PodPending, "node", inits, nil), now)
+	if s := stepOf(obs.Status, db); s.Name != "Start service db" || s.State != v1.StepRunning || obs.Fail {
+		t.Fatalf("waiting for its probe: %+v", s)
+	}
+	if obs.RequeueAfter <= 0 || obs.RequeueAfter > ServiceDeadline {
+		t.Fatalf("requeued for the deadline: %v", obs.RequeueAfter)
+	}
+	r.Status = obs.Status
+
+	inits[2] = started(runningSince(db, now.Add(-10*time.Second)), true)
+	inits[3] = started(runningSince(cache, now), false)
+	obs = Observe(r, pod(corev1.PodPending, "node", inits, nil), now)
+	if s := stepOf(obs.Status, db); s.State != v1.StepPassed {
+		t.Fatalf("started: %+v", s)
+	}
+	r.Status = obs.Status
+
+	// The workstation ran and ended: every service is stopped with 143, and stays passed.
+	inits[2] = terminated(db, 143, "Error")
+	inits[3] = terminated(cache, 143, "Error")
+	obs = Observe(r, pod(corev1.PodSucceeded, "node", append(inits, terminated(podspec.SetupContainer(0), 0, "Completed")),
+		[]corev1.ContainerStatus{terminated(podspec.ContainerWorkstation, 0, "Completed")}), now)
+	if obs.Status.Phase != v1.PhaseSucceeded || stepOf(obs.Status, db).State != v1.StepPassed ||
+		stepOf(obs.Status, cache).State != v1.StepPassed || obs.Fail {
+		t.Fatalf("services stay passed: %+v", obs.Status)
+	}
+}
+
+func TestServiceDeadline(t *testing.T) {
+	r := serviceRun()
+	db := podspec.ServiceContainer("db")
+	inits := []corev1.ContainerStatus{
+		terminated(podspec.ContainerPrepare, 0, "Completed"), terminated(podspec.CloneContainer(0), 0, "Completed"),
+		started(runningSince(db, now.Add(-ServiceDeadline)), false),
+	}
+	obs := Observe(r, pod(corev1.PodPending, "node", inits, nil), now)
+	s := stepOf(obs.Status, db)
+	if !obs.Fail || obs.Status.Phase != v1.PhaseFailed || obs.Status.Reason != v1.ReasonServiceFailed ||
+		s.State != v1.StepFailed || s.Message != "did not become ready within 120s waiting for command pg_isready -U app" {
+		t.Fatalf("deadline: %+v / %+v", obs.Status, s)
+	}
+	if obs.Status.Message != "service db (postgres:16) did not become ready within 120s waiting for command pg_isready -U app" {
+		t.Fatalf("message %q", obs.Status.Message)
+	}
+	if !contains(obs.Ended, db) {
+		t.Fatalf("its log is read: %+v", obs.Ended)
+	}
+}
+
+// A service that crashes before it is ready is restarted by Kubernetes; the operator fails
+// the Run instead, with the crashed instance's log.
+func TestServiceRestartedBeforeReady(t *testing.T) {
+	r := serviceRun()
+	cache := podspec.ServiceContainer("cache")
+	restarted := started(runningSince(cache, now), false)
+	restarted.RestartCount = 1
+	restarted.LastTerminationState = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+		ExitCode: 137, Reason: "OOMKilled", StartedAt: metav1.NewTime(now.Add(-5 * time.Second)), FinishedAt: metav1.NewTime(now),
+	}}
+	inits := []corev1.ContainerStatus{
+		terminated(podspec.ContainerPrepare, 0, "Completed"), terminated(podspec.CloneContainer(0), 0, "Completed"),
+		started(running(podspec.ServiceContainer("db")), true), restarted,
+	}
+	obs := Observe(r, pod(corev1.PodPending, "node", inits, nil), now)
+	s := stepOf(obs.Status, cache)
+	if !obs.Fail || s.State != v1.StepFailed || s.Reason != "OOMKilled" || *s.ExitCode != 137 ||
+		s.Message != "exited with code 137 before it was ready" {
+		t.Fatalf("restart: %+v", s)
+	}
+	if len(obs.Previous) != 1 || obs.Previous[0] != cache || contains(obs.Ended, cache) {
+		t.Fatalf("the previous instance's log: %+v / %+v", obs.Previous, obs.Ended)
+	}
+
+	// Exited and not restarted yet: its own log.
+	r = serviceRun()
+	inits[3] = terminated(cache, 1, "Error")
+	obs = Observe(r, pod(corev1.PodPending, "node", inits, nil), now)
+	if s := stepOf(obs.Status, cache); !obs.Fail || s.Message != "exited with code 1 before it was ready" || !contains(obs.Ended, cache) {
+		t.Fatalf("exited: %+v %+v", s, obs.Ended)
+	}
+}
+
+// A later container that started proves the service started, even if no status said so.
+func TestServicePassedWhenLaterContainersStarted(t *testing.T) {
+	r := serviceRun()
+	restarted := started(runningSince(podspec.ServiceContainer("db"), now), false)
+	restarted.RestartCount = 2
+	restarted.LastTerminationState = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}
+	inits := []corev1.ContainerStatus{
+		terminated(podspec.ContainerPrepare, 0, "Completed"), terminated(podspec.CloneContainer(0), 0, "Completed"),
+		restarted, started(running(podspec.ServiceContainer("cache")), true), running(podspec.SetupContainer(0)),
+	}
+	obs := Observe(r, pod(corev1.PodPending, "node", inits, nil), now)
+	if obs.Fail || stepOf(obs.Status, podspec.ServiceContainer("db")).State != v1.StepPassed {
+		t.Fatalf("a crash after it was started is not a failure: %+v", obs.Status)
+	}
+}
+
+func contains(list []string, item string) bool {
+	for _, x := range list {
+		if x == item {
+			return true
+		}
+	}
+	return false
+}

@@ -37,9 +37,13 @@ NonEmpty = Annotated[str, StringConstraints(min_length=1)]
 CONFIG_FILES = ("exradius.yaml", ".exradius/exradius.yaml")
 """Where the file is looked for, in this order (§2)."""
 MAX_FILE_SIZE = 1_000_000
-RESERVED_SERVICE_NAMES = ("api", "workstation")
-"""Plus every name starting with ``exradius``: they name the API and Exradius' containers
-on the run network. ``workstation`` would share the built workstation's image tag."""
+RESERVED_SERVICE_NAMES = ("api", "workstation", "localhost")
+"""Plus every name starting with ``exradius``. A run's services share one network
+namespace and are reached by name through the pod's ``/etc/hosts`` (docs/kubernetes.md
+§7.4), so ``localhost`` is taken; ``workstation`` would share the built workstation's
+image tag, and ``api`` and ``exradius*`` name Exradius's own parts."""
+MAX_SERVICE_NAME = 55
+"""A service's container is ``service-<name>``, a DNS label of at most 63 characters."""
 RESERVED_CONNECTION = "exradius"
 """The built-in server every agent has."""
 
@@ -60,11 +64,11 @@ EnvMap = dict[EnvKey, Text]
 MEMORY_UNITS = {"b": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
 MEMORY_PATTERN = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([bkmg])$", re.I)
 MIN_MEMORY = 6 * 1024**2
-"""Docker's smallest container memory limit."""
+"""The smallest memory a container can be given."""
 
 
 def memory_bytes(text: str) -> int:
-    """A Docker size string (``512m``, ``6g``, ``1.5g``) in bytes."""
+    """A size string (``512m``, ``6g``, ``1.5g``, binary units) in bytes."""
     match = MEMORY_PATTERN.match(text.strip())
     if not match:
         raise ValueError(f"not a size: {text!r}")
@@ -72,7 +76,7 @@ def memory_bytes(text: str) -> int:
 
 
 def format_memory(value: int) -> str:
-    """Bytes as the shortest Docker size string that is exact to one decimal (``6g``)."""
+    """Bytes as the shortest size string that is exact to one decimal (``6g``)."""
     for unit in ("g", "m", "k"):
         amount = value / MEMORY_UNITS[unit]
         if amount >= 1:
@@ -92,7 +96,7 @@ def _memory(value: Any) -> Any:
 
 
 Memory = Annotated[str, BeforeValidator(_memory)]
-"""A Docker size string with a unit: ``512m``, ``6g``."""
+"""A size with a unit: ``512m``, ``6g`` (binary: ``6g`` is 6 GiB)."""
 
 
 class _Model(BaseModel):
@@ -141,8 +145,10 @@ class Workstation(_Image):
 
 class Resources(_Model):
     memory: Memory | None = None
-    """The workstation's memory (setup, run and resume containers): reserved before a run
-    starts and enforced as its limit. ``None`` reserves nothing and limits nothing."""
+    """The workstation's memory (setup commands and the workstation): the request and the
+    limit of those containers, so the run's pod is placed on a node with room for it and
+    is killed by its own limit (docs/kubernetes.md §6). ``None``: the install's default
+    request and no limit."""
 
 
 class Ready(_Model):
@@ -153,14 +159,15 @@ class Ready(_Model):
 class ServiceDef(_Image):
     env: EnvMap = Field(default_factory=dict)
     ports: list[Port] = Field(default_factory=list)
-    """Documentation for the agent; nothing is published."""
+    """Documentation for the agent; nothing is published. Unique across the services: they
+    all listen on the run's ``localhost``."""
     ready: Ready | None = None
     """``None``: the image's HEALTHCHECK, else "running"."""
     command: list[str] | None = Field(default=None, min_length=1)
     """The container command; the image's entrypoint is kept. Strings only (numbers are
     refused, write them quoted); an empty one is an argument (valkey's ``--save ""``)."""
     memory: Memory | None = None
-    """Reserved and enforced like ``resources.memory``."""
+    """The service's request and limit, like ``resources.memory``."""
 
 
 class ConnectionDef(_Model):
@@ -211,12 +218,6 @@ class ProjectConfig(_Model):
     @property
     def workstation_memory(self) -> int | None:
         return memory_bytes(self.resources.memory) if self.resources.memory else None
-
-    def memory_reservation(self) -> int:
-        """Bytes a run or verification reserves: the workstation and every service that
-        declares its memory (docs/run-environment.md §4)."""
-        declared = [self.resources.memory, *(s.memory for s in self.services.values())]
-        return sum(memory_bytes(m) for m in declared if m)
 
     def agent_name(self, slug: str) -> str:
         agent = self.agents[slug]
@@ -507,10 +508,13 @@ def _check(config: ProjectConfig, config_dir: str, lookup: Lookup | None, errors
         seen_caches.add(normal)
     default_workstation = not (config.workstation.image or config.workstation.dockerfile)
 
+    ports: dict[int, str] = {}
     for name, service in config.services.items():
         where = f"services.{name}"
-        if not re.match(NAME_PATTERN, name) or len(name) > 63:
+        if not re.match(NAME_PATTERN, name):
             errors.append(f"{where}: service names must match {NAME_PATTERN}")
+        elif len(name) > MAX_SERVICE_NAME:
+            errors.append(f"{where}: service names are at most {MAX_SERVICE_NAME} characters")
         elif name in RESERVED_SERVICE_NAMES or name.startswith("exradius"):
             errors.append(f"{where}: the name {name!r} is reserved")
         elif name in folders:
@@ -520,6 +524,11 @@ def _check(config: ProjectConfig, config_dir: str, lookup: Lookup | None, errors
         _check_image(where, service, config_dir, lookup, errors)
         if len(set(service.ports)) != len(service.ports):
             errors.append(f"{where}.ports: ports must be unique")
+        for port in dict.fromkeys(service.ports):
+            if port in ports and ports[port] != name:
+                errors.append(f"{where}.ports: {port} is also a port of service {ports[port]}; "
+                              "services share the run's localhost, so each port is one service's")
+            ports.setdefault(port, name)
         if service.ready is not None and (service.ready.command is None) == (service.ready.tcp is None):
             errors.append(f"{where}.ready: give exactly one of command or tcp")
 

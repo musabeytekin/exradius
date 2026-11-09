@@ -52,6 +52,8 @@ spec:
               value: {{ .Values.builds.registry | default .Values.images.registry | quote }}
             - name: EXRADIUS_BUILDS_CACHE
               value: {{ .Values.builds.cache | quote }}
+            - name: EXRADIUS_INSECURE_REGISTRIES
+              value: {{ join "," .Values.builds.insecureRegistries | quote }}
             - name: EXRADIUS_WORKER_CONCURRENCY
               value: {{ .Values.worker.concurrency | quote }}
             - name: EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE

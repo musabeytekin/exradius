@@ -48,6 +48,19 @@ def _merge(target: dict, patch: dict) -> None:
             target[key] = value
 
 
+class FakeImageConfigs:
+    """Stands in for ``registry.ImageConfigs``: the HEALTHCHECK of each image, by reference
+    (``None`` when unknown); every image asked for is recorded."""
+
+    def __init__(self, healthchecks: dict[str, list[str] | None] | None = None):
+        self.healthchecks = dict(healthchecks or {})
+        self.asked: list[str] = []
+
+    async def healthcheck(self, image: str) -> list[str] | None:
+        self.asked.append(image)
+        return self.healthchecks.get(image)
+
+
 class FakeCluster:
     def __init__(self):
         self.runs: dict[str, dict[str, Any]] = {}
@@ -81,6 +94,8 @@ class FakeCluster:
         self.pods: list[asyncio.Task] = []
         self.envs: list[dict[str, str]] = []
         """The workstation environment of every simulated pod, in order."""
+        self.pvcs: dict[str, dict[str, Any]] = {}
+        """PVCs of the runs namespace (project volumes), by name."""
         self._stop: dict[str, asyncio.Event] = {}
 
     # -- the API the worker uses ------------------------------------------------------------
@@ -142,6 +157,21 @@ class FakeCluster:
 
     async def get_lease(self, namespace, name):
         return self.lease
+
+    async def list_pvcs(self, selector):
+        key, _, value = selector.partition("=")
+        return [copy.deepcopy(p) for p in self.pvcs.values()
+                if (p["metadata"].get("labels") or {}).get(key) == value]
+
+    async def delete_pvc(self, name):
+        self.deleted.append(name)
+        return self.pvcs.pop(name, None) is not None
+
+    def add_project_volume(self, slug: str) -> None:
+        """A project volume, as the operator creates it on the project's first Run."""
+        name = f"exradius-project-{slug}"
+        self.pvcs[name] = {"metadata": {"name": name, "labels": {"exradius.dev/project": slug,
+                                                                  "exradius.dev/volume": "project"}}}
 
     async def create_build(self, body):
         name = body["metadata"]["name"]
@@ -291,6 +321,8 @@ class FakeCluster:
         for index, repo in enumerate(spec.get("repositories") or []):
             steps.append({"name": f"Clone {repo['folder']} ({repo.get('branch') or 'default branch'})",
                           "container": f"clone-{index}"})
+        for service in spec.get("services") or []:
+            steps.append({"name": f"Start service {service['name']}", "container": f"service-{service['name']}"})
         for index, command in enumerate(spec["workstation"].get("setup") or []):
             steps.append({"name": f"Setup: {command}", "container": f"setup-{index}"})
         return steps
@@ -308,7 +340,8 @@ class FakeCluster:
                 failed = self.verify_failure
                 steps.append({**step, "state": "failed", "startedAt": "2026-11-08T00:00:00Z",
                               "finishedAt": "2026-11-08T00:00:01Z", "exitCode": failed.get("exitCode", 1),
-                              "reason": failed.get("reason", "Error"), "log": failed.get("log", "")})
+                              "reason": failed.get("reason", "Error"), "log": failed.get("log", ""),
+                              **({"message": failed["message"]} if "message" in failed else {})})
             else:
                 log = f"ran {step['name'].removeprefix('Setup: ')}" if step["container"].startswith("setup") else "ok"
                 steps.append({**step, "state": "passed", "startedAt": "2026-11-08T00:00:00Z",

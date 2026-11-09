@@ -41,8 +41,10 @@ worker:
   concurrency: 4
 
 runs:
-  defaults: {memoryRequest: 512Mi, cpuRequest: 250m}
+  defaults: {memoryRequest: 512Mi, cpuRequest: 250m, serviceMemoryRequest: 128Mi, serviceCpuRequest: 50m}
   workspace: {size: 10Gi}
+  # One node: ReadWriteOnce is shared by every run of a project.
+  projectVolume: {size: 20Gi}
 
 builds:
   # The kind registry (deploy/kind/dev-up.sh), over HTTP; the node's containerd pulls from it

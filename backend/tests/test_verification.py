@@ -265,19 +265,6 @@ async def test_read_config_fails_with_errors_and_missing_keys(verifier, sessions
     assert step["log"].splitlines()[-1] == "missing keys: A (store s, which does not exist)"
 
 
-@pytest.mark.parametrize("extra, reason", [
-    ("services:\n  db: {image: 'postgres:16'}\n", "services.db: services are not available yet"),
-    ("services:\n  db: {dockerfile: ws/Dockerfile}\n", "services.db: services are not available yet"),
-])
-async def test_what_this_version_cannot_run_stops_at_read_config(verifier, sessions, cluster, configured, extra, reason):
-    commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + extra, "ws/Dockerfile": "FROM ubuntu\n"})
-    vid = await new_verification(sessions, configured["project"].id)
-    await verify(verifier, vid)
-    verification = await get(sessions, vid)
-    assert names_and_states(verification) == [("Read config", "failed")]
-    assert verification.error == f"Read config: {reason}"
-    assert f"not available yet: {reason}" in verification.steps[0]["log"]
-    assert cluster.created == []
 
 
 async def test_only_pending_verifications_run(verifier, sessions, project):

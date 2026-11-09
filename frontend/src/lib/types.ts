@@ -104,8 +104,6 @@ export interface Project {
   /** The latest verification and what it says about the commit read (setup-and-verify.md §1.2). */
   verification?: VerificationSummary | null;
   freshness?: Freshness | null;
-  /** Disk usage of the project's caches; only on the project page, null when there are none. */
-  cache_bytes?: number | null;
   /** The config hook URL and its last accepted call (integration-api.md §2). */
   hook_url?: string | null;
   hook_last_at?: string | null;

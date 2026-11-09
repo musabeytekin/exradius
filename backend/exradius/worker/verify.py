@@ -6,9 +6,10 @@ version can run the config. "Build workstation" and "Build service <name>" wait 
 image's Build object, with its log in the step, or say the image is up to date
 (docs/kubernetes.md §12). Then the worker creates a Run with ``purpose: verify``: the same
 pod as a task's, whose steps are the Run's steps ("Prepare workspace", "Clone <repo>
-(<branch>)", "Setup: <command>"), and whose runner lists the tools of every connection an
-agent uses ("List tools <name>", docs/agent-routing.md §3.1) with the services and setup of
-the pod, reporting them through the internal API. The worker mirrors the Run's status and
+(<branch>)", "Start service <name>", "Setup: <command>"), and whose runner lists the tools
+of every connection an agent uses ("List tools <name>", docs/agent-routing.md §3.1) with
+the services on the pod's localhost and after its setup, reporting them through the
+internal API. The worker mirrors the Run's status and
 the reports into ``project_verifications.steps`` as they change, and deletes the Run at the
 end, which removes everything the verification made.
 """
@@ -30,9 +31,9 @@ from exradius.resolve import StoreValues
 from exradius.routing import definition_hash
 from exradius.schemas.project_config import ProjectConfig
 from exradius.worker import run_objects
-from exradius.worker.builds import WORKSTATION, BuildFailed, BuildJob, build_jobs
+from exradius.worker.builds import WORKSTATION, BuildFailed, BuildJob, Images, build_jobs
 from exradius.worker.diagnose import diagnose_steps
-from exradius.worker.run_objects import RunView, run_name
+from exradius.worker.run_objects import SERVICE_STEP, RunView, run_name, service_check, service_failure
 from exradius.worker.runs import RunManager, exceeded_memory
 
 log = logging.getLogger(__name__)
@@ -70,6 +71,7 @@ def run_steps(config: ProjectConfig) -> list[dict[str, Any]]:
     steps = [_pending("Prepare workspace", "prepare")]
     steps += [_pending(f"Clone {repo.name} ({repo.branch or 'default branch'})", f"clone-{index}")
               for index, repo in enumerate(config.repositories)]
+    steps += [_pending(f"{SERVICE_STEP}{name}", f"service-{name}") for name in config.services]
     steps += [_pending(f"Setup: {command}", f"setup-{index}") for index, command in enumerate(config.workstation.setup)]
     steps += [_pending(f"List tools {name}", connection=name) for name in used_connections(config)]
     return steps
@@ -84,6 +86,18 @@ def _setup_log(step: dict[str, Any], status: dict[str, Any], config: ProjectConf
     return f"exited with {status.get('exitCode')}\n{log_text}"
 
 
+def _service_log(status: dict[str, Any], spec: dict[str, Any], config: ProjectConfig) -> str:
+    """A service step: what it waits for, then how it failed with its log tail."""
+    state = status.get("state")
+    if state == "failed":
+        return service_failure(status, spec, config, LOG_TAIL)
+    if state == "passed":
+        return f"ready ({service_check(spec)})"
+    if state == "running":
+        return f"waiting for {service_check(spec)}"
+    return ""
+
+
 def apply_status(steps: list[dict[str, Any]], view: RunView, reports: dict[str, Any], config: ProjectConfig) -> None:
     """Mirror the Run's status and the runner's tool reports into the verification's steps."""
     by_container = {s.get("container"): s for s in view.steps if s.get("container")}
@@ -96,7 +110,12 @@ def apply_status(steps: list[dict[str, Any]], view: RunView, reports: dict[str, 
         step["state"] = state if state in ("pending", "running", "passed", "failed") else "pending"
         step["started_at"] = status.get("startedAt") or step["started_at"]
         step["ended_at"] = status.get("finishedAt") or step["ended_at"]
-        text = _setup_log(step, status, config) if step["name"].startswith("Setup: ") else status.get("log") or ""
+        if step["name"].startswith("Setup: "):
+            text = _setup_log(step, status, config)
+        elif step["name"].startswith(SERVICE_STEP):
+            text = _service_log(status, view.service(step["name"].removeprefix(SERVICE_STEP)), config)
+        else:
+            text = status.get("log") or ""
         step["log"] = _tail(text)
     first = steps[0] if steps else None
     if first is not None and first["state"] == "pending" and (message := view.unschedulable):
@@ -230,9 +249,12 @@ class ProjectVerifier:
                 if error is not None:
                     break
             if error is None:
-                workstation = images.get(WORKSTATION) or self.runs.workstation_image(config)
+                built = Images(
+                    workstation=images.get(WORKSTATION) or self.runs.workstation_image(config),
+                    services={name: images.get(name) or service.image or "" for name, service in config.services.items()},
+                )
                 error = await self._verify_run(verification_id, project_id, slug, read, steps,
-                                               steps[offset + len(jobs):], workstation)
+                                               steps[offset + len(jobs):], built)
             else:
                 for step in steps[offset:]:
                     if step["state"] == "pending":
@@ -266,16 +288,18 @@ class ProjectVerifier:
 
     async def _verify_run(self, verification_id: uuid.UUID, project_id: uuid.UUID, slug: str,
                           read: dict[str, Any], steps: list[dict[str, Any]], own: list[dict[str, Any]],
-                          workstation_image: str) -> str | None:
+                          images: Images) -> str | None:
         config: ProjectConfig = read["config"]
         secrets: StoreValues = read["secrets"]
+        healthchecks = await self.runs.healthchecks(config, images)
         token = new_run_token()
         await self._save(verification_id, steps, token_hash=hash_token(token), tool_reports={})
         runtime = next(iter(config.agents.values())).runtime
         objects = run_objects.verify_run(
             verification_id=verification_id, namespace=self.runs.namespace, project=slug, config=config,
             secrets=secrets, runtime=runtime, runtime_image=self.settings.runtime_image(runtime),
-            workstation_image=workstation_image, token=token,
+            workstation_image=images.workstation, token=token, service_images=images.services,
+            healthchecks=healthchecks,
         )
         try:
             await self.runs.create(objects)

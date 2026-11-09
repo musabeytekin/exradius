@@ -26,6 +26,9 @@ const (
 	ConfigErrorGrace = 120 * time.Second
 	// ConditionScheduled mirrors the pod's PodScheduled condition.
 	ConditionScheduled = "Scheduled"
+	// ServiceDeadline is how long a service may take from its container's start to its
+	// startup probe passing (docs/kubernetes.md §5).
+	ServiceDeadline = 120 * time.Second
 )
 
 // Event is a Kubernetes Event to record on the Run.
@@ -40,6 +43,9 @@ type Observation struct {
 	Status v1.RunStatus
 	// Ended are containers that terminated since the previous status: read their logs.
 	Ended []string
+	// Previous are containers whose previous instance's log is wanted: a service that
+	// crashed before it was ready and was restarted.
+	Previous []string
 	// Fail is set when the operator fails the Run itself: delete the pod.
 	Fail bool
 	// Events to record.
@@ -103,11 +109,18 @@ func Observe(run *v1.Run, pod *corev1.Pod, now time.Time) Observation {
 	}
 	inits := byName(pod.Status.InitContainerStatuses)
 	st.Steps = podspec.StepNames(run)
+	var serviceFailure string
 	for i := range st.Steps {
 		step := &st.Steps[i]
 		before := previous[step.Container]
 		step.Log = before.Log
 		cs, ok := inits[step.Container]
+		if svc := podspec.ServiceOf(run, step.Container); svc != nil {
+			if message := observeService(step, before, cs, ok, svc, startedAfter(pod, step.Container), now, &obs); message != "" && serviceFailure == "" {
+				serviceFailure = message
+			}
+			continue
+		}
 		if !ok {
 			continue
 		}
@@ -172,6 +185,9 @@ func Observe(run *v1.Run, pod *corev1.Pod, now time.Time) Observation {
 
 	scheduled := observeScheduling(pod, prev.Conditions, &st.Conditions, run.Generation, &obs.Events)
 	failReason, failMessage := observeWaiting(pod, &st.PullFailures, &st.ConfigErrorSince, now, &obs.RequeueAfter)
+	if failReason == "" && serviceFailure != "" {
+		failReason, failMessage = v1.ReasonServiceFailed, serviceFailure
+	}
 
 	// The phase.
 	st.Reason, st.Message = "", ""
@@ -197,6 +213,93 @@ func Observe(run *v1.Run, pod *corev1.Pod, now time.Time) Observation {
 	obs.Status = st
 	return obs
 }
+
+// observeService maps a service's sidecar onto its step (§7.4). The step passes once the
+// container is started (its startup probe passed, or it has none and runs), and stays
+// passed: a service that crashes later is restarted by its policy, and the pod's end stops
+// it. Before that, the operator fails the Run itself when the service exits or restarts,
+// or is not started ServiceDeadline after its container started; Kubernetes would restart
+// it forever. It returns the Run's message for such a failure.
+func observeService(step *v1.Step, before v1.Step, cs corev1.ContainerStatus, ok bool, svc *v1.ServiceSpec,
+	laterStarted bool, now time.Time, obs *Observation) string {
+	if terminal(before.State) {
+		log := step.Log
+		*step = before
+		step.Log = log
+		return ""
+	}
+	if !ok {
+		return ""
+	}
+	started := cs.Started != nil && *cs.Started
+	if laterStarted || (started && cs.State.Running != nil) {
+		// A later container started only after this one was: it passed, even if a status
+		// showing it started was never seen.
+		step.State = v1.StepPassed
+		if cs.State.Running != nil {
+			step.StartedAt = timePtr(cs.State.Running.StartedAt)
+		}
+		step.FinishedAt = &metav1.Time{Time: now}
+		return ""
+	}
+	fail := func(message, reason string, code *int32, previousLog bool) string {
+		step.State, step.Message, step.Reason, step.ExitCode = v1.StepFailed, message, reason, code
+		step.FinishedAt = &metav1.Time{Time: now}
+		if previousLog {
+			obs.Previous = append(obs.Previous, step.Container)
+		} else {
+			obs.Ended = append(obs.Ended, step.Container)
+		}
+		obs.Events = append(obs.Events, Event{corev1.EventTypeWarning, v1.ReasonServiceFailed, "service " + svc.Name + " " + message})
+		return fmt.Sprintf("service %s (%s) %s", svc.Name, svc.Image, message)
+	}
+	exited := func(t *corev1.ContainerStateTerminated, previousLog bool) string {
+		step.StartedAt = timePtr(t.StartedAt)
+		// The reason (OOMKilled) is the step's; the worker says what the declared memory was.
+		return fail(fmt.Sprintf("exited with code %d before it was ready", t.ExitCode), t.Reason, ptrInt32(t.ExitCode), previousLog)
+	}
+	switch {
+	case cs.State.Terminated != nil:
+		return exited(cs.State.Terminated, false)
+	case cs.RestartCount > 0 && cs.LastTerminationState.Terminated != nil:
+		return exited(cs.LastTerminationState.Terminated, true)
+	case cs.State.Running != nil:
+		step.State = v1.StepRunning
+		step.StartedAt = timePtr(cs.State.Running.StartedAt)
+		waited := now.Sub(cs.State.Running.StartedAt.Time)
+		if waited >= ServiceDeadline {
+			return fail(fmt.Sprintf("did not become ready within %ds waiting for %s",
+				int(ServiceDeadline.Seconds()), podspec.ReadyCheck(svc)), "NotReady", nil, false)
+		}
+		if remaining := ServiceDeadline - waited; obs.RequeueAfter == 0 || remaining < obs.RequeueAfter {
+			obs.RequeueAfter = remaining + time.Second
+		}
+	}
+	return ""
+}
+
+// startedAfter reports whether an init container after the named one, or the workstation,
+// has left its waiting state.
+func startedAfter(pod *corev1.Pod, container string) bool {
+	left := func(cs corev1.ContainerStatus) bool { return cs.State.Running != nil || cs.State.Terminated != nil }
+	seen := false
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if seen && left(cs) {
+			return true
+		}
+		if cs.Name == container {
+			seen = true
+		}
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if left(cs) {
+			return true
+		}
+	}
+	return false
+}
+
+func ptrInt32(v int32) *int32 { return &v }
 
 // observeScheduling mirrors the pod's PodScheduled condition into conditions and reports
 // whether the pod is on a node; a new or changed refusal is an Unschedulable event.
@@ -264,8 +367,8 @@ func observeWaiting(pod *corev1.Pod, failures *[]v1.PullFailure, configErrorSinc
 			if waited >= ConfigErrorGrace && failReason == "" {
 				failReason = v1.ReasonConfigError
 				failMessage = fmt.Sprintf("%s could not be created for %s: %s", cs.Name, waited.Round(time.Second), w.Message)
-			} else if waited < ConfigErrorGrace {
-				*requeue = ConfigErrorGrace - waited
+			} else if remaining := ConfigErrorGrace - waited; waited < ConfigErrorGrace && (*requeue == 0 || remaining < *requeue) {
+				*requeue = remaining
 			}
 		default:
 			markPull(failures, cs.Name, w.Reason)

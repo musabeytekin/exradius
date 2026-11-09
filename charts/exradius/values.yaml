@@ -119,8 +119,17 @@ namespaces:
 
 runs:
   user: {uid: 1000, gid: 1000}
-  defaults: {memoryRequest: 1Gi, cpuRequest: 500m}
+  # Requests of what a config declares no memory for (docs/kubernetes.md §6): the
+  # workstation and setup containers, and each service. Declared memory is request and
+  # limit; there is never a CPU limit.
+  defaults: {memoryRequest: 1Gi, cpuRequest: 500m, serviceMemoryRequest: 256Mi, serviceCpuRequest: 100m}
   workspace: {storageClass: "", size: 50Gi}
+  # One PVC per project with its git mirrors and workstation.cache directories
+  # (docs/kubernetes.md §7.6), created on the project's first run and deleted with the
+  # project. ReadWriteOnce suits one node; on several nodes use ReadWriteMany with an RWX
+  # storage class (EFS, Filestore, Azure Files, NFS), or turn it off: clones then fetch
+  # from the remote and each cache is an empty directory per run.
+  projectVolume: {enabled: true, accessMode: ReadWriteOnce, storageClass: "", size: 100Gi}
   runtimeClassName: ""
   userNamespaces: false
   nodeSelector: {}

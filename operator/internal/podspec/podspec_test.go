@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -19,14 +20,19 @@ var update = flag.Bool("update", false, "rewrite the golden files")
 
 func config() Config {
 	return Config{
-		APIURL:            "http://exradius-api-internal.exradius:8001",
-		RunUID:            1000,
-		RunGID:            1000,
-		IdentityConfigMap: "exradius-run-identity",
-		ServiceAccount:    "exradius-run",
-		WorkspaceSize:     resource.MustParse("50Gi"),
-		MemoryRequest:     resource.MustParse("1Gi"),
-		CPURequest:        resource.MustParse("500m"),
+		APIURL:               "http://exradius-api-internal.exradius:8001",
+		RunUID:               1000,
+		RunGID:               1000,
+		IdentityConfigMap:    "exradius-run-identity",
+		ServiceAccount:       "exradius-run",
+		WorkspaceSize:        resource.MustParse("50Gi"),
+		MemoryRequest:        resource.MustParse("1Gi"),
+		CPURequest:           resource.MustParse("500m"),
+		ServiceMemoryRequest: resource.MustParse("256Mi"),
+		ServiceCPURequest:    resource.MustParse("100m"),
+		ProjectVolume: ProjectVolumeConfig{
+			Enabled: true, AccessMode: corev1.ReadWriteOnce, Size: resource.MustParse("100Gi"),
+		},
 	}
 }
 
@@ -62,6 +68,24 @@ func taskRun() *v1.Run {
 	run.Spec.Repositories = []v1.RepositorySpec{
 		{Folder: "saleor", URL: "https://github.com/acme/saleor.git", Branch: "main", Push: true, CredentialKey: "repo.0"},
 		{Folder: "Dashboard.UI", URL: "https://github.com/acme/dashboard.git"},
+	}
+	run.Spec.Workstation.Caches = []v1.CacheSpec{
+		{Path: "/home/runner/.cache/uv", Name: "0-cache_uv"},
+		{Path: "/opt/pnpm-store", Name: "1-opt_pnpm-store"},
+	}
+	dbMemory := resource.MustParse("512Mi")
+	run.Spec.Services = []v1.ServiceSpec{
+		{
+			Name: "postgres", Image: "postgres:16", Ports: []int32{5432}, Memory: &dbMemory,
+			Env: []v1.EnvVar{
+				{Name: "POSTGRES_USER", Value: "saleor"},
+				{Name: "POSTGRES_PASSWORD", SecretKey: "service.postgres.POSTGRES_PASSWORD"},
+			},
+			Ready: &v1.ReadySpec{Exec: []string{"pg_isready", "-h", "127.0.0.1", "-U", "saleor"}},
+		},
+		{Name: "cache", Image: "valkey/valkey:8.1-alpine", Ports: []int32{6379}, Ready: &v1.ReadySpec{TCP: 6379},
+			Command: []string{"valkey-server", "--save", ""}},
+		{Name: "mail", Image: "axllent/mailpit"},
 	}
 	run.Spec.Git = v1.GitSpec{
 		SetupEnv: []v1.EnvVar{{Name: "GIT_CONFIG_COUNT", Value: "1"}, {Name: "GIT_CONFIG_KEY_0", Value: "safe.directory"}, {Name: "GIT_CONFIG_VALUE_0", Value: "*"}},
@@ -105,7 +129,108 @@ func checkGolden(t *testing.T, name string, objects ...any) {
 func TestTaskPod(t *testing.T) {
 	b := Pods{Config: config()}
 	run := taskRun()
-	checkGolden(t, "task", b.Workspace(run), b.Pod(run))
+	checkGolden(t, "task", b.Workspace(run), b.ProjectVolume(run), b.Pod(run))
+}
+
+// Services are native sidecars after the clones, in file order, on localhost by name.
+func TestServices(t *testing.T) {
+	pod := Pods{Config: config()}.Pod(taskRun())
+	var order []string
+	for _, c := range pod.Spec.InitContainers {
+		order = append(order, c.Name)
+	}
+	want := "prepare clone-0 clone-1 service-postgres service-cache service-mail setup-0 setup-1 files"
+	if got := strings.Join(order, " "); got != want {
+		t.Fatalf("init containers: %s", got)
+	}
+	if len(pod.Spec.HostAliases) != 1 || pod.Spec.HostAliases[0].IP != "127.0.0.1" ||
+		strings.Join(pod.Spec.HostAliases[0].Hostnames, ",") != "postgres,cache,mail" {
+		t.Fatalf("hostAliases: %+v", pod.Spec.HostAliases)
+	}
+	db, cache, mail := pod.Spec.InitContainers[3], pod.Spec.InitContainers[4], pod.Spec.InitContainers[5]
+	if *db.RestartPolicy != corev1.ContainerRestartPolicyAlways || db.StartupProbe.Exec == nil ||
+		db.StartupProbe.PeriodSeconds != 1 || db.StartupProbe.FailureThreshold < 120 {
+		t.Fatalf("postgres: %+v", db)
+	}
+	if !db.Resources.Requests.Memory().Equal(resource.MustParse("512Mi")) || !db.Resources.Limits.Memory().Equal(resource.MustParse("512Mi")) {
+		t.Fatalf("declared memory is request and limit: %+v", db.Resources)
+	}
+	if cache.StartupProbe.TCPSocket == nil || cache.StartupProbe.TCPSocket.Port.IntValue() != 6379 || cache.Resources.Limits != nil ||
+		!cache.Resources.Requests.Memory().Equal(resource.MustParse("256Mi")) {
+		t.Fatalf("cache: %+v", cache)
+	}
+	if strings.Join(cache.Args, "|") != "valkey-server|--save|" || cache.Command != nil {
+		t.Fatalf("a command keeps the entrypoint: command %v, args %v", cache.Command, cache.Args)
+	}
+	if mail.StartupProbe != nil {
+		t.Fatal("no ready check: no startup probe")
+	}
+	for _, svc := range []corev1.Container{db, cache, mail} {
+		sc := svc.SecurityContext
+		if sc.RunAsUser != nil || sc.RunAsNonRoot != nil || *sc.ReadOnlyRootFilesystem || *sc.AllowPrivilegeEscalation ||
+			len(sc.Capabilities.Add) != len(ServiceCapabilities) || len(svc.VolumeMounts) != 0 {
+			t.Fatalf("%s: services keep their image's user, a writable root and no mounts: %+v", svc.Name, svc)
+		}
+	}
+	if pod.Spec.SecurityContext.RunAsUser != nil || pod.Spec.SecurityContext.RunAsNonRoot != nil {
+		t.Fatal("the run user is per container, not the pod's")
+	}
+}
+
+// The project volume holds the mirrors (clones) and the caches (setup and workstation);
+// prepare creates their directories as the run user.
+func TestProjectVolume(t *testing.T) {
+	b := Pods{Config: config()}
+	run := taskRun()
+	pvc := b.ProjectVolume(run)
+	if pvc.Name != "exradius-project-saleor" || len(pvc.OwnerReferences) != 0 || pvc.Labels[LabelVolume] != "project" {
+		t.Fatalf("project volume: %+v", pvc.ObjectMeta)
+	}
+	pod := b.Pod(run)
+	mounts := func(name string) map[string]corev1.VolumeMount {
+		out := map[string]corev1.VolumeMount{}
+		for _, c := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
+			if c.Name == name {
+				for _, m := range c.VolumeMounts {
+					out[m.MountPath] = m
+				}
+			}
+		}
+		return out
+	}
+	if m := mounts("clone-0")[MirrorsDir]; m.Name != volProject || m.SubPath != "mirrors" {
+		t.Fatalf("clone mounts the mirrors: %+v", m)
+	}
+	for _, container := range []string{"setup-0", ContainerWorkstation} {
+		if m := mounts(container)["/home/runner/.cache/uv"]; m.Name != volProject || m.SubPath != "caches/0-cache_uv" {
+			t.Fatalf("%s mounts the caches: %+v", container, m)
+		}
+	}
+	if _, ok := mounts(ContainerFiles)["/home/runner/.cache/uv"]; ok {
+		t.Fatal("the files sidecar has no caches")
+	}
+	if mounts(ContainerPrepare)[ProjectDir].SubPath != "" {
+		t.Fatal("prepare mounts the whole project volume")
+	}
+
+	// Without the project volume: direct clones, and each cache is an empty directory on
+	// the workspace.
+	c := config()
+	c.ProjectVolume.Enabled = false
+	b = Pods{Config: c}
+	if b.ProjectVolume(run) != nil {
+		t.Fatal("no project volume when it is off")
+	}
+	pod = b.Pod(run)
+	if _, ok := mounts("clone-0")[MirrorsDir]; ok {
+		t.Fatal("no mirrors without a project volume")
+	}
+	if m := mounts(ContainerWorkstation)["/opt/pnpm-store"]; m.Name != volWorkspace || m.SubPath != "caches/1-opt_pnpm-store" {
+		t.Fatalf("a cache on the workspace: %+v", m)
+	}
+	if b.ProjectVolume(baseRun(v1.PurposeProbe, "probe-1", "1")) != nil {
+		t.Fatal("probes have no project volume")
+	}
 }
 
 func TestVerifyPod(t *testing.T) {
@@ -162,8 +287,11 @@ func TestSecurityInvariants(t *testing.T) {
 		t.Fatal("restartPolicy must be Never")
 	}
 	for _, c := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
+		if strings.HasPrefix(c.Name, servicePrefix) {
+			continue // TestServices
+		}
 		sc := c.SecurityContext
-		if sc == nil || !*sc.ReadOnlyRootFilesystem || *sc.AllowPrivilegeEscalation || !*sc.RunAsNonRoot ||
+		if sc == nil || sc.RunAsUser == nil || !*sc.ReadOnlyRootFilesystem || *sc.AllowPrivilegeEscalation || !*sc.RunAsNonRoot ||
 			len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" || len(sc.Capabilities.Add) != 0 {
 			t.Fatalf("container %s: weak security context %+v", c.Name, sc)
 		}
@@ -188,7 +316,8 @@ func TestSecurityInvariants(t *testing.T) {
 
 func TestStepNames(t *testing.T) {
 	steps := StepNames(taskRun())
-	want := []string{"Prepare workspace", "Clone saleor (main)", "Clone Dashboard.UI (default branch)", "Setup: uv sync", "Setup: make migrate"}
+	want := []string{"Prepare workspace", "Clone saleor (main)", "Clone Dashboard.UI (default branch)",
+		"Start service postgres", "Start service cache", "Start service mail", "Setup: uv sync", "Setup: make migrate"}
 	if len(steps) != len(want) {
 		t.Fatalf("got %d steps", len(steps))
 	}

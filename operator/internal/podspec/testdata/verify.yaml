@@ -74,7 +74,9 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /work
       name: workspace
@@ -123,6 +125,8 @@ spec:
       value: verify
     - name: EXRADIUS_ID
       value: 9a1b
+    - name: EXRADIUS_PROJECT_DIR
+      value: /exradius/project
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: prepare
@@ -133,13 +137,17 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /exradius/workspace
       name: workspace
     - mountPath: /opt/exradius/runtime
       name: runtime
       readOnly: true
+    - mountPath: /exradius/project
+      name: project
   - command:
     - /opt/exradius/runtime/bin/exradius-runner
     - --clone
@@ -169,6 +177,8 @@ spec:
       value: main
     - name: EXRADIUS_CLONE_INDEX
       value: "0"
+    - name: EXRADIUS_MIRROR_DIR
+      value: /exradius/mirrors
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: clone-0
@@ -179,7 +189,9 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /work
       name: workspace
@@ -204,6 +216,9 @@ spec:
       name: identity
       readOnly: true
       subPath: group
+    - mountPath: /exradius/mirrors
+      name: project
+      subPath: mirrors
     workingDir: /work
   - command:
     - /bin/sh
@@ -229,7 +244,9 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /work
       name: workspace
@@ -260,9 +277,6 @@ spec:
   securityContext:
     fsGroup: 1000
     fsGroupChangePolicy: OnRootMismatch
-    runAsGroup: 1000
-    runAsNonRoot: true
-    runAsUser: 1000
     seccompProfile:
       type: RuntimeDefault
     supplementalGroupsPolicy: Strict
@@ -280,4 +294,7 @@ spec:
       defaultMode: 292
       name: exradius-run-identity
     name: identity
+  - name: project
+    persistentVolumeClaim:
+      claimName: exradius-project-saleor
 status: {}

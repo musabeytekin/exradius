@@ -81,6 +81,11 @@ class BrokerPublisher:
     async def test_provider(self, test_id: str) -> None:
         await self.publish(messaging.CONTROL_QUEUE, {"version": 1, "action": "test_provider", "test_id": test_id})
 
+    async def project_deleted(self, project_id: str, slug: str) -> None:
+        """The worker deletes the project's volume (docs/kubernetes.md §7.6)."""
+        await self.publish(messaging.CONTROL_QUEUE,
+                           {"version": 1, "action": "project_deleted", "project_id": project_id, "project": slug})
+
     async def run_reported(self, run_id: str) -> None:
         """The runner reported waiting or resumed: the worker settles the run now."""
         await self.publish(messaging.CONTROL_QUEUE, {"version": 1, "action": "run_reported", "run_id": run_id})

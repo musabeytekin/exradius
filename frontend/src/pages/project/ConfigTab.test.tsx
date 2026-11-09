@@ -97,11 +97,10 @@ describe("config view", () => {
     expect(screen.getByText("not read")).toBeInTheDocument();
   });
 
-  it("shows declared memory, caches with their size and service commands", () => {
+  it("shows declared memory, caches and service commands", () => {
     const config = HAPPY.config!;
     const project = {
       ...HAPPY,
-      cache_bytes: 3 * 1024 * 1024,
       config: {
         ...config,
         resources: { memory: "6g" },
@@ -113,7 +112,7 @@ describe("config view", () => {
     const ws = section("Workstation");
     expect(within(ws).getByText("6g")).toBeInTheDocument();
     expect(within(ws).getByText("~/.cache/uv")).toBeInTheDocument();
-    expect(ws).toHaveTextContent("on disk");
+    expect(ws).not.toHaveTextContent("on disk");
     const services = section("Services");
     expect(within(services).getByText("server /data")).toBeInTheDocument();
     expect(within(services).getByText("512m")).toBeInTheDocument();

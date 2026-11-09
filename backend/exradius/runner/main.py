@@ -315,7 +315,8 @@ def run() -> None:
         raise SystemExit(asyncio.run(verify(args[1], environment)))
     if mode == "--prepare" and len(args) > 2:
         root = Path(os.environ.get("EXRADIUS_WORKSPACE", str(workspace.WORKSPACE)))
-        raise SystemExit(asyncio.run(workspace.prepare(args[1], args[2], api_url, token, root)))
+        raise SystemExit(asyncio.run(workspace.prepare(args[1], args[2], api_url, token, root,
+                                                       dict(environment.container))))
     if mode == "--clone":
         work = Path(os.environ.get("EXRADIUS_WORK_DIR", "/work"))
         state = Path(os.environ.get("EXRADIUS_STATE_DIR", "/exradius/state"))

@@ -17,7 +17,7 @@ from exradius.states import State
 from exradius.worker.intake import accept_answer
 from exradius.worker.runs import RunManager
 from tests.conftest import BASE_CONFIG, commit_config
-from tests.fakes import FakeCluster, runner
+from tests.fakes import FakeCluster, FakeImageConfigs, runner
 
 
 @pytest.fixture
@@ -40,6 +40,7 @@ def manager(settings, sessions, store, cluster, published):
 
     manager = RunManager(settings, sessions, store, cluster, emit)
     manager.builder.poll = 0.01
+    manager.image_configs = FakeImageConfigs()  # no registry is reached from the tests
     cluster.manager = manager
     return manager
 

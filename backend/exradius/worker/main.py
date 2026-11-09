@@ -36,9 +36,12 @@ from exradius.worker.verify import ProjectVerifier
 
 log = logging.getLogger("exradius.worker")
 
-TARGET_KEYS = {"cancel": "run_id", "verify": "verification_id", "test_provider": "test_id", "run_reported": "run_id"}
+TARGET_KEYS = {"cancel": "run_id", "verify": "verification_id", "test_provider": "test_id", "run_reported": "run_id",
+               "project_deleted": "project_id"}
 """Control actions and the key of the id each one carries."""
 SWEEP_SECONDS = 15
+VOLUME_SWEEP_EVERY = 4
+"""Project volumes of deleted projects are looked for every fourth sweep (a minute)."""
 
 
 class Worker:
@@ -168,6 +171,10 @@ class Worker:
                 self._spawn(self.runs.cancel(target))
             elif action == "run_reported":
                 self._spawn(self.runs.settle(target))
+            elif action == "project_deleted":
+                slug = command.get("project")
+                if isinstance(slug, str) and slug:
+                    self._spawn(self.runs.delete_project_volume(slug))
             elif action == "verify":
                 # Claimed before the ack, so a crash leaves a detectable owner.
                 if await self.verifier.claim(target, self.worker_id):
@@ -228,10 +235,14 @@ class Worker:
                 await asyncio.sleep(2)
 
     async def sweep(self) -> None:
+        count = 0
         while True:
             await asyncio.sleep(SWEEP_SECONDS)
+            count += 1
             try:
                 await self.runs.sweep()
+                if count % VOLUME_SWEEP_EVERY == 1:
+                    await self.runs.sweep_project_volumes()
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - the next sweep retries

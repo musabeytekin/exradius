@@ -5,12 +5,15 @@
 package podspec
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	v1 "github.com/musabeytekin/exradius/operator/api/v1alpha1"
@@ -26,6 +29,8 @@ const (
 	WorkspaceDir    = "/exradius/workspace"
 	AttachmentsDir  = WorkDir + "/.exradius/attachments"
 	FilesMountDir   = "/exradius/attachments"
+	ProjectDir      = "/exradius/project"
+	MirrorsDir      = "/exradius/mirrors"
 	attachmentsPath = "work/.exradius/attachments"
 )
 
@@ -34,7 +39,21 @@ const (
 	ContainerPrepare     = "prepare"
 	ContainerFiles       = "files"
 	ContainerWorkstation = "workstation"
+	servicePrefix        = "service-"
 )
+
+// Services' startup probes (docs/kubernetes.md §7.4): every second, with the operator's
+// deadline (status.ServiceDeadline) deciding first; the kubelet's own limit is a backstop.
+const (
+	ProbePeriodSeconds    = 1
+	ProbeFailureThreshold = 240
+	ProbeExecTimeout      = 10
+)
+
+// ServiceCapabilities are what common server images need on top of nothing: they start as
+// root and switch to their own user (gosu, su-exec), chown their data directory and bind
+// low ports.
+var ServiceCapabilities = []corev1.Capability{"CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE", "NET_BIND_SERVICE"}
 
 // Labels and annotations.
 const (
@@ -43,6 +62,7 @@ const (
 	LabelPurpose       = "exradius.dev/purpose"
 	LabelPodGeneration = "exradius.dev/pod-generation"
 	AnnotationTaskID   = "exradius.dev/task-id"
+	LabelVolume        = "exradius.dev/volume"
 )
 
 // TokenKey is the Secret key of the run token.
@@ -59,11 +79,24 @@ type Config struct {
 	WorkspaceStorageClass string
 	MemoryRequest         resource.Quantity
 	CPURequest            resource.Quantity
-	RuntimeClassName      string
-	UserNamespaces        bool
-	NodeSelector          map[string]string
-	Tolerations           []corev1.Toleration
-	ImagePullSecrets      []string
+	// ServiceMemoryRequest and ServiceCPURequest are the requests of a service without
+	// declared memory, and of every service.
+	ServiceMemoryRequest resource.Quantity
+	ServiceCPURequest    resource.Quantity
+	ProjectVolume        ProjectVolumeConfig
+	RuntimeClassName     string
+	UserNamespaces       bool
+	NodeSelector         map[string]string
+	Tolerations          []corev1.Toleration
+	ImagePullSecrets     []string
+}
+
+// ProjectVolumeConfig is the per-project PVC of mirrors and caches (§7.6).
+type ProjectVolumeConfig struct {
+	Enabled      bool
+	AccessMode   corev1.PersistentVolumeAccessMode
+	StorageClass string
+	Size         resource.Quantity
 }
 
 // Builder makes the objects of a Run. Pods is the only backend; an agent-sandbox backend
@@ -71,6 +104,9 @@ type Config struct {
 type Builder interface {
 	// Workspace is the Run's PVC, or nil when the Run has none (probes).
 	Workspace(run *v1.Run) *corev1.PersistentVolumeClaim
+	// ProjectVolume is the project's PVC of mirrors and caches, owned by no Run, or nil
+	// when the Run uses none (probes, or the volume is turned off).
+	ProjectVolume(run *v1.Run) *corev1.PersistentVolumeClaim
 	// Pod is the pod of the Run's current pod generation.
 	Pod(run *v1.Run) *corev1.Pod
 }
@@ -90,6 +126,38 @@ func PodName(run *v1.Run, generation int64) string {
 func CloneContainer(n int) string { return fmt.Sprintf("clone-%d", n) }
 func SetupContainer(n int) string { return fmt.Sprintf("setup-%d", n) }
 
+// ServiceContainer names a service's sidecar; service names are DNS labels of at most 55
+// characters, so it is one too.
+func ServiceContainer(name string) string { return servicePrefix + name }
+
+// ServiceOf is the service whose sidecar a container is, or nil.
+func ServiceOf(run *v1.Run, container string) *v1.ServiceSpec {
+	if !strings.HasPrefix(container, servicePrefix) {
+		return nil
+	}
+	for i := range run.Spec.Services {
+		if ServiceContainer(run.Spec.Services[i].Name) == container {
+			return &run.Spec.Services[i]
+		}
+	}
+	return nil
+}
+
+// ProjectVolumeName is the PVC of a project's mirrors and caches.
+func ProjectVolumeName(project string) string { return "exradius-project-" + project }
+
+// ReadyCheck says what a service's startup probe waits for, as a step message ends.
+func ReadyCheck(svc *v1.ServiceSpec) string {
+	switch {
+	case svc.Ready == nil:
+		return "its process to start"
+	case len(svc.Ready.Exec) > 0:
+		return "command " + strings.Join(svc.Ready.Exec, " ")
+	default:
+		return fmt.Sprintf("port %d", svc.Ready.TCP)
+	}
+}
+
 // StepNames are the steps of a Run's pod in order, by container name.
 func StepNames(run *v1.Run) []v1.Step {
 	if run.Spec.Purpose == v1.PurposeProbe {
@@ -102,6 +170,9 @@ func StepNames(run *v1.Run) []v1.Step {
 			branch = "default branch"
 		}
 		steps = append(steps, v1.Step{Name: fmt.Sprintf("Clone %s (%s)", repo.Folder, branch), Container: CloneContainer(n)})
+	}
+	for _, svc := range run.Spec.Services {
+		steps = append(steps, v1.Step{Name: "Start service " + svc.Name, Container: ServiceContainer(svc.Name)})
 	}
 	for n, command := range run.Spec.Workstation.Setup {
 		steps = append(steps, v1.Step{Name: "Setup: " + command, Container: SetupContainer(n)})
@@ -149,6 +220,40 @@ func (b Pods) Workspace(run *v1.Run) *corev1.PersistentVolumeClaim {
 	return pvc
 }
 
+// usesProjectVolume reports whether the Run's pod mounts its project's volume.
+func (b Pods) usesProjectVolume(run *v1.Run) bool {
+	return b.Config.ProjectVolume.Enabled && run.Spec.Project != "" && run.Spec.Purpose != v1.PurposeProbe
+}
+
+// ProjectVolume implements Builder.
+func (b Pods) ProjectVolume(run *v1.Run) *corev1.PersistentVolumeClaim {
+	if !b.usesProjectVolume(run) {
+		return nil
+	}
+	pv := b.Config.ProjectVolume
+	mode := pv.AccessMode
+	if mode == "" {
+		mode = corev1.ReadWriteOnce
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ProjectVolumeName(run.Spec.Project),
+			Namespace: run.Namespace,
+			Labels:    map[string]string{LabelProject: run.Spec.Project, LabelVolume: "project"},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{mode},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: pv.Size},
+			},
+		},
+	}
+	if pv.StorageClass != "" {
+		pvc.Spec.StorageClassName = ptr.To(pv.StorageClass)
+	}
+	return pvc
+}
+
 // Pod implements Builder.
 func (b Pods) Pod(run *v1.Run) *corev1.Pod {
 	c := b.Config
@@ -174,10 +279,9 @@ func (b Pods) Pod(run *v1.Run) *corev1.Pod {
 			AutomountServiceAccountToken:  ptr.To(false),
 			EnableServiceLinks:            ptr.To(false),
 			TerminationGracePeriodSeconds: ptr.To[int64](30),
+			// The run user is set on each of Exradius's containers, not here: services run as
+			// their image's user (§7.4).
 			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser:           ptr.To(c.RunUID),
-				RunAsGroup:          ptr.To(c.RunGID),
-				RunAsNonRoot:        ptr.To(true),
 				FSGroup:             ptr.To(c.RunGID),
 				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 				// Only the run gid and fsGroup: not the groups the image's /etc/group gives
@@ -208,6 +312,16 @@ func (b Pods) Pod(run *v1.Run) *corev1.Pod {
 	for n := range run.Spec.Repositories {
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, b.clone(run, n))
 	}
+	var names []string
+	for _, svc := range run.Spec.Services {
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, b.service(run, svc))
+		names = append(names, svc.Name)
+	}
+	if len(names) > 0 {
+		// One network namespace: services listen on localhost, reached by their names
+		// through the kubelet-managed /etc/hosts, which a project cannot change.
+		pod.Spec.HostAliases = []corev1.HostAlias{{IP: "127.0.0.1", Hostnames: names}}
+	}
 	for n := range run.Spec.Workstation.Setup {
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, b.setup(run, n))
 	}
@@ -220,6 +334,7 @@ func (b Pods) Pod(run *v1.Run) *corev1.Pod {
 
 const (
 	volWorkspace = "workspace"
+	volProject   = "project"
 	volRuntime   = "runtime"
 	volIdentity  = "identity"
 	volFilesTmp  = "files-tmp"
@@ -247,18 +362,48 @@ func (b Pods) volumes(run *v1.Run) []corev1.Volume {
 	vols = append([]corev1.Volume{{Name: volWorkspace, VolumeSource: corev1.VolumeSource{
 		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: run.Name},
 	}}}, vols...)
+	if b.usesProjectVolume(run) {
+		vols = append(vols, corev1.Volume{Name: volProject, VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: ProjectVolumeName(run.Spec.Project)},
+		}})
+	}
 	if run.Spec.Purpose == v1.PurposeTask {
 		vols = append(vols, corev1.Volume{Name: volFilesTmp, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
 	}
 	return vols
 }
 
-func securityContext() *corev1.SecurityContext {
+// restricted is the restricted-shaped part of every Exradius container: non-root, a
+// read-only root, no capabilities, no privilege escalation.
+func restricted() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
+		RunAsNonRoot:             ptr.To(true),
 		ReadOnlyRootFilesystem:   ptr.To(true),
 		AllowPrivilegeEscalation: ptr.To(false),
-		RunAsNonRoot:             ptr.To(true),
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+	}
+}
+
+// securityContext is that of Exradius's own containers in a run pod: restricted, as the
+// run user.
+func (b Pods) securityContext() *corev1.SecurityContext {
+	sc := restricted()
+	sc.RunAsUser = ptr.To(b.Config.RunUID)
+	sc.RunAsGroup = ptr.To(b.Config.RunGID)
+	return sc
+}
+
+// serviceSecurityContext is a service's: its image's user, a writable root, the
+// capabilities server images need and no privilege escalation (§7.4).
+func serviceSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		ReadOnlyRootFilesystem:   ptr.To(false),
+		AllowPrivilegeEscalation: ptr.To(false),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+			Add:  append([]corev1.Capability(nil), ServiceCapabilities...),
+		},
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
 }
 
@@ -343,6 +488,20 @@ func mergeEnv(lists ...[]corev1.EnvVar) []corev1.EnvVar {
 	return out
 }
 
+// cacheMounts mount each workstation.cache directory at its path: caches/<name> of the
+// project volume, or of the workspace without one (an empty directory per run).
+func (b Pods) cacheMounts(run *v1.Run) []corev1.VolumeMount {
+	volume := volWorkspace
+	if b.usesProjectVolume(run) {
+		volume = volProject
+	}
+	var mounts []corev1.VolumeMount
+	for _, cache := range run.Spec.Workstation.Caches {
+		mounts = append(mounts, corev1.VolumeMount{Name: volume, MountPath: cache.Path, SubPath: "caches/" + cache.Name})
+	}
+	return mounts
+}
+
 // workstationResources is request = limit for declared memory, else the default request
 // and no limit; a CPU request and never a CPU limit (§6).
 func (b Pods) workstationResources(run *v1.Run) corev1.ResourceRequirements {
@@ -359,18 +518,28 @@ func (b Pods) workstationResources(run *v1.Run) corev1.ResourceRequirements {
 	return r
 }
 
+// prepare lays out the workspace and, with a project volume, the project's mirrors and
+// cache directories, as the run user, so no directory a later container mounts is made by
+// the kubelet as root (a cache under the home would leave ~/.cache root-owned).
 func (b Pods) prepare(run *v1.Run) corev1.Container {
+	env := b.baseEnv(run)
+	mounts := []corev1.VolumeMount{{Name: volWorkspace, MountPath: WorkspaceDir}, runtimeMount()}
+	if len(run.Spec.Workstation.Caches) > 0 {
+		caches, _ := json.Marshal(run.Spec.Workstation.Caches)
+		env = append(env, corev1.EnvVar{Name: "EXRADIUS_CACHES", Value: string(caches)})
+	}
+	if b.usesProjectVolume(run) {
+		env = append(env, corev1.EnvVar{Name: "EXRADIUS_PROJECT_DIR", Value: ProjectDir})
+		mounts = append(mounts, corev1.VolumeMount{Name: volProject, MountPath: ProjectDir})
+	}
 	return corev1.Container{
 		Name:            ContainerPrepare,
 		Image:           run.Spec.Workstation.Image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command:         []string{Runner, "--prepare", string(run.Spec.Purpose), run.Spec.ID},
-		Env:             b.baseEnv(run),
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: volWorkspace, MountPath: WorkspaceDir},
-			runtimeMount(),
-		},
-		SecurityContext: securityContext(),
+		Env:             env,
+		VolumeMounts:    mounts,
+		SecurityContext: b.securityContext(),
 	}
 }
 
@@ -385,6 +554,12 @@ func (b Pods) clone(run *v1.Run, n int) corev1.Container {
 	if repo.CredentialKey != "" {
 		env = append(env, secretEnv(run, "EXRADIUS_GIT_AUTH", repo.CredentialKey))
 	}
+	mounts := append(append(workspaceMounts(false), runtimeMount()), identityMounts()...)
+	if b.usesProjectVolume(run) {
+		// The mirrors are refreshed here, under a file lock next to each (§7.5).
+		env = append(env, corev1.EnvVar{Name: "EXRADIUS_MIRROR_DIR", Value: MirrorsDir})
+		mounts = append(mounts, corev1.VolumeMount{Name: volProject, MountPath: MirrorsDir, SubPath: "mirrors"})
+	}
 	return corev1.Container{
 		Name:            CloneContainer(n),
 		Image:           run.Spec.Workstation.Image,
@@ -392,9 +567,52 @@ func (b Pods) clone(run *v1.Run, n int) corev1.Container {
 		Command:         []string{Runner, "--clone"},
 		WorkingDir:      WorkDir,
 		Env:             mergeEnv(b.baseEnv(run), pathEnv(WorkDir), env),
-		VolumeMounts:    append(append(workspaceMounts(false), runtimeMount()), identityMounts()...),
-		SecurityContext: securityContext(),
+		VolumeMounts:    mounts,
+		SecurityContext: b.securityContext(),
 	}
+}
+
+// service is a native sidecar (an init container with restartPolicy Always): Kubernetes
+// starts the services in order and holds the setup commands and the workstation until each
+// one's startup probe passes (§7.4).
+func (b Pods) service(run *v1.Run, svc v1.ServiceSpec) corev1.Container {
+	resources := corev1.ResourceRequirements{Requests: corev1.ResourceList{}}
+	if !b.Config.ServiceCPURequest.IsZero() {
+		resources.Requests[corev1.ResourceCPU] = b.Config.ServiceCPURequest
+	}
+	if svc.Memory != nil && !svc.Memory.IsZero() {
+		resources.Requests[corev1.ResourceMemory] = *svc.Memory
+		resources.Limits = corev1.ResourceList{corev1.ResourceMemory: *svc.Memory}
+	} else if !b.Config.ServiceMemoryRequest.IsZero() {
+		resources.Requests[corev1.ResourceMemory] = b.Config.ServiceMemoryRequest
+	}
+	return corev1.Container{
+		Name:            ServiceContainer(svc.Name),
+		Image:           svc.Image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		// A config's command is Docker's CMD: the image's ENTRYPOINT is kept.
+		Args:            svc.Command,
+		Env:             specEnv(run, svc.Env),
+		RestartPolicy:   ptr.To(corev1.ContainerRestartPolicyAlways),
+		StartupProbe:    startupProbe(svc),
+		Resources:       resources,
+		SecurityContext: serviceSecurityContext(),
+	}
+}
+
+func startupProbe(svc v1.ServiceSpec) *corev1.Probe {
+	if svc.Ready == nil {
+		return nil
+	}
+	probe := &corev1.Probe{PeriodSeconds: ProbePeriodSeconds, FailureThreshold: ProbeFailureThreshold, SuccessThreshold: 1}
+	if len(svc.Ready.Exec) > 0 {
+		probe.Exec = &corev1.ExecAction{Command: svc.Ready.Exec}
+		probe.TimeoutSeconds = ProbeExecTimeout
+	} else {
+		probe.TCPSocket = &corev1.TCPSocketAction{Port: intstr.FromInt32(svc.Ready.TCP)}
+		probe.TimeoutSeconds = 1
+	}
+	return probe
 }
 
 func (b Pods) setup(run *v1.Run, n int) corev1.Container {
@@ -406,15 +624,15 @@ func (b Pods) setup(run *v1.Run, n int) corev1.Container {
 		WorkingDir:      WorkDir,
 		Env:             mergeEnv(specEnv(run, run.Spec.Workstation.Env), pathEnv(WorkDir), specEnv(run, run.Spec.Git.SetupEnv)),
 		Resources:       b.workstationResources(run),
-		VolumeMounts:    append(workspaceMounts(true), identityMounts()...),
-		SecurityContext: securityContext(),
+		VolumeMounts:    append(append(workspaceMounts(true), identityMounts()...), b.cacheMounts(run)...),
+		SecurityContext: b.securityContext(),
 	}
 }
 
 // files writes answer attachments as they arrive (§8.2), as a uid other than the run
 // user's, into the directory the workstation mounts read-only.
 func (b Pods) files(run *v1.Run) corev1.Container {
-	sc := securityContext()
+	sc := b.securityContext()
 	sc.RunAsUser = ptr.To(b.Config.RunUID + 1)
 	sc.RunAsGroup = ptr.To(b.Config.RunGID)
 	return corev1.Container{
@@ -466,8 +684,8 @@ func (b Pods) workstation(run *v1.Run) corev1.Container {
 			b.baseEnv(run),
 		),
 		Resources:       b.workstationResources(run),
-		VolumeMounts:    append(append(workspaceMounts(true), runtimeMount()), identityMounts()...),
-		SecurityContext: securityContext(),
+		VolumeMounts:    append(append(append(workspaceMounts(true), runtimeMount()), identityMounts()...), b.cacheMounts(run)...),
+		SecurityContext: b.securityContext(),
 	}
 }
 
@@ -491,6 +709,6 @@ func (b Pods) probeWorkstation(run *v1.Run) corev1.Container {
 			{Name: volState, MountPath: StateDir},
 			runtimeMount(),
 		}, identityMounts()...),
-		SecurityContext: securityContext(),
+		SecurityContext: b.securityContext(),
 	}
 }

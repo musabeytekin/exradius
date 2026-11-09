@@ -1,5 +1,5 @@
-"""docs/run-environment.md on Kubernetes: declared memory, caches and commands in the config,
-and how this phase treats them (docs/kubernetes.md §6, §7.6; docs/kubernetes-plan.md phase 1)."""
+"""docs/run-environment.md on Kubernetes: declared memory, caches and commands in the config
+(docs/kubernetes.md §6, §7.6), all of which run since phase 3."""
 
 from __future__ import annotations
 
@@ -48,10 +48,9 @@ def test_resources_cache_and_command_parse():
     config = parse_config(DECLARED).config
     assert config.resources.memory == "6g" and config.workstation_memory == 6 * GiB
     assert config.services["minio"].command == ["server", "/data"] and config.services["minio"].memory == "512m"
-    assert config.memory_reservation() == 6 * GiB + 512 * 1024**2
     assert config.workstation.cache == ["~/.local/share/pnpm/store", "/var/cache/apt-lists"]
     plain = parse_config(MINIMAL).config
-    assert plain.resources.memory is None and plain.memory_reservation() == 0 and plain.workstation.cache == []
+    assert plain.resources.memory is None and plain.workstation_memory is None and plain.workstation.cache == []
 
 
 def test_memory_sizes():
@@ -94,7 +93,7 @@ def test_cache_entries_are_unique_and_commands_not_empty():
         "services.db.command: List should have at least 1 item after validation, not 0"]
 
 
-# Caches: path naming (the project volume mounts them in phase 3) -------------------------------------
+# Caches: path naming (the operator mounts them from the project volume) ----------------------------
 
 
 def test_cache_paths_and_names():
@@ -103,32 +102,26 @@ def test_cache_paths_and_names():
     assert caches.sanitise("~/.local/share/pnpm/store") == "local_share_pnpm_store"
     assert caches.sanitise("/var/cache/apt-lists") == "var_cache_apt-lists"
     assert caches.sanitise("~/...") == "cache"
+    assert caches.cache_specs(["~/.cache/uv", "/cache/uv/"]) == [
+        {"path": "/home/runner/.cache/uv", "name": "0-cache_uv"},
+        {"path": "/cache/uv", "name": "1-cache_uv"},  # the index keeps equal names apart
+    ]
 
 
-def test_a_cache_is_accepted_and_ignored_with_a_warning(tmp_path):
-    remote = make_config_repo(tmp_path / "repos", {"exradius.yaml": DECLARED.replace(
-        "services:\n  minio:\n    image: minio/minio\n    command: [server, /data]\n    memory: 512m\n", "")})
+def test_caches_and_services_are_runnable_without_warnings(tmp_path):
+    remote = make_config_repo(tmp_path / "repos", {"exradius.yaml": DECLARED})
     snapshot = read_snapshot(tmp_path / "cache", uuid.uuid4(), str(remote))
-    assert snapshot.config is not None and snapshot.errors == []
-    assert "workstation.cache is ignored: caches come with the project volume, not available yet" in snapshot.warnings
-    assert capabilities.unsupported(snapshot.config) == []  # still runnable
-    assert capabilities.warnings(parse_config(MINIMAL).config) == [] and capabilities.warnings(None) == []
+    assert snapshot.config is not None and snapshot.errors == [] and snapshot.warnings == []
+    assert capabilities.unsupported(snapshot.config) == [] and capabilities.warnings(snapshot.config) == []
+    built = parse_config(MINIMAL + "services:\n  db: {dockerfile: Dockerfile}\n",
+                         lookup=lambda path: "tree" if path in ("", ".") else "blob").config
+    assert capabilities.unsupported(built) == [] and capabilities.unsupported(None) == []
 
 
-def test_what_this_version_cannot_run():
-    config = parse_config(DECLARED).config
-    assert capabilities.unsupported(config) == ["services.minio: services are not available yet"]
-    built = parse_config(MINIMAL + "workstation: {dockerfile: Dockerfile}\n", lookup=lambda path: "tree" if path in ("", ".") else "blob").config
-    assert capabilities.unsupported(built) == []  # phase 2 builds workstations
-    assert capabilities.unsupported(parse_config(MINIMAL).config) == [] and capabilities.unsupported(None) == []
-
-
-def test_project_page_lists_what_cannot_run_yet(admin, tmp_path):
+def test_a_project_with_services_is_runnable(admin, tmp_path):
     project = setup_configuration(admin, tmp_path, BASE_CONFIG + "services:\n  db: {image: 'postgres:16'}\n")["project"]
-    assert project["runnable"] is False and project["health"] == "config_errors"
-    assert project["reason"] == "services.db: services are not available yet"
-    assert "services.db: services are not available yet" in project["errors"]
-    assert project["cache_bytes"] is None  # no Exradius process mounts the caches any more
+    assert project["runnable"] is True and project["health"] == "ok" and project["errors"] == []
+    assert "cache_bytes" not in project  # no Exradius process mounts the caches any more
 
 
 def test_declared_memory_becomes_a_quantity():

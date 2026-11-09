@@ -126,12 +126,17 @@ IMAGE = re.compile(r'\bimage\s+"?([\w.:/@-]*\w)"?', re.I)
 UNSCHEDULABLE = re.compile(r"Unschedulable|didn't match|Insufficient (memory|cpu)|nodes are available", re.I)
 
 
+PULLED_BY = re.compile(r"\bof service-([a-z][a-z0-9-]*)\b")
+
+
 def _image_pull(f: Failure) -> str | None:
     if not PULL.search(f.log):
         return None
     image = IMAGE.search(f.log)
     what = f"The image {_code(image.group(1))}" if image else "An image of the run's pod"
-    return (f"{what} could not be pulled: check `workstation.image` (name, tag, registry) and, for a private "
+    service = PULLED_BY.search(f.log)
+    key = f"`services.{service.group(1)}.image`" if service else "`workstation.image`"
+    return (f"{what} could not be pulled: check {key} (name, tag, registry) and, for a private "
             "registry, the install's `runs.imagePullSecrets`.")
 
 
@@ -158,11 +163,19 @@ def _service(f: Failure) -> str | None:
     name, image, rest = match.groups()
     if rest.startswith("did not become ready"):
         within = re.search(r"within (\d+s)", rest)
-        return (f"Service {name} never became ready{' within ' + within.group(1) if within else ''}: "
-                "check its `env` and its `ready` check.")
-    if exited := re.match(r"exited with code (\S+) before it was ready", rest):
+        sentence = (f"Service {name} never became ready{' within ' + within.group(1) if within else ''}: "
+                    "check its `env` and its `ready` check.")
+        if re.search(r"waiting for port \d+", rest):
+            sentence += (" A `tcp` check connects to the run's own address, not 127.0.0.1: a service that listens "
+                         "only on 127.0.0.1 needs a `ready` command instead.")
+        return sentence
+    if rest.startswith("ran out of memory"):
+        return (f"Service {name} ({image}) ran out of memory before it was ready (exit 137): declare its `memory`, "
+                "so the run's pod is placed on a node with room for it.")
+    if exited := re.search(r"exited with code (\S+) before it was ready", rest):
         return (f"Service {name} ({image}) exited with code {exited.group(1)} before it was ready: "
-                "its log tail shows why; check its `env`.")
+                "its log tail shows why; check its `env`, its `command` and its ports (services share the run's "
+                "localhost, so two that listen on one port collide).")
     if rest.startswith("could not start"):
         return f"Service {name} could not start: {rest.removeprefix('could not start: ')}"
     return None
@@ -280,7 +293,7 @@ def _build(f: Failure) -> str | None:
     return f"{sentence} {mismatch}" if mismatch else sentence
 
 
-RULES: list[Rule] = [_config, _image_pull, _unschedulable, _clone, _declared_memory, _killed, _service, _build,
+RULES: list[Rule] = [_config, _image_pull, _unschedulable, _clone, _declared_memory, _service, _killed, _build,
                      _setup_mismatch, _missing_tool]
 
 

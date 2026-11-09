@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     The build pods push there and the nodes pull from there."""
     builds_cache: bool = True
     """Keep each image's layer cache in the registry at ``<image>:buildcache``."""
+    insecure_registries: str = ""
+    """Registries reached over plain HTTP, comma-separated (the kind registry); the worker
+    reads services' image configs there (docs/kubernetes.md §7.4)."""
 
     @field_validator(
         "s3_endpoint_url", "s3_access_key", "s3_secret_key", "broker_username", "broker_password", "kube_api_url",
@@ -126,6 +129,10 @@ class Settings(BaseSettings):
             host = f"[{host}]"
         netloc = f"{user}:{quote(password, safe='')}@{host}" + (f":{parts.port}" if parts.port else "")
         return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+    @property
+    def insecure_registry_hosts(self) -> list[str]:
+        return [host.strip() for host in self.insecure_registries.split(",") if host.strip()]
 
     def runtime_image(self, runtime: str) -> str:
         """The bundle image of a runtime (``EXRADIUS_RUNTIME_IMAGE_<NAME>``)."""

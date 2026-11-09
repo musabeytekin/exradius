@@ -29,20 +29,20 @@ import (
 // GracePeriod is how long a cancelled run's containers get after SIGTERM (§8.4).
 const GracePeriod int64 = 30
 
-// LogReader reads the end of a container's log.
+// LogReader reads the end of a container's log, or of its previous instance's.
 type LogReader interface {
-	Tail(ctx context.Context, namespace, pod, container string) (string, error)
+	Tail(ctx context.Context, namespace, pod, container string, previous bool) (string, error)
 }
 
 // ClientsetLogs reads logs through the API server (pods/log).
 type ClientsetLogs struct{ Clientset kubernetes.Interface }
 
 // Tail implements LogReader.
-func (l ClientsetLogs) Tail(ctx context.Context, namespace, pod, container string) (string, error) {
+func (l ClientsetLogs) Tail(ctx context.Context, namespace, pod, container string, previous bool) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	data, err := l.Clientset.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{
-		Container: container, TailLines: ptr.To[int64](400),
+		Container: container, TailLines: ptr.To[int64](400), Previous: previous,
 	}).DoRaw(ctx)
 	if err != nil {
 		return "", err
@@ -115,14 +115,21 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	obs := status.Observe(run, pod, r.now())
+	reads := make([]logRead, 0, len(obs.Ended)+len(obs.Previous))
 	for _, container := range obs.Ended {
-		text, err := r.Logs.Tail(ctx, pod.Namespace, pod.Name, container)
+		reads = append(reads, logRead{container, false})
+	}
+	for _, container := range obs.Previous {
+		reads = append(reads, logRead{container, true})
+	}
+	for _, read := range reads {
+		text, err := r.Logs.Tail(ctx, pod.Namespace, pod.Name, read.container, read.previous)
 		if err != nil {
-			logger.V(1).Info("cannot read log", "pod", pod.Name, "container", container, "error", err.Error())
+			logger.V(1).Info("cannot read log", "pod", pod.Name, "container", read.container, "error", err.Error())
 			continue
 		}
 		if strings.TrimSpace(text) != "" {
-			setLog(&obs.Status, container, text)
+			setLog(&obs.Status, read.container, text)
 		}
 	}
 	status.Explain(&obs.Status, pod)
@@ -161,6 +168,9 @@ func (r *RunReconciler) startGeneration(ctx context.Context, run *v1.Run, pods [
 	if older > 0 {
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
+	if waiting, err := r.ensureProjectVolume(ctx, run); err != nil || waiting {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, err
+	}
 	if pvc := r.Builder.Workspace(run); pvc != nil {
 		if err := r.Client.Create(ctx, pvc); err != nil && !apierrors.IsAlreadyExists(err) {
 			return ctrl.Result{}, fmt.Errorf("create workspace: %w", err)
@@ -172,6 +182,34 @@ func (r *RunReconciler) startGeneration(ctx context.Context, run *v1.Run, pods [
 	}
 	r.event(run, corev1.EventTypeNormal, "PodCreated", "CreatePod", "created pod "+pod.Name)
 	return ctrl.Result{}, r.setStatus(ctx, run, status.Reset(run, pod.Name))
+}
+
+// ensureProjectVolume creates the project's volume on its first Run (§7.6). It belongs to
+// no Run: the worker deletes it with the project. A volume of a deleted project that is
+// still going (in use, or its finalizer pending) is waited for, then made anew.
+func (r *RunReconciler) ensureProjectVolume(ctx context.Context, run *v1.Run) (waiting bool, err error) {
+	pvc := r.Builder.ProjectVolume(run)
+	if pvc == nil {
+		return false, nil
+	}
+	existing := &corev1.PersistentVolumeClaim{}
+	err = r.APIReader.Get(ctx, types.NamespacedName{Namespace: pvc.Namespace, Name: pvc.Name}, existing)
+	switch {
+	case err == nil:
+		return existing.DeletionTimestamp != nil, nil
+	case !apierrors.IsNotFound(err):
+		return false, err
+	}
+	if err := r.Client.Create(ctx, pvc); err != nil && !apierrors.IsAlreadyExists(err) {
+		return false, fmt.Errorf("create project volume: %w", err)
+	}
+	r.event(run, corev1.EventTypeNormal, "ProjectVolumeCreated", "CreateProjectVolume", "created project volume "+pvc.Name)
+	return false, nil
+}
+
+type logRead struct {
+	container string
+	previous  bool
 }
 
 // cancel deletes the Run's pods and creates none; once none is left the Run is Failed

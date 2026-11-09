@@ -72,7 +72,9 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /work
       name: workspace
@@ -134,7 +136,9 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /exradius/workspace
       name: workspace
@@ -191,9 +195,6 @@ spec:
   securityContext:
     fsGroup: 1000
     fsGroupChangePolicy: OnRootMismatch
-    runAsGroup: 1000
-    runAsNonRoot: true
-    runAsUser: 1000
     seccompProfile:
       type: RuntimeDefault
     supplementalGroupsPolicy: Strict

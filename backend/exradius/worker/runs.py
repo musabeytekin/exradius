@@ -42,7 +42,8 @@ from exradius.worker import git_identity, run_objects
 from exradius.worker.builds import BuildAbandoned, BuildFailed, ImageBuilder, Images, build_jobs
 from exradius.worker.kube import Cluster
 from exradius.worker.lifecycle import PendingEvent, run_event, transition
-from exradius.worker.run_objects import RunObjects, RunView, run_name, tail
+from exradius.worker.registry import ImageConfigs
+from exradius.worker.run_objects import SERVICE_STEP, RunObjects, RunView, run_name, service_failure, tail
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,9 @@ WAITING_FOR_CAPACITY = "capacity"
 """``runs.waiting_for`` while the run's pod cannot be scheduled (it stays preparing)."""
 WAITING_FOR_BUILD = "build"
 """``runs.waiting_for`` while the run waits for its images to be built (it stays preparing)."""
+PROJECT_VOLUME_PREFIX = "exradius-project-"
+"""The operator's ``exradius-project-<slug>`` PVC of a project's mirrors and caches."""
+LABEL_VOLUME = "exradius.dev/volume"
 CANCEL_GRACE = 90.0
 """Seconds a cancelled run waits for its pod to go before it is finalised anyway."""
 ABANDONED_AFTER = 1800.0
@@ -92,6 +96,8 @@ def step_error(view: RunView, config: ProjectConfig | None) -> str:
         return view.message or f"the run's pod ended ({view.reason or view.phase}) before the agent started"
     name, log_tail = step.get("name") or "", tail(step.get("log") or "")
     code = step.get("exitCode")
+    if name.startswith(SERVICE_STEP):
+        return service_failure(step, view.service(name.removeprefix(SERVICE_STEP)), config)
     if name.startswith("Setup: "):
         command = name.removeprefix("Setup: ")
         if step.get("reason") == "OOMKilled" and config is not None and config.resources.memory:
@@ -126,6 +132,8 @@ class RunManager:
         self.emit = emit
         self.box = SecretBox(settings.secret_key)
         self.builder = ImageBuilder(settings, sessions, store, cluster)
+        self.image_configs = ImageConfigs(settings.insecure_registry_hosts)
+        """Reads services' HEALTHCHECKs (docs/kubernetes.md §7.4); tests replace it."""
         self.check_directory: Callable[[], Awaitable[None]] = _nothing
         """Run after this worker stored a config snapshot (docs/integration-api.md §3); the
         worker sets it once it can publish."""
@@ -242,11 +250,17 @@ class RunManager:
     def workstation_image(self, config: ProjectConfig) -> str:
         return config.workstation.image or self.settings.project_default_image
 
+    async def healthchecks(self, config: ProjectConfig, images: Images) -> dict[str, list[str] | None]:
+        """The ``HEALTHCHECK`` of each service image whose ``ready`` is not set."""
+        return {name: await self.image_configs.healthcheck(images.services.get(name) or service.image or "")
+                for name, service in config.services.items() if service.ready is None}
+
     async def _images(self, run_id: uuid.UUID, project: Project, commit: str, config: ProjectConfig) -> Images:
         """The run's images, waiting in preparing while a Build makes them (§8.1). A
         cancel stops the wait; the Build goes on for whoever else needs the image."""
         if not build_jobs(config):
-            return Images(workstation=self.workstation_image(config))
+            return Images(workstation=self.workstation_image(config),
+                          services={name: service.image or "" for name, service in config.services.items()})
 
         async def wanted() -> bool:
             async with self.sessions() as session:
@@ -276,6 +290,7 @@ class RunManager:
         task = run.task
         agent = config.agents[task.agent]
         images = await self._images(run.id, task.project, commit, config)
+        healthchecks = await self.healthchecks(config, images)
         await self._store_url_attachments(run.id)
         token = new_run_token()
         name = run_name("task", run.id)
@@ -296,7 +311,7 @@ class RunManager:
                 workstation_image=images.workstation, provider_env=provider_env,
                 credential_variables=runtime_class(agent.runtime).credential_variables,
                 identity=git_identity.Identity(name=identity_name, email=email, agent=task.agent, task_id=task.id),
-                token=token,
+                token=token, service_images=images.services, healthchecks=healthchecks,
             )
             # Recorded before the Run exists: its runner authenticates with this token, and
             # recovery tells "disappeared" from "never created" by the name.
@@ -641,6 +656,25 @@ class RunManager:
             await self.cluster.delete_run(name)
         except Exception:  # noqa: BLE001 - recovery deletes Runs of finished runs
             log.exception("could not delete Run %s", name)
+
+    # -- project volumes (docs/kubernetes.md §7.6) ---------------------------------------
+
+    async def delete_project_volume(self, slug: str) -> None:
+        """The project was deleted: its mirrors and caches go (once no pod uses them)."""
+        if await self.cluster.delete_pvc(PROJECT_VOLUME_PREFIX + slug):
+            log.info("deleted the project volume of %s", slug)
+
+    async def sweep_project_volumes(self) -> None:
+        """Delete project volumes whose project no longer exists (a lost control message)."""
+        volumes = await self.cluster.list_pvcs(f"{LABEL_VOLUME}=project")
+        async with self.sessions() as session:
+            slugs = set((await session.scalars(select(Project.slug))).all())
+        for pvc in volumes:
+            metadata = pvc.get("metadata") or {}
+            slug = (metadata.get("labels") or {}).get(run_objects.LABEL_PROJECT)
+            if slug and slug not in slugs and not metadata.get("deletionTimestamp"):
+                log.warning("deleting project volume %s: its project is gone", metadata.get("name"))
+                await self.cluster.delete_pvc(metadata["name"])
 
     # -- recovery -----------------------------------------------------------------------
 

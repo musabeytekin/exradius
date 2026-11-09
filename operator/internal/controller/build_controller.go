@@ -103,7 +103,7 @@ func (r *BuildReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	obs := status.ObserveBuild(build, pod, r.now())
 	if obs.LogFrom != "" {
-		text, err := r.Logs.Tail(ctx, pod.Namespace, pod.Name, obs.LogFrom)
+		text, err := r.Logs.Tail(ctx, pod.Namespace, pod.Name, obs.LogFrom, false)
 		if err != nil {
 			logger.V(1).Info("cannot read log", "pod", pod.Name, "container", obs.LogFrom, "error", err.Error())
 		} else if strings.TrimSpace(text) != "" {

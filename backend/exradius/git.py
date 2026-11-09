@@ -98,7 +98,8 @@ def ls_remote(url: str, auth: str | None = None, timeout: float = 30, cwd: Path 
 
 @contextmanager
 def _locked(path: Path) -> Iterator[None]:
-    """Serialise mirror updates across concurrent readers in one pod."""
+    """Serialise mirror updates across concurrent readers: the api's or worker's own
+    config mirrors, and the clone containers of a project's runs on its project volume."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path.with_suffix(".lock"), "w") as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
@@ -131,6 +132,15 @@ def _follow_remote_head(mirror: Path, auth: str | None, timeout: float | None) -
         return
     if refs.default_branch and refs.default_branch in refs.branches:
         git("symbolic-ref", "HEAD", f"refs/heads/{refs.default_branch}", cwd=mirror)
+
+
+def clone_from_mirror(mirror: Path, dest: Path, url: str, branch: str | None) -> None:
+    """Clone a local mirror and point ``origin`` at the real remote. The mirror is on
+    another volume, where hard links cannot reach, so the objects are copied
+    (``--no-hardlinks``: an explicit ``--local`` would fail on the link instead).
+    Without a branch the mirror's HEAD, the remote's default branch, is checked out."""
+    git("clone", "--no-hardlinks", *(["--branch", branch] if branch else []), str(mirror), str(dest))
+    git("remote", "set-url", "origin", url, cwd=dest)
 
 
 def clone(url: str, dest: Path, branch: str | None, auth: str | None, timeout: float | None = None) -> None:

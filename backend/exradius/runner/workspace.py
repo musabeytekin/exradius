@@ -13,16 +13,23 @@ containers mount its sub-directories:
 
 A step that finds its marker in ``state/steps/`` has nothing to do: the pod was recreated
 on the same workspace for a resume (§8.3).
+
+With a project volume (§7.6), ``prepare`` also creates its ``mirrors/`` and each
+``caches/<name>/`` (without one, each cache is ``caches/<name>/`` of the workspace), and
+the mount point of every cache below the home or ``/tmp``: all as the run user, so the
+kubelet never makes one as root (a root-owned ``~/.cache`` would stop other tools writing
+there). ``clone`` refreshes the repository's mirror under a file lock and clones from it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
 import signal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from exradius import git
 from exradius.runner.client import HttpRunApi, RunEnded
@@ -32,6 +39,8 @@ log = logging.getLogger(__name__)
 WORKSPACE = Path("/exradius/workspace")
 ATTACHMENTS = Path(".exradius") / "attachments"
 LAYOUT = {"work": 0o755, "home": 0o755, "tmp": 0o1777, "state": 0o755}
+MOUNTED = {"/home/runner": "home", "/tmp": "tmp"}
+"""Container paths that are workspace sub-directories, where cache mount points are made."""
 FILES_POLL = 30.0
 ENDED = ("completed", "failed", "cancelled", "rejected")
 
@@ -68,13 +77,42 @@ def layout(root: Path) -> None:
     attachments.chmod(0o775)  # the files sidecar runs as another uid in the run's group
 
 
-async def prepare(purpose: str, object_id: str, api_url: str, token: str, root: Path = WORKSPACE) -> int:
-    """Lay out the workspace and, for a task, write its attachments (read-only)."""
+def cache_directories(root: Path, caches: list[dict[str, str]], project: Path | None) -> list[str]:
+    """Each cache's directory (on the project volume, else the workspace) and its mount
+    point below the home or ``/tmp``; returns what it made, for the step's log."""
+    made = []
+    base = project if project is not None else root
+    if project is not None:
+        (project / "mirrors").mkdir(parents=True, exist_ok=True)
+    for cache in caches:
+        directory = base / "caches" / cache["name"]
+        if not directory.exists():
+            directory.mkdir(parents=True)
+            made.append(cache["path"])
+        path = PurePosixPath(cache["path"])
+        for prefix, sub in MOUNTED.items():
+            if path.is_relative_to(prefix) and path != PurePosixPath(prefix):
+                (root / sub / path.relative_to(prefix)).mkdir(parents=True, exist_ok=True)
+    return made
+
+
+async def prepare(purpose: str, object_id: str, api_url: str, token: str, root: Path = WORKSPACE,
+                  environ: dict[str, str] | None = None) -> int:
+    """Lay out the workspace and the cache directories and, for a task, write its
+    attachments (read-only)."""
+    environ = dict(os.environ if environ is None else environ)
     state = root / "state"
+    layout(root)
+    caches = json.loads(environ.get("EXRADIUS_CACHES") or "[]")
+    project = Path(environ["EXRADIUS_PROJECT_DIR"]) if environ.get("EXRADIUS_PROJECT_DIR") else None
+    if caches or project is not None:
+        made = cache_directories(root, caches, project)
+        where = "on the project volume" if project is not None else "on this run's workspace (no project volume)"
+        print(f"caches {where}: {', '.join(c['path'] for c in caches) or 'none'}"
+              + (f" (new: {', '.join(made)})" if made else ""))
     if marker(state, "prepare").exists():
         print("the workspace is already prepared")
         return 0
-    layout(root)
     attachments = root / "work" / ATTACHMENTS
     if purpose == "task":
         api = HttpRunApi(api_url, object_id, token)
@@ -90,13 +128,15 @@ async def prepare(purpose: str, object_id: str, api_url: str, token: str, root: 
 
 
 def clone(work_dir: Path, state_dir: Path, environ: dict[str, str]) -> int:
-    """Clone one repository into ``/work/<folder>`` (docs/kubernetes.md §7.5): straight from
-    the remote until the project volume holds mirrors (phase 3). The credential is used for
-    this command only."""
+    """Clone one repository into ``/work/<folder>`` (docs/kubernetes.md §7.5): from its
+    mirror on the project volume, refreshed first under a file lock (``EXRADIUS_MIRROR_DIR``),
+    or straight from the remote without one. The credential is used for these commands
+    only; ``origin`` is the remote's plain URL."""
     folder = environ["EXRADIUS_CLONE_FOLDER"]
     url = environ["EXRADIUS_CLONE_URL"]
     branch = environ.get("EXRADIUS_CLONE_BRANCH") or None
     auth = environ.get("EXRADIUS_GIT_AUTH") or None
+    mirrors = environ.get("EXRADIUS_MIRROR_DIR") or None
     step = f"clone-{environ.get('EXRADIUS_CLONE_INDEX') or folder}"
     if marker(state_dir, step).exists():
         print(f"{folder} is already cloned")
@@ -105,7 +145,14 @@ def clone(work_dir: Path, state_dir: Path, environ: dict[str, str]) -> int:
     if dest.exists():  # left by an attempt that did not finish
         shutil.rmtree(dest)
     try:
-        git.clone(url, dest, branch, auth)
+        if mirrors:
+            mirror = Path(mirrors) / f"{folder}.git"
+            fresh = not (mirror / "HEAD").exists()
+            git.sync_mirror(mirror, url, auth)
+            print(f"{'created' if fresh else 'fetched'} the mirror of {git.redact(url, auth)}", flush=True)
+            git.clone_from_mirror(mirror, dest, url, branch)
+        else:
+            git.clone(url, dest, branch, auth)
         head = git.git("log", "-1", "--format=%h %s", cwd=dest).strip()
     except git.GitError as exc:
         print(git.redact(str(exc), auth), flush=True)

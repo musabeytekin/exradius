@@ -60,7 +60,9 @@ spec:
         drop:
         - ALL
       readOnlyRootFilesystem: true
+      runAsGroup: 1000
       runAsNonRoot: true
+      runAsUser: 1000
     volumeMounts:
     - mountPath: /home/runner
       name: home
@@ -85,9 +87,6 @@ spec:
   securityContext:
     fsGroup: 1000
     fsGroupChangePolicy: OnRootMismatch
-    runAsGroup: 1000
-    runAsNonRoot: true
-    runAsUser: 1000
     seccompProfile:
       type: RuntimeDefault
     supplementalGroupsPolicy: Strict

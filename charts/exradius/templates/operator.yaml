@@ -41,6 +41,12 @@ spec:
             - --workspace-storage-class={{ $runs.workspace.storageClass }}
             - --memory-request={{ $runs.defaults.memoryRequest }}
             - --cpu-request={{ $runs.defaults.cpuRequest }}
+            - --service-memory-request={{ $runs.defaults.serviceMemoryRequest }}
+            - --service-cpu-request={{ $runs.defaults.serviceCpuRequest }}
+            - --project-volume={{ $runs.projectVolume.enabled }}
+            - --project-volume-access-mode={{ $runs.projectVolume.accessMode }}
+            - --project-volume-storage-class={{ $runs.projectVolume.storageClass }}
+            - --project-volume-size={{ $runs.projectVolume.size }}
             - --runtime-class-name={{ $runs.runtimeClassName }}
             - --user-namespaces={{ $runs.userNamespaces }}
             - --node-selector={{ $runs.nodeSelector | default dict | toJson }}

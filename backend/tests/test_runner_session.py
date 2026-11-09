@@ -261,7 +261,7 @@ async def test_a_finished_session_reports_its_outcome_with_warnings(tmp_path, mo
 def test_run_dispatches_the_modes(monkeypatch):
     seen = []
 
-    async def prepare(purpose, object_id, url, token, root):
+    async def prepare(purpose, object_id, url, token, root, environ):
         seen.append(("prepare", purpose, object_id, url, token, str(root)))
         return 0
 

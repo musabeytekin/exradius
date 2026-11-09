@@ -39,6 +39,7 @@ const (
 	ReasonConfigError     = "CreateContainerConfigError"
 	ReasonOOMKilled       = "OOMKilled"
 	ReasonError           = "Error"
+	ReasonServiceFailed   = "ServiceFailed"
 )
 
 // EnvVar is one environment variable: a literal value, or a key of the Run's Secret.
@@ -79,9 +80,59 @@ type WorkstationSpec struct {
 	// Env is the project's environment, for setup commands and the workstation.
 	// +optional
 	Env []EnvVar `json:"env,omitempty"`
-	// Caches are accepted and not used yet (the project volume comes later).
+	// Caches are directories kept across the project's runs: on the project volume, or
+	// empty directories on the workspace when there is none (docs/kubernetes.md §7.6).
 	// +optional
-	Caches []string `json:"caches,omitempty"`
+	Caches []CacheSpec `json:"caches,omitempty"`
+}
+
+// CacheSpec is one workstation.cache entry.
+type CacheSpec struct {
+	// Path is where setup commands and the workstation see it.
+	// +kubebuilder:validation:Pattern=`^/`
+	Path string `json:"path"`
+	// Name is its directory, caches/<name>, named by the worker.
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*$`
+	// +kubebuilder:validation:MaxLength=100
+	Name string `json:"name"`
+}
+
+// ServiceSpec is one service: a native sidecar on the pod's network, reached by its name
+// through hostAliases (docs/kubernetes.md §7.4).
+type ServiceSpec struct {
+	// Name is the host name the workstation reaches it by; its container is service-<name>.
+	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]*$`
+	// +kubebuilder:validation:MaxLength=55
+	Name string `json:"name"`
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+	// Command replaces the image's CMD (the container's args); its ENTRYPOINT is kept.
+	// +optional
+	Command []string `json:"command,omitempty"`
+	// +optional
+	Env []EnvVar `json:"env,omitempty"`
+	// Ports are documentation for the agent; nothing is published.
+	// +optional
+	Ports []int32 `json:"ports,omitempty"`
+	// Ready becomes the startup probe; absent, the service counts as started once its
+	// process runs.
+	// +optional
+	Ready *ReadySpec `json:"ready,omitempty"`
+	// Memory becomes request and limit of the sidecar.
+	// +optional
+	Memory *resource.Quantity `json:"memory,omitempty"`
+}
+
+// ReadySpec is a service's readiness check: a command in its container, or a TCP port.
+// +kubebuilder:validation:XValidation:rule="has(self.exec) != has(self.tcp)",message="give exactly one of exec or tcp"
+type ReadySpec struct {
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	Exec []string `json:"exec,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	TCP int32 `json:"tcp,omitempty"`
 }
 
 // RepositorySpec is one repository cloned into /work/<folder>.
@@ -131,6 +182,9 @@ type RunSpec struct {
 	Workstation WorkstationSpec `json:"workstation"`
 	// +optional
 	Repositories []RepositorySpec `json:"repositories,omitempty"`
+	// Services start in order after the clones and run until the workstation ends.
+	// +optional
+	Services []ServiceSpec `json:"services,omitempty"`
 	// +optional
 	Git GitSpec `json:"git,omitempty"`
 	// Cancel deletes the pod and creates no other.
@@ -165,6 +219,10 @@ type Step struct {
 	ExitCode *int32 `json:"exitCode,omitempty"`
 	// +optional
 	Reason string `json:"reason,omitempty"`
+	// Message says, in one line, why the operator failed the step itself (a service that
+	// did not become ready).
+	// +optional
+	Message string `json:"message,omitempty"`
 	// Log is the last 4000 characters of the container's log, read when it ended.
 	// +optional
 	Log string `json:"log,omitempty"`

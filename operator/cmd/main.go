@@ -35,8 +35,10 @@ func main() {
 		leaderID, leaderNamespace, metricsAddr, probeAddr      string
 		buildsNamespace, builderImage, buildServiceAccount     string
 		buildkitdConfig, buildResources                        string
+		serviceMemory, serviceCPU, projectAccess, projectClass string
+		projectSize                                            string
 		runUID, runGID                                         int64
-		userNamespaces, leaderElect                            bool
+		userNamespaces, leaderElect, projectVolume             bool
 		workers                                                int
 	)
 	flag.StringVar(&runsNamespace, "runs-namespace", "exradius-runs", "namespace of Runs, run pods, Secrets and workspaces")
@@ -49,6 +51,12 @@ func main() {
 	flag.StringVar(&storageClass, "workspace-storage-class", "", "storage class of workspaces; empty is the cluster default")
 	flag.StringVar(&memoryRequest, "memory-request", "1Gi", "memory request of a workstation without declared memory")
 	flag.StringVar(&cpuRequest, "cpu-request", "500m", "CPU request of the workstation and setup containers")
+	flag.StringVar(&serviceMemory, "service-memory-request", "256Mi", "memory request of a service without declared memory")
+	flag.StringVar(&serviceCPU, "service-cpu-request", "100m", "CPU request of each service")
+	flag.BoolVar(&projectVolume, "project-volume", true, "give each project a PVC of mirrors and caches; off: direct clones, empty caches")
+	flag.StringVar(&projectAccess, "project-volume-access-mode", "ReadWriteOnce", "access mode of project volumes: ReadWriteOnce (one node) or ReadWriteMany")
+	flag.StringVar(&projectClass, "project-volume-storage-class", "", "storage class of project volumes; empty is the cluster default")
+	flag.StringVar(&projectSize, "project-volume-size", "100Gi", "size of each project volume")
 	flag.StringVar(&runtimeClass, "runtime-class-name", "", "RuntimeClass of run pods; empty is the cluster default")
 	flag.BoolVar(&userNamespaces, "user-namespaces", false, "run pods with hostUsers: false")
 	flag.StringVar(&nodeSelector, "node-selector", "{}", "node selector of run pods, as JSON")
@@ -75,6 +83,12 @@ func main() {
 		APIURL: apiURL, RunUID: runUID, RunGID: runGID, IdentityConfigMap: identity,
 		ServiceAccount: serviceAccount, WorkspaceStorageClass: storageClass,
 		RuntimeClassName: runtimeClass, UserNamespaces: userNamespaces,
+		ProjectVolume: podspec.ProjectVolumeConfig{
+			Enabled: projectVolume, AccessMode: corev1.PersistentVolumeAccessMode(projectAccess), StorageClass: projectClass,
+		},
+	}
+	if mode := config.ProjectVolume.AccessMode; mode != corev1.ReadWriteOnce && mode != corev1.ReadWriteMany {
+		fail(logger, fmt.Errorf("--project-volume-access-mode: %q is not ReadWriteOnce or ReadWriteMany", mode))
 	}
 	var err error
 	for _, q := range []struct {
@@ -84,6 +98,9 @@ func main() {
 		{"workspace-size", workspaceSize, &config.WorkspaceSize},
 		{"memory-request", memoryRequest, &config.MemoryRequest},
 		{"cpu-request", cpuRequest, &config.CPURequest},
+		{"service-memory-request", serviceMemory, &config.ServiceMemoryRequest},
+		{"service-cpu-request", serviceCPU, &config.ServiceCPURequest},
+		{"project-volume-size", projectSize, &config.ProjectVolume.Size},
 	} {
 		if q.value == "" {
 			continue

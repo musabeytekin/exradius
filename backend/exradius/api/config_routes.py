@@ -6,6 +6,7 @@ is the only truth, and the API only reads it."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import shutil
 import uuid
@@ -36,6 +37,7 @@ from exradius.resolve import connection_view
 from exradius.schemas import api as s
 from exradius.schemas.project_config import NAME_PATTERN, SECRET_REF
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 NO_CONTENT = status.HTTP_204_NO_CONTENT
 SECRET_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,255}$")
@@ -113,7 +115,6 @@ async def _project_out(session, state: AppState, project: Project) -> s.ProjectO
         created_at=project.created_at,
         verification=s.VerificationSummary.model_validate(latest) if latest else None,
         freshness=freshness(latest, project.snapshot_commit),
-        cache_bytes=None,
         hook_url=hook_url(state, project),
         hook_last_at=project.hook_last_at,
         bridges=[s.BridgeFileOut(name=name, config=file.get("config"), error=file.get("error"))
@@ -239,10 +240,16 @@ async def delete_project(project_id: uuid.UUID, session: DB, state: State, _: Ad
     tasks = await session.scalar(select(func.count()).select_from(Task).where(Task.project_id == project.id))
     if tasks:
         raise HTTPException(409, f"the project has {tasks} task{'s' if tasks != 1 else ''}; it cannot be deleted")
+    slug = project.slug
     await session.delete(project)
     await session.commit()
     await check_directory(state)
     await asyncio.to_thread(_remove_mirror, state, project_id)
+    try:
+        # The worker deletes its project volume (mirrors, caches); its sweep does if this is lost.
+        await state.broker.project_deleted(str(project_id), slug)
+    except Exception:  # noqa: BLE001 - the worker's sweep removes the volume later
+        log.warning("could not tell the worker that project %s was deleted", slug)
     return Response(status_code=NO_CONTENT)
 
 

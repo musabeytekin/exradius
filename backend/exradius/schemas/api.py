@@ -109,9 +109,6 @@ class ProjectOut(BaseModel):
     """Agent slugs of the config, for the send form."""
     config: dict[str, Any] | None
     """The parsed file (secret references as written), for read-only rendering."""
-    cache_bytes: int | None = None
-    """Disk usage of the project's caches (``workstation.cache``), on the project page only;
-    ``null`` when none exist on disk."""
     raw: str | None
     """The file's text."""
     created_at: datetime

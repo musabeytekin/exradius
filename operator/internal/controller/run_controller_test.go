@@ -41,7 +41,7 @@ var (
 
 type fakeLogs struct{}
 
-func (fakeLogs) Tail(_ context.Context, _, _, container string) (string, error) {
+func (fakeLogs) Tail(_ context.Context, _, _, container string, _ bool) (string, error) {
 	return "log of " + container, nil
 }
 
@@ -82,7 +82,8 @@ func TestMain(m *testing.M) {
 			APIURL: "http://exradius-api-internal.exradius:8001", RunUID: 1000, RunGID: 1000,
 			IdentityConfigMap: "exradius-run-identity", ServiceAccount: "exradius-run",
 			WorkspaceSize: resource.MustParse("1Gi"), MemoryRequest: resource.MustParse("1Gi"),
-			CPURequest: resource.MustParse("500m"),
+			CPURequest:    resource.MustParse("500m"),
+			ProjectVolume: podspec.ProjectVolumeConfig{Enabled: true, AccessMode: corev1.ReadWriteOnce, Size: resource.MustParse("5Gi")},
 		}},
 		Logs:     fakeLogs{},
 		Recorder: mgr.GetEventRecorder("exradius-operator"),
@@ -466,3 +467,99 @@ func TestRunSpecValidation(t *testing.T) {
 		t.Fatal("value and secretKey together are accepted")
 	}
 }
+
+func serviceRunSpec(ns, id string) *v1.Run {
+	run := newRun(ns, id)
+	run.Spec.Project = "svc-" + id
+	run.Spec.Services = []v1.ServiceSpec{
+		{Name: "db", Image: "postgres:16", Ready: &v1.ReadySpec{Exec: []string{"pg_isready"}},
+			Env: []v1.EnvVar{{Name: "POSTGRES_PASSWORD", SecretKey: "service.db.POSTGRES_PASSWORD"}}},
+		{Name: "cache", Image: "valkey/valkey:8", Ready: &v1.ReadySpec{TCP: 6379}},
+	}
+	run.Spec.Workstation.Caches = []v1.CacheSpec{{Path: "/home/runner/.cache/uv", Name: "0-cache_uv"}}
+	return run
+}
+
+// Services become native sidecars on localhost by name; the project volume is created on
+// the project's first Run and owned by no Run.
+func TestServicesAndProjectVolume(t *testing.T) {
+	ns := namespace(t)
+	must(t, k8s.Create(testCtx, serviceRunSpec(ns, "s1")))
+	pod := waitPod(t, ns, "run-s1-0")
+	var names []string
+	for _, c := range pod.Spec.InitContainers {
+		names = append(names, c.Name)
+	}
+	if strings.Join(names, " ") != "prepare clone-0 service-db service-cache setup-0 files" {
+		t.Fatalf("init containers %v", names)
+	}
+	if len(pod.Spec.HostAliases) != 1 || strings.Join(pod.Spec.HostAliases[0].Hostnames, ",") != "db,cache" {
+		t.Fatalf("hostAliases %+v", pod.Spec.HostAliases)
+	}
+	pvc := &corev1.PersistentVolumeClaim{}
+	must(t, k8s.Get(testCtx, types.NamespacedName{Namespace: ns, Name: "exradius-project-svc-s1"}, pvc))
+	if len(pvc.OwnerReferences) != 0 || pvc.Labels[podspec.LabelVolume] != "project" {
+		t.Fatalf("the project volume belongs to no Run: %+v", pvc.ObjectMeta)
+	}
+	st := waitPhase(t, ns, "run-s1", v1.PhasePending).Status
+	if len(st.Steps) != 5 || st.Steps[2].Name != "Start service db" || st.Steps[3].Container != "service-cache" {
+		t.Fatalf("steps %+v", st.Steps)
+	}
+
+	// db never becomes ready: two minutes after its container started, the Run fails with
+	// the service's log, and the pod goes.
+	setPodStatus(t, ns, "run-s1-0", func(s *corev1.PodStatus) {
+		s.Phase = corev1.PodPending
+		scheduled(s)
+		long := metav1.NewTime(time.Now().Add(-3 * time.Minute))
+		db := corev1.ContainerStatus{Name: "service-db", Image: "postgres:16", Started: ptrBool(false),
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: long}}}
+		s.InitContainerStatuses = []corev1.ContainerStatus{done("prepare", 0), done("clone-0", 0), db, held("service-cache", "PodInitializing", "")}
+	})
+	run := waitPhase(t, ns, "run-s1", v1.PhaseFailed)
+	step := run.Status.Steps[2]
+	if run.Status.Reason != v1.ReasonServiceFailed || step.State != v1.StepFailed || step.Log != "log of service-db" ||
+		!strings.Contains(run.Status.Message, "service db (postgres:16) did not become ready within 120s") {
+		t.Fatalf("status %+v", run.Status)
+	}
+	eventually(t, "the pod's deletion", func() bool {
+		pod, err := getPod(ns, "run-s1-0")
+		return apierrors.IsNotFound(err) || (err == nil && pod.DeletionTimestamp != nil)
+	})
+}
+
+// A project volume that is still going (its project was deleted) is waited for, then
+// made anew, before the pod is created.
+func TestProjectVolumeBeingDeletedIsWaitedFor(t *testing.T) {
+	ns := namespace(t)
+	old := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "exradius-project-svc-s2", Namespace: ns, Finalizers: []string{"exradius.dev/test-hold"}},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+		},
+	}
+	must(t, k8s.Create(testCtx, old))
+	must(t, k8s.Delete(testCtx, old))
+	must(t, k8s.Create(testCtx, serviceRunSpec(ns, "s2")))
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := getPod(ns, "run-s2-0"); !apierrors.IsNotFound(err) {
+		t.Fatalf("no pod while the old project volume goes: %v", err)
+	}
+	eventually(t, "the finalizer removal", func() bool {
+		pvc := &corev1.PersistentVolumeClaim{}
+		if err := k8s.Get(testCtx, types.NamespacedName{Namespace: ns, Name: old.Name}, pvc); err != nil {
+			return apierrors.IsNotFound(err)
+		}
+		pvc.Finalizers = nil
+		return k8s.Update(testCtx, pvc) == nil
+	})
+	waitPod(t, ns, "run-s2-0")
+	fresh := &corev1.PersistentVolumeClaim{}
+	must(t, k8s.Get(testCtx, types.NamespacedName{Namespace: ns, Name: old.Name}, fresh))
+	if fresh.DeletionTimestamp != nil || fresh.UID == old.UID {
+		t.Fatalf("a new project volume: %+v", fresh.ObjectMeta)
+	}
+}
+
+func ptrBool(v bool) *bool { return &v }

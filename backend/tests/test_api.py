@@ -27,6 +27,8 @@ class FakeControl:
         """``directory.changed`` notices, as published."""
         self.reported: list[str] = []
         """Run ids of ``run_reported`` nudges."""
+        self.deleted_projects: list[str] = []
+        """Slugs of ``project_deleted`` messages."""
         self.healthy = True
 
     async def publish(self, queue: str, body: dict) -> None:
@@ -56,6 +58,11 @@ class FakeControl:
         if not self.healthy:
             raise ConnectionError("broker down")
         self.reported.append(run_id)
+
+    async def project_deleted(self, project_id: str, slug: str) -> None:
+        if not self.healthy:
+            raise ConnectionError("broker down")
+        self.deleted_projects.append(slug)
 
     async def check(self) -> tuple[bool, str]:
         return (True, "connected") if self.healthy else (False, "ConnectionError: broker down")
