@@ -66,7 +66,9 @@ class Cluster(Protocol):
         """Create a Secret in the namespace its metadata names (an existing one is replaced)."""
         ...
 
-    async def delete_secret(self, name: str) -> None: ...
+    async def delete_secret(self, name: str, namespace: str | None = None) -> None:
+        """Delete a Secret of the runs namespace, or of ``namespace``; absent is fine."""
+        ...
 
     async def create_build(self, body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         """Create a Build; ``(object, created)``, with the existing one when it is there."""
@@ -199,8 +201,8 @@ class KubeCluster:
         if response.status_code >= 300:
             raise self._error(response)
 
-    async def delete_secret(self, name: str) -> None:
-        response = await self._request("DELETE", self._secrets(name))
+    async def delete_secret(self, name: str, namespace: str | None = None) -> None:
+        response = await self._request("DELETE", self._secrets(name, namespace))
         if response.status_code not in (200, 202, 404):
             raise self._error(response)
 

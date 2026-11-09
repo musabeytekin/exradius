@@ -133,7 +133,7 @@ class FakeCluster:
     async def create_secret(self, body):
         self.secrets[body["metadata"]["name"]] = copy.deepcopy(body)
 
-    async def delete_secret(self, name):
+    async def delete_secret(self, name, namespace=None):
         self.secrets.pop(name, None)
 
     async def watch_runs(self, resource_version):

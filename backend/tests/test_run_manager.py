@@ -224,8 +224,7 @@ async def test_workstation_is_built_from_the_config_repository(
                                                                   build["metadata"]["name"])
     assert row.digest.startswith("sha256:") and row.token_hash is None and "RUN make tools" in row.log_tail
     assert str(row.id) == build["spec"]["id"]
-    owner = cluster.secrets[build["metadata"]["name"]]["metadata"]["ownerReferences"][0]
-    assert owner["kind"] == "Build"
+    assert build["metadata"]["name"] not in cluster.secrets  # the token's Secret goes once the outcome is recorded
 
     # Same context: no second Build, even though the commit changed.
     commit_config(configured["remote"], {"README": "unrelated\n"})

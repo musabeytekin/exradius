@@ -313,6 +313,11 @@ class ImageBuilder:
             row.log_tail = _tail("\n".join(p for p in (status.get("message") or "", status.get("log") or "") if p))
             row.token_hash = None
             await session.commit()
+        # The revoked token's Secret has done its job (the Build keeps the outcome).
+        try:
+            await self.cluster.delete_secret(obj["metadata"]["name"], obj["metadata"].get("namespace"))
+        except Exception:  # noqa: BLE001 - it goes with the Build anyway
+            log.exception("could not delete the Secret of Build %s", obj["metadata"]["name"])
 
     async def images(self, project_id: uuid.UUID, project_slug: str, commit: str, config: ProjectConfig, *,
                      wanted: Wanted | None = None) -> Images:

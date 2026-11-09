@@ -280,6 +280,9 @@ async def test_client_builds_and_their_secrets(api):
     responses[("POST", secrets)] = httpx.Response(201, json={})
     await cluster.create_secret({"metadata": {"name": "build-p-workstation-1a2b", "namespace": "exradius-builds"}})
     assert requests[-1].url.path == secrets  # in the namespace the Secret names
+    responses[("DELETE", f"{secrets}/build-p-workstation-1a2b")] = httpx.Response(200, json={})
+    await cluster.delete_secret("build-p-workstation-1a2b", "exradius-builds")
+    assert requests[-1].method == "DELETE" and requests[-1].url.path == f"{secrets}/build-p-workstation-1a2b"
 
 
 async def test_client_watch(api):
