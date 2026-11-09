@@ -257,6 +257,8 @@ ERROR_LINE = re.compile(
     r"error|not found|No such file|failed|cannot|could not|denied|returned a non-zero code", re.I
 )
 NOISE = re.compile(r"^\s*(--->|Removing intermediate|#\d+ (sha256|DONE|CACHED)|\s*$)")
+BUILDKIT_PREFIX = re.compile(r"^#\d+ (?:\d+\.\d+ )?")
+"""BuildKit's plain progress: ``#10 0.046 <output>`` (step number and seconds)."""
 
 
 def _build(f: Failure) -> str | None:
@@ -271,7 +273,7 @@ def _build(f: Failure) -> str | None:
         error = next((line.strip() for line in reversed(lines) if ERROR_LINE.search(line)), None)
         return f"The {f.subject} image failed to build: {error}" if error else None
     instruction = INSTRUCTION.match(lines[last].strip()).group(1).strip()
-    after = [line.strip() for line in lines[last + 1:] if not NOISE.match(line)]
+    after = [BUILDKIT_PREFIX.sub("", line.strip()) for line in lines[last + 1:] if not NOISE.match(line)]
     error = next((line for line in after if ERROR_LINE.search(line)), after[-1] if after else None)
     sentence = f"The {f.subject} image failed to build at {_code(instruction)}" + (f": {error}" if error else ".")
     mismatch = _tool_mismatch("\n".join(lines[last:]))

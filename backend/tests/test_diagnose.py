@@ -101,6 +101,30 @@ def test_dockerfile_failure_names_the_instruction_and_the_error():
     )
 
 
+BUILDKIT_BUILD = """building workstation from workstation.Dockerfile failed:
+the build exited with 1
+#9 [4/5] RUN chmod 0755 /opt/employee-tools/*.sh
+#9 DONE 2.0s
+
+#10 [5/5] RUN corepack enable
+#10 0.044 /bin/sh: 1: corepack: not found
+#10 ERROR: process "/bin/sh -c corepack enable" did not complete successfully: exit code: 127
+------
+ > [5/5] RUN corepack enable:
+0.044 /bin/sh: 1: corepack: not found
+------
+error: failed to solve: process "/bin/sh -c corepack enable" did not complete successfully: exit code: 127"""
+
+
+def test_buildkit_failure_names_the_instruction_and_the_error():
+    # The log of a build pod (rootless BuildKit, --progress plain), as the run's error has it.
+    assert diagnose("Build workstation", BUILDKIT_BUILD) == (
+        "The workstation image failed to build at `RUN corepack enable`: /bin/sh: 1: corepack: not found"
+    )
+    killed = BUILDKIT_BUILD.replace("exit code: 127", "exit code: 137")
+    assert "was killed (exit 137)" in diagnose("Build workstation", killed)
+
+
 def test_dockerfile_copy_failure():
     log = """building service api from api.Dockerfile failed:
 Step 4/5 : COPY requirements.txt /srv/
