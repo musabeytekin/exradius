@@ -279,7 +279,8 @@ export const ALL_STATES: TaskState[] = [
 export interface TaskSummary {
   task_id: string; project: string; agent: string; state: TaskState;
   received_at: string; run_id: Uuid | null;
-  /** `capacity` while the run's pod waits for room in the cluster (it stays preparing). */
+  /** While the run stays preparing: `capacity` (its pod waits for room in the cluster) or
+   * `build` (its images are being built). */
   waiting_for?: string | null;
 }
 export interface Run {

@@ -1,5 +1,6 @@
-{{- /* The operator (docs/kubernetes.md §3, §5): turns Runs into pods. Holds nothing secret;
-its flags carry everything run pods get from values (operator/cmd). */ -}}
+{{- /* The operator (docs/kubernetes.md §3, §5, §12): turns Runs into pods and Builds into build
+pods. Holds nothing secret; its flags carry everything run and build pods get from values
+(operator/cmd). */ -}}
 {{- $runs := .Values.runs -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -45,6 +46,11 @@ spec:
             - --node-selector={{ $runs.nodeSelector | default dict | toJson }}
             - --tolerations={{ $runs.tolerations | default list | toJson }}
             - --image-pull-secrets={{ join "," $runs.imagePullSecrets }}
+            - --builds-namespace={{ .Values.namespaces.builds }}
+            - --builder-image={{ .Values.builds.builderImage }}
+            - --build-service-account=exradius-build
+            - --buildkitd-configmap={{ if .Values.builds.insecureRegistries }}exradius-buildkitd{{ end }}
+            - --build-resources={{ .Values.builds.resources | default dict | toJson }}
             - --workers={{ .Values.operator.workers }}
             - --leader-elect={{ .Values.operator.leaderElect }}
             - --leader-election-id=exradius-operator

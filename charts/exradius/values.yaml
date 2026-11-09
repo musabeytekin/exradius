@@ -128,8 +128,24 @@ runs:
   # Names of Secrets in the runs namespace for pulling private project images.
   imagePullSecrets: []
 
+builds:
+  # Prefix of images built from Dockerfiles (docs/kubernetes.md §12): build pods push
+  # <registry>/exradius/<project>/<name>:<hash> and nodes pull it from there.
+  registry: ""
+  # Rootless BuildKit, pinned. An Exradius builder image with the clouds' credential
+  # helpers replaces it in phase 6 (builds.credentialHelper).
+  builderImage: moby/buildkit:v0.34.1-rootless@sha256:f68752a5a94acfcdad2d07867b7075601a421638e17fc5f28efc1c814d0c4f89
+  # Keep each image's layer cache in the registry at <image>:buildcache (mode=max).
+  cache: true
+  # Registries build pods reach over plain HTTP (written into buildkitd.toml).
+  insecureRegistries: []
+  # The build container's resources.
+  resources:
+    requests: {cpu: 500m, memory: 1Gi}
+
 crds:
-  # The Run CRD, kept on uninstall (helm.sh/resource-policy: keep) and upgraded with the chart.
+  # The Run and Build CRDs, kept on uninstall (helm.sh/resource-policy: keep) and upgraded
+  # with the chart.
   install: true
 
 dev:

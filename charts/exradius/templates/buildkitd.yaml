@@ -1,0 +1,18 @@
+{{- /* buildkitd.toml of build pods (docs/kubernetes.md §12): the registries they reach over
+plain HTTP, such as the local kind registry. */ -}}
+{{- with .Values.builds.insecureRegistries }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exradius-buildkitd
+  namespace: {{ $.Values.namespaces.builds }}
+  labels:
+    {{- include "exradius.labels" $ | nindent 4 }}
+data:
+  buildkitd.toml: |
+    {{- range . }}
+    [registry.{{ . | quote }}]
+      http = true
+      insecure = true
+    {{- end }}
+{{- end }}

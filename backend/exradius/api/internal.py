@@ -4,7 +4,8 @@ Task Runs use ``/internal/runs/{run_id}/*`` with the run token, which the worker
 when it creates the Run, keeps hashed on the run and revokes at finalize: a cancelled
 runner can still send its delivery check until then. Verify Runs use
 ``/internal/verifications/{id}/*`` and probe Runs ``/internal/probes/{id}/*``, each with its
-own token.
+own token. Build pods fetch their context from ``/internal/builds/{id}/context`` with
+their Build's token (docs/kubernetes.md §12).
 
 The runner never changes a run's state. What it reports is stored; ``/reported`` also
 nudges the worker with a ``run_reported`` control message, and the worker's sweep picks up
@@ -25,7 +26,17 @@ from sqlalchemy.exc import IntegrityError
 from exradius.api.deps import DB, State
 from exradius.crypto import hash_token
 from exradius.environment import config_environment_text
-from exradius.models import Artifact, Attachment, InfoRequest, Project, ProjectVerification, ProviderTest, Run, TranscriptChunk
+from exradius.models import (
+    Artifact,
+    Attachment,
+    ImageBuild,
+    InfoRequest,
+    Project,
+    ProjectVerification,
+    ProviderTest,
+    Run,
+    TranscriptChunk,
+)
 from exradius.project_state import cached, store_values
 from exradius.resolve import MissingSecret, agent_connection_specs, connection_spec
 from exradius.schemas import internal as i
@@ -37,6 +48,7 @@ from exradius.storage import ObjectNotFound
 router = APIRouter(prefix="/internal/runs/{run_id}")
 verifications = APIRouter(prefix="/internal/verifications/{verification_id}")
 probes = APIRouter(prefix="/internal/probes/{test_id}")
+builds = APIRouter(prefix="/internal/builds/{build_id}")
 
 ATTACHMENTS_DIR = ".exradius/attachments"
 MAX_WAIT = 60
@@ -317,3 +329,34 @@ ProbeDep = Annotated[ProviderTest, Depends(authenticated_probe)]
 async def probe_result(body: i.ProbeReport, test: ProbeDep, session: DB):
     test.report = body.model_dump()
     await session.commit()
+
+
+# -- build pods (docs/kubernetes.md §12) --------------------------------------------------------
+
+
+async def authenticated_build(
+    build_id: uuid.UUID, session: DB, authorization: Annotated[str | None, Header()] = None
+) -> ImageBuild:
+    token = _bearer(authorization)
+    build = await session.get(ImageBuild, build_id)
+    if build is None or build.token_hash is None or build.token_hash != hash_token(token):
+        raise HTTPException(401, "invalid token")
+    if build.state != "running":
+        raise HTTPException(401, "the build has ended")
+    return build
+
+
+BuildDep = Annotated[ImageBuild, Depends(authenticated_build)]
+
+
+@builds.get("/context")
+async def build_context(build: BuildDep, state: State):
+    """The context tar the worker stored when it created the Build: the ``git archive`` of
+    the context directory at the commit, with an outside Dockerfile added."""
+    if not build.context_key:
+        raise HTTPException(404, "the build has no context")
+    try:
+        data = await state.store.get(build.context_key)
+    except ObjectNotFound:
+        raise HTTPException(404, "the context is not in the object store") from None
+    return Response(content=data, media_type="application/x-tar")

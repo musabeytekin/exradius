@@ -39,6 +39,7 @@ from exradius.schemas.project_config import ProjectConfig
 from exradius.states import State, can_transition, is_terminal
 from exradius.storage import ObjectStore
 from exradius.worker import git_identity, run_objects
+from exradius.worker.builds import BuildAbandoned, BuildFailed, ImageBuilder, Images, build_jobs
 from exradius.worker.kube import Cluster
 from exradius.worker.lifecycle import PendingEvent, run_event, transition
 from exradius.worker.run_objects import RunObjects, RunView, run_name, tail
@@ -49,6 +50,8 @@ Emit = Callable[[list[PendingEvent]], Awaitable[None]]
 
 WAITING_FOR_CAPACITY = "capacity"
 """``runs.waiting_for`` while the run's pod cannot be scheduled (it stays preparing)."""
+WAITING_FOR_BUILD = "build"
+"""``runs.waiting_for`` while the run waits for its images to be built (it stays preparing)."""
 CANCEL_GRACE = 90.0
 """Seconds a cancelled run waits for its pod to go before it is finalised anyway."""
 ABANDONED_AFTER = 1800.0
@@ -122,6 +125,7 @@ class RunManager:
         self.cluster = cluster
         self.emit = emit
         self.box = SecretBox(settings.secret_key)
+        self.builder = ImageBuilder(settings, sessions, store, cluster)
         self.check_directory: Callable[[], Awaitable[None]] = _nothing
         """Run after this worker stored a config snapshot (docs/integration-api.md §3); the
         worker sets it once it can publish."""
@@ -238,10 +242,40 @@ class RunManager:
     def workstation_image(self, config: ProjectConfig) -> str:
         return config.workstation.image or self.settings.project_default_image
 
+    async def _images(self, run_id: uuid.UUID, project: Project, commit: str, config: ProjectConfig) -> Images:
+        """The run's images, waiting in preparing while a Build makes them (§8.1). A
+        cancel stops the wait; the Build goes on for whoever else needs the image."""
+        if not build_jobs(config):
+            return Images(workstation=self.workstation_image(config))
+
+        async def wanted() -> bool:
+            async with self.sessions() as session:
+                row = await session.get(Run, run_id, populate_existing=True)
+                return row is not None and row.ended_at is None and row.state == State.PREPARING
+
+        await self._set_waiting_for(run_id, WAITING_FOR_BUILD)
+        try:
+            return await self.builder.images(project.id, project.slug, commit, config, wanted=wanted)
+        except BuildFailed as exc:
+            raise PreparationError(str(exc)) from exc
+        except BuildAbandoned as exc:
+            raise RunCancelled("cancelled while waiting for its image build") from exc
+        finally:
+            await self._set_waiting_for(run_id, None, only=WAITING_FOR_BUILD)
+
+    async def _set_waiting_for(self, run_id: uuid.UUID, value: str | None, *, only: str | None = None) -> None:
+        async with self.sessions() as session:
+            query = update(Run).where(Run.id == run_id, Run.state == State.PREPARING)
+            if only is not None:
+                query = query.where(Run.waiting_for == only)
+            await session.execute(query.values(waiting_for=value))
+            await session.commit()
+
     async def _launch(self, run: Run) -> None:
-        config, _ = await self.read_run_config(run)
+        config, commit = await self.read_run_config(run)
         task = run.task
         agent = config.agents[task.agent]
+        images = await self._images(run.id, task.project, commit, config)
         await self._store_url_attachments(run.id)
         token = new_run_token()
         name = run_name("task", run.id)
@@ -259,7 +293,7 @@ class RunManager:
                 run_id=run.id, namespace=self.namespace, task_id=task.id, project=task.project.slug,
                 config=config, secrets=secrets, runtime=agent.runtime,
                 runtime_image=self.settings.runtime_image(agent.runtime),
-                workstation_image=self.workstation_image(config), provider_env=provider_env,
+                workstation_image=images.workstation, provider_env=provider_env,
                 credential_variables=runtime_class(agent.runtime).credential_variables,
                 identity=git_identity.Identity(name=identity_name, email=email, agent=task.agent, task_id=task.id),
                 token=token,

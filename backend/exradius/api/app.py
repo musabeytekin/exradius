@@ -221,6 +221,7 @@ def create_app(
     app.include_router(internal.router)
     app.include_router(internal.verifications)
     app.include_router(internal.probes)
+    app.include_router(internal.builds)
     return app
 
 

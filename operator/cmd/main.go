@@ -1,5 +1,6 @@
-// exradius-operator turns Runs into pods (docs/kubernetes.md §5, §7). It holds nothing
-// secret: it references the per-run Secret by name and the kubelet resolves the keys.
+// exradius-operator turns Runs into pods and Builds into build pods (docs/kubernetes.md §5,
+// §7, §12). It holds nothing secret: it references the per-run and per-Build Secrets by
+// name and the kubelet resolves the keys.
 package main
 
 import (
@@ -30,6 +31,8 @@ func main() {
 		workspaceSize, storageClass, memoryRequest, cpuRequest string
 		runtimeClass, nodeSelector, tolerations, pullSecrets   string
 		leaderID, leaderNamespace, metricsAddr, probeAddr      string
+		buildsNamespace, builderImage, buildServiceAccount     string
+		buildkitdConfig, buildResources                        string
 		runUID, runGID                                         int64
 		userNamespaces, leaderElect                            bool
 		workers                                                int
@@ -49,7 +52,12 @@ func main() {
 	flag.StringVar(&nodeSelector, "node-selector", "{}", "node selector of run pods, as JSON")
 	flag.StringVar(&tolerations, "tolerations", "[]", "tolerations of run pods, as JSON")
 	flag.StringVar(&pullSecrets, "image-pull-secrets", "", "comma-separated imagePullSecrets of run pods")
-	flag.IntVar(&workers, "workers", 4, "Runs reconciled at once")
+	flag.IntVar(&workers, "workers", 4, "Runs reconciled at once (and Builds)")
+	flag.StringVar(&buildsNamespace, "builds-namespace", "exradius-builds", "namespace of Builds, build pods and their Secrets")
+	flag.StringVar(&builderImage, "builder-image", "", "the rootless BuildKit image of build pods")
+	flag.StringVar(&buildServiceAccount, "build-service-account", "exradius-build", "ServiceAccount of build pods (its token is never mounted)")
+	flag.StringVar(&buildkitdConfig, "buildkitd-configmap", "", "ConfigMap with buildkitd.toml for build pods; empty: none")
+	flag.StringVar(&buildResources, "build-resources", "{}", "resources of the build container, as JSON")
 	flag.BoolVar(&leaderElect, "leader-elect", true, "hold a Lease so only one replica reconciles")
 	flag.StringVar(&leaderID, "leader-election-id", "exradius-operator", "name of the leader election Lease")
 	flag.StringVar(&leaderNamespace, "leader-election-namespace", "exradius", "namespace of the leader election Lease")
@@ -94,6 +102,17 @@ func main() {
 		}
 	}
 
+	if builderImage == "" {
+		fail(logger, fmt.Errorf("--builder-image is required"))
+	}
+	builds := podspec.BuildConfig{
+		APIURL: apiURL, Image: builderImage, ServiceAccount: buildServiceAccount,
+		BuildkitdConfigMap: buildkitdConfig, NodeSelector: config.NodeSelector, Tolerations: config.Tolerations,
+	}
+	if err = json.Unmarshal([]byte(orDefault(buildResources, "{}")), &builds.Resources); err != nil {
+		fail(logger, fmt.Errorf("--build-resources: %w", err))
+	}
+
 	scheme := runtime.NewScheme()
 	utilRuntime(clientgoscheme.AddToScheme(scheme))
 	utilRuntime(v1.AddToScheme(scheme))
@@ -108,8 +127,9 @@ func main() {
 		LeaderElectionNamespace: leaderNamespace,
 		// Release the Lease on a clean exit, so a new replica takes over at once.
 		LeaderElectionReleaseOnCancel: true,
-		// Runs, pods and PVCs live in the runs namespace only; nothing else is watched.
-		Cache: cache.Options{DefaultNamespaces: map[string]cache.Config{runsNamespace: {}}},
+		// Runs, pods and PVCs live in the runs namespace, Builds and their pods in the
+		// builds namespace; nothing else is watched.
+		Cache: cache.Options{DefaultNamespaces: map[string]cache.Config{runsNamespace: {}, buildsNamespace: {}}},
 	})
 	if err != nil {
 		fail(logger, err)
@@ -129,10 +149,20 @@ func main() {
 	if err = reconciler.SetupWithManager(mgr, workers); err != nil {
 		fail(logger, err)
 	}
+	buildReconciler := &controller.BuildReconciler{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Builder:   builds,
+		Logs:      controller.ClientsetLogs{Clientset: clientset},
+		Recorder:  mgr.GetEventRecorder("exradius-operator"),
+	}
+	if err = buildReconciler.SetupWithManager(mgr, workers); err != nil {
+		fail(logger, err)
+	}
 	utilRuntime(mgr.AddHealthzCheck("healthz", healthz.Ping))
 	utilRuntime(mgr.AddReadyzCheck("readyz", healthz.Ping))
 
-	logger.Info("starting", "runsNamespace", runsNamespace, "apiURL", apiURL)
+	logger.Info("starting", "runsNamespace", runsNamespace, "buildsNamespace", buildsNamespace, "apiURL", apiURL)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		fail(logger, err)
 	}

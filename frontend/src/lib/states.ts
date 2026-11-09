@@ -14,3 +14,13 @@ export const STATE_TONE: Record<string, Tone> = {
   passed: "ok",
   skipped: "neutral",
 };
+
+/** What a run in `preparing` waits for (`runs.waiting_for`), as the task row says it. */
+export const WAITING_FOR: Record<string, string> = {
+  capacity: "waiting for cluster capacity",
+  build: "building images",
+};
+
+export function waitingLabel(state: string | undefined, waitingFor: string | null | undefined): string | null {
+  return state === "preparing" && waitingFor ? WAITING_FOR[waitingFor] ?? null : null;
+}

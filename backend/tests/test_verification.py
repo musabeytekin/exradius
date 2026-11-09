@@ -102,6 +102,62 @@ async def test_verification_passes(verifier, sessions, cluster, project, setting
     assert cluster.deleted == [name]  # deleting the Run removes everything Verify made
 
 
+BUILT_CONFIG = BASE_CONFIG + """\
+workstation:
+  dockerfile: docker/Dockerfile
+  setup: [make check]
+"""
+
+
+async def test_verify_builds_the_workstation_then_says_it_is_up_to_date(verifier, sessions, cluster, configured,
+                                                                         settings):
+    settings.builds_registry = "kind-registry:5000"
+    commit_config(configured["remote"], {"exradius.yaml": BUILT_CONFIG, "docker/Dockerfile": "FROM ubuntu:24.04\n"})
+    cluster.build_log = "#5 [2/2] RUN apt-get install -y make\n#5 DONE 3.1s"
+    cluster.tool_reports = {"docs": {"ok": True, "tools": TOOLS, "error": None, "log": ""}}
+    vid = await new_verification(sessions, configured["project"].id)
+    await verify(verifier, vid)
+    verification = await get(sessions, vid)
+    assert verification.state == "passed"
+    assert names_and_states(verification) == [
+        ("Read config", "passed"), ("Build workstation", "passed"),
+        ("Prepare workspace", "passed"), ("Setup: make check", "passed"), ("List tools docs", "passed"),
+    ]
+    log = verification.steps[1]["log"]
+    assert log.startswith("#5 [2/2] RUN apt-get install -y make")  # the build's log
+    image = next(o for o in cluster.created if o["kind"] == "Build")["spec"]["image"]
+    assert log.splitlines()[-1].startswith(f"built {image} in 12s (sha256:")
+    verify_run = next(o for o in cluster.created if o["kind"] == "Run")
+    assert verify_run["spec"]["workstation"]["image"] == image
+    assert len(cluster.build_pods) == 1
+
+    # A second Verify at the same commit: no build pod.
+    vid = await new_verification(sessions, configured["project"].id)
+    await verify(verifier, vid)
+    verification = await get(sessions, vid)
+    assert verification.state == "passed"
+    assert verification.steps[1]["log"] == f"{image} is up to date (context unchanged)"
+    assert len(cluster.build_pods) == 1 and len([o for o in cluster.created if o["kind"] == "Build"]) == 1
+
+
+async def test_a_failed_build_fails_its_step_and_skips_the_rest(verifier, sessions, cluster, configured):
+    commit_config(configured["remote"], {"exradius.yaml": BUILT_CONFIG, "docker/Dockerfile": "FROM ubuntu:24.04\n"})
+    cluster.build_failure = {"log": "#5 [2/2] RUN corepack enable\n#5 0.1 /bin/sh: 1: corepack: not found\n"
+                                    "#5 ERROR: process \"/bin/sh -c corepack enable\" did not complete successfully: exit code: 127"}
+    vid = await new_verification(sessions, configured["project"].id)
+    await verify(verifier, vid)
+    verification = await get(sessions, vid)
+    assert verification.state == "failed"
+    assert verification.error == "Build workstation: the build exited with 1"
+    assert names_and_states(verification) == [
+        ("Read config", "passed"), ("Build workstation", "failed"),
+        ("Prepare workspace", "skipped"), ("Setup: make check", "skipped"), ("List tools docs", "skipped"),
+    ]
+    assert "corepack: not found" in verification.steps[1]["log"]
+    assert verification.diagnosis.startswith("The workstation image failed to build at `RUN corepack enable`")
+    assert not [o for o in cluster.created if o["kind"] == "Run"]  # no verify Run
+
+
 async def test_failing_setup_skips_the_rest_and_the_run_is_deleted(verifier, sessions, cluster, project):
     cluster.verify_failure = {"container": "setup-0", "exitCode": 2, "log": "setup output\nboom"}
     vid = await new_verification(sessions, project.id)
@@ -210,8 +266,8 @@ async def test_read_config_fails_with_errors_and_missing_keys(verifier, sessions
 
 
 @pytest.mark.parametrize("extra, reason", [
-    ("workstation:\n  dockerfile: ws/Dockerfile\n", "workstation.dockerfile needs image builds, not available yet"),
     ("services:\n  db: {image: 'postgres:16'}\n", "services.db: services are not available yet"),
+    ("services:\n  db: {dockerfile: ws/Dockerfile}\n", "services.db: services are not available yet"),
 ])
 async def test_what_this_version_cannot_run_stops_at_read_config(verifier, sessions, cluster, configured, extra, reason):
     commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + extra, "ws/Dockerfile": "FROM ubuntu\n"})

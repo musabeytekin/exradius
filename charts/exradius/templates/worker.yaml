@@ -46,6 +46,12 @@ spec:
               value: {{ .Values.namespaces.runs | quote }}
             - name: EXRADIUS_OPERATOR_LEASE
               value: exradius-operator
+            - name: EXRADIUS_BUILDS_NAMESPACE
+              value: {{ .Values.namespaces.builds | quote }}
+            - name: EXRADIUS_BUILDS_REGISTRY
+              value: {{ .Values.builds.registry | default .Values.images.registry | quote }}
+            - name: EXRADIUS_BUILDS_CACHE
+              value: {{ .Values.builds.cache | quote }}
             - name: EXRADIUS_WORKER_CONCURRENCY
               value: {{ .Values.worker.concurrency | quote }}
             - name: EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE

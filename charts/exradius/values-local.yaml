@@ -43,3 +43,11 @@ worker:
 runs:
   defaults: {memoryRequest: 512Mi, cpuRequest: 250m}
   workspace: {size: 10Gi}
+
+builds:
+  # The kind registry (deploy/kind/dev-up.sh), over HTTP; the node's containerd pulls from it
+  # through its hosts.toml.
+  registry: kind-registry:5000
+  insecureRegistries: [kind-registry:5000]
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}

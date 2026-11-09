@@ -1,7 +1,9 @@
-{{- /* ServiceAccounts and RBAC (docs/kubernetes.md §3). The worker asks for Runs and writes
-their Secrets but cannot create pods or read Secrets; the operator creates pods and PVCs in
-the runs namespace and has no Secret rights; the api and the frontend have no rights. */ -}}
+{{- /* ServiceAccounts and RBAC (docs/kubernetes.md §3). The worker asks for Runs and Builds
+and writes their Secrets but cannot create pods or read Secrets; the operator creates pods
+and PVCs in the runs namespace and pods in the builds namespace and has no Secret rights;
+the api and the frontend have no rights. */ -}}
 {{- $runs := .Values.namespaces.runs -}}
+{{- $builds := .Values.namespaces.builds -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -42,6 +44,16 @@ metadata:
     {{- include "exradius.componentLabels" (list . "run") | nindent 4 }}
 automountServiceAccountToken: false
 ---
+# Build pods: no Kubernetes identity either.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exradius-build
+  namespace: {{ $builds }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "build") | nindent 4 }}
+automountServiceAccountToken: false
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -66,6 +78,38 @@ kind: RoleBinding
 metadata:
   name: exradius-worker
   namespace: {{ $runs }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "worker") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: exradius-worker
+subjects:
+  - kind: ServiceAccount
+    name: exradius-worker
+    namespace: {{ .Release.Namespace }}
+---
+# Builds and their token Secrets (never read).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: exradius-worker
+  namespace: {{ $builds }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "worker") | nindent 4 }}
+rules:
+  - apiGroups: [exradius.dev]
+    resources: [builds]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [create, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: exradius-worker
+  namespace: {{ $builds }}
   labels:
     {{- include "exradius.componentLabels" (list . "worker") | nindent 4 }}
 roleRef:
@@ -141,6 +185,49 @@ kind: RoleBinding
 metadata:
   name: exradius-operator
   namespace: {{ $runs }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "operator") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: exradius-operator
+subjects:
+  - kind: ServiceAccount
+    name: exradius-operator
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: exradius-operator
+  namespace: {{ $builds }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "operator") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [exradius.dev]
+    resources: [builds]
+    verbs: [get, list, watch]
+  - apiGroups: [exradius.dev]
+    resources: [builds/status]
+    verbs: [get, update, patch]
+  - apiGroups: [exradius.dev]
+    resources: [builds/finalizers]
+    verbs: [update]
+  - apiGroups: ["", events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: exradius-operator
+  namespace: {{ $builds }}
   labels:
     {{- include "exradius.componentLabels" (list . "operator") | nindent 4 }}
 roleRef:

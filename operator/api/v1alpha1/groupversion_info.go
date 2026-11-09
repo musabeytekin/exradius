@@ -1,4 +1,4 @@
-// Package v1alpha1 holds the exradius.dev/v1alpha1 API: the Run resource.
+// Package v1alpha1 holds the exradius.dev/v1alpha1 API: the Run and Build resources.
 //
 // +kubebuilder:object:generate=true
 // +groupName=exradius.dev
@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	// GroupVersion is the API group and version of the Run resource.
+	// GroupVersion is the API group and version of the Run and Build resources.
 	GroupVersion = schema.GroupVersion{Group: "exradius.dev", Version: "v1alpha1"}
 
 	// SchemeBuilder registers the types of this package.

@@ -12,6 +12,11 @@ itself with ``set_status``.
 Verify and probe Runs are simulated too when ``auto`` is on: a verify pod passes its steps
 (or fails at ``verify_failure``), writes ``tool_reports`` as the api stores the runner's
 reports, and succeeds; a probe pod writes ``probe_report`` (unless ``None``) and ends.
+
+Builds: creating a Build starts a simulated build pod (``auto``) that waits for the Build's
+Secret, as a real pod waits for its token, reads the context the worker stored (kept in
+``contexts``), runs for a moment with a log, and succeeds with a digest or fails as
+``build_failure`` says. ``build_pods`` lists every Build that got a pod.
 """
 
 from __future__ import annotations
@@ -19,13 +24,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import hashlib
+import io
+import tarfile
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from sqlalchemy import select
 
-from exradius.models import InfoRequest, ProjectVerification, ProviderTest, Run, TranscriptChunk
+from exradius.models import ImageBuild, InfoRequest, ProjectVerification, ProviderTest, Run, TranscriptChunk
 from exradius.states import State, is_terminal
 from exradius.worker.run_objects import parse_name
 
@@ -59,8 +67,17 @@ class FakeCluster:
         """``{"container", "exitCode", "log", "reason"?}``: the step a verify pod fails at."""
         self.probe_report: dict | None = {"ok": True, "detail": "claude-sonnet-5-5 replied 'OK'", "error": None}
         self.probe_exit = 0
+        self.builds: dict[str, dict[str, Any]] = {}
+        self.build_pods: list[str] = []
+        self.contexts: dict[str, dict[str, bytes]] = {}
+        """The files of each Build's context, as its pod fetched them."""
+        self.build_failure: dict | None = None
+        """``{"log", "message"?, "reason"?}``: how the next simulated build fails."""
+        self.build_log = "#5 [2/2] RUN make tools\n#5 DONE 0.4s"
+        self.build_seconds = 0.05
         self.manager = None
         self.sessions = None
+        self.store = None
         self.pods: list[asyncio.Task] = []
         self.envs: list[dict[str, str]] = []
         """The workstation environment of every simulated pod, in order."""
@@ -125,6 +142,34 @@ class FakeCluster:
 
     async def get_lease(self, namespace, name):
         return self.lease
+
+    async def create_build(self, body):
+        name = body["metadata"]["name"]
+        if name in self.builds:
+            return copy.deepcopy(self.builds[name]), False
+        obj = copy.deepcopy(body)
+        obj["metadata"]["uid"] = str(uuid.uuid4())
+        obj["status"] = {}
+        self.builds[name] = obj
+        self.created.append(copy.deepcopy(obj))
+        if self.auto:
+            self.pods.append(asyncio.create_task(self._build_pod(name, obj["metadata"]["uid"])))
+        return copy.deepcopy(obj), True
+
+    async def get_build(self, name):
+        obj = self.builds.get(name)
+        return copy.deepcopy(obj) if obj is not None else None
+
+    async def delete_build(self, name, uid=None):
+        obj = self.builds.get(name)
+        if obj is None or (uid and obj["metadata"]["uid"] != uid):
+            return False
+        self.deleted.append(name)
+        del self.builds[name]
+        self.secrets = {k: v for k, v in self.secrets.items()
+                        if not any(o.get("name") == name and o.get("kind") == "Build"
+                                   for o in v["metadata"].get("ownerReferences") or [])}
+        return True
 
     # -- the operator, by hand ----------------------------------------------------------------
 
@@ -284,6 +329,47 @@ class FakeCluster:
         if name in self.runs:
             self.set_status(name, phase="Succeeded", workstation={"state": "terminated", "exitCode": 0,
                                                                   "log": "verify log"})
+
+    def set_build_status(self, name: str, **status) -> None:
+        obj = self.builds[name]
+        obj["status"] = {**obj.get("status", {}), **status}
+
+    async def _build_pod(self, name: str, uid: str) -> None:
+        def current() -> bool:
+            return name in self.builds and self.builds[name]["metadata"]["uid"] == uid
+
+        for _ in range(500):  # the pod's token comes last (CreateContainerConfigError until then)
+            if not current():
+                return
+            if name in self.secrets:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            self.set_build_status(name, phase="Failed", reason="CreateContainerConfigError",
+                                  message="context could not be created: secret not found")
+            return
+        self.build_pods.append(name)
+        spec = self.builds[name]["spec"]
+        if self.sessions is not None and self.store is not None:
+            async with self.sessions() as session:
+                row = await session.get(ImageBuild, uuid.UUID(spec["id"]))
+                key = row.context_key
+            with tarfile.open(fileobj=io.BytesIO(await self.store.get(key))) as tar:
+                self.contexts[name] = {m.name: tar.extractfile(m).read() for m in tar.getmembers() if m.isfile()}
+        self.set_build_status(name, phase="Running", podName=name, startedAt="2026-11-09T00:00:00Z",
+                              log="#1 [internal] load build definition from " + spec["dockerfile"])
+        await asyncio.sleep(self.build_seconds)
+        if not current():
+            return
+        if self.build_failure is not None:
+            failure, self.build_failure = self.build_failure, None
+            self.set_build_status(name, phase="Failed", reason=failure.get("reason", "BuildFailed"),
+                                  message=failure.get("message", "the build exited with 1"),
+                                  finishedAt="2026-11-09T00:00:03Z", log=failure["log"])
+            return
+        digest = "sha256:" + hashlib.sha256(spec["image"].encode()).hexdigest()
+        self.set_build_status(name, phase="Succeeded", digest=digest, finishedAt="2026-11-09T00:00:12Z",
+                              log=self.build_log)
 
     async def _probe_pod(self, name: str) -> None:
         await asyncio.sleep(0)

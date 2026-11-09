@@ -127,11 +127,13 @@ class SecretStoreEntry(Base):
 
 
 class ImageBuild(Base):
-    """An image built from a Dockerfile in a config repository (§4)."""
+    """An image built from a Dockerfile in a config repository (config-repo.md §4): one per
+    ``Build`` object (docs/kubernetes.md §12), written by the worker from its status."""
 
     __tablename__ = "image_builds"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
+    """Also the Build's ``spec.id``: the path of its context on the internal API."""
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(63))
     """``workstation`` or the service's name."""
@@ -141,6 +143,14 @@ class ImageBuild(Base):
     started_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
     ended_at: Mapped[datetime | None] = mapped_column(Timestamp)
     log_tail: Mapped[str] = mapped_column(Text, default="")
+    build_object: Mapped[str | None] = mapped_column(String(253))
+    """The Build's name in the builds namespace."""
+    digest: Mapped[str | None] = mapped_column(String(100))
+    """The pushed image's manifest digest."""
+    context_key: Mapped[str | None] = mapped_column(String(255))
+    """The context tar in the object store, served to the build pod."""
+    token_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    """The build pod's token for its context; cleared when the build ends."""
 
 
 class Provider(Base):

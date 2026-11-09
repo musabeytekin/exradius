@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     """The operator's leader-election Lease in ``namespace``, read for the status page."""
     kube_api_url: str | None = None
     """The Kubernetes API; ``None`` is the in-cluster address (``KUBERNETES_SERVICE_HOST``)."""
+    builds_namespace: str = "exradius-builds"
+    """Where the worker creates Build objects and their token Secrets (docs/kubernetes.md §12)."""
+    builds_registry: str = ""
+    """Prefix of built images: ``kind-registry:5000``, ``<account>.dkr.ecr.<region>.amazonaws.com``.
+    The build pods push there and the nodes pull from there."""
+    builds_cache: bool = True
+    """Keep each image's layer cache in the registry at ``<image>:buildcache``."""
 
     @field_validator(
         "s3_endpoint_url", "s3_access_key", "s3_secret_key", "broker_username", "broker_password", "kube_api_url",

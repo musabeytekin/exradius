@@ -52,7 +52,8 @@ class Worker:
         # not persisted) until a slot is free, so the broker holds the backlog. A slot is
         # held while a run prepares, runs or resumes; a waiting run gives it back.
         self.slots = asyncio.Semaphore(settings.worker_concurrency)
-        self.cluster = cluster or KubeCluster(settings.runs_namespace, settings.kube_api_url)
+        self.cluster = cluster or KubeCluster(settings.runs_namespace, settings.kube_api_url,
+                                              builds_namespace=settings.builds_namespace)
         self.runs = RunManager(settings, self.sessions, self.store, self.cluster, self.emit)
         self.router = Router(settings.openai_base_url)
         self.verifier = ProjectVerifier(self.runs)

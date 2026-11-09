@@ -8,7 +8,7 @@ import { Markdown } from "@/components/Markdown";
 import { TranscriptViewer } from "@/components/transcript/TranscriptViewer";
 import { Tabs } from "@/components/ui/controls";
 import { CodeBlock, CopyButton, JsonTree, KeyValue, StateChip } from "@/components/ui/data";
-import { STATE_TONE } from "@/lib/states";
+import { STATE_TONE, waitingLabel } from "@/lib/states";
 import { Icon } from "@/components/ui/icons";
 import { Dialog, Tooltip } from "@/components/ui/overlays";
 import { Banner, Button, Card, CardHeader, Chip, Dot, EmptyState, Mono, PageHeader, Skeleton, Spinner, Textarea } from "@/components/ui/primitives";
@@ -96,7 +96,7 @@ function Header({ taskId, task, state, feedStatus }: { taskId: string; task?: Ta
       meta={
         <>
           {state && <StateChip state={state} />}
-          {task?.waiting_for === "capacity" && state === task.state && <span className="text-xs text-muted">waiting for cluster capacity</span>}
+          {task && state === task.state && waitingLabel(state, task.waiting_for) && <span className="text-xs text-muted">{waitingLabel(state, task.waiting_for)}</span>}
           {task && (
             <>
               {project ? (
@@ -183,7 +183,7 @@ function Body({ task, state, live, feed, result }: { task: TaskDetail; state: Ta
               loading={feed.loading}
               infoRequests={task.info_requests}
               downloadUrl={task.run_id ? api.runTranscriptUrl(task.run_id) : null}
-              emptyHint={state === "queued" ? "Queued: waiting for a free worker slot." : state === "preparing" ? (task.waiting_for === "capacity" ? "Preparing: waiting for cluster capacity." : "Preparing: reading the config, cloning and running setup.") : undefined}
+              emptyHint={state === "queued" ? "Queued: waiting for a free worker slot." : state === "preparing" ? (waitingLabel(state, task.waiting_for) ? `Preparing: ${waitingLabel(state, task.waiting_for)}.` : "Preparing: reading the config, building images, cloning and running setup.") : undefined}
             />
           </Tabs.Content>
           <Tabs.Content value="input" className="pt-4"><TaskInput task={task} /></Tabs.Content>

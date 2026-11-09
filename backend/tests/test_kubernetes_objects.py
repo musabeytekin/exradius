@@ -257,6 +257,31 @@ async def test_client_secrets_and_lease(api):
     assert await cluster.get_lease("exradius", "other") is None
 
 
+async def test_client_builds_and_their_secrets(api):
+    cluster, requests, responses = api
+    builds = "/apis/exradius.dev/v1alpha1/namespaces/exradius-builds/builds"
+    obj = {"metadata": {"name": "build-p-workstation-1a2b", "namespace": "exradius-builds", "uid": "b1"}, "spec": {}}
+    responses[("POST", builds)] = httpx.Response(201, json=obj)
+    assert await cluster.create_build({"metadata": {"name": "build-p-workstation-1a2b"}}) == (obj, True)
+    responses[("POST", builds)] = httpx.Response(409, json={"message": "already exists"})
+    responses[("GET", f"{builds}/build-p-workstation-1a2b")] = httpx.Response(200, json=obj)
+    assert await cluster.create_build({"metadata": {"name": "build-p-workstation-1a2b"}}) == (obj, False)  # joined
+    assert await cluster.get_build("build-p-workstation-1a2b") == obj
+    assert await cluster.get_build("gone") is None
+
+    responses[("DELETE", f"{builds}/build-p-workstation-1a2b")] = httpx.Response(200, json={})
+    assert await cluster.delete_build("build-p-workstation-1a2b", uid="b1") is True
+    assert json.loads(requests[-1].content) == {"propagationPolicy": "Background", "preconditions": {"uid": "b1"}}
+    responses[("DELETE", f"{builds}/build-p-workstation-1a2b")] = httpx.Response(409, json={"message": "precondition"})
+    assert await cluster.delete_build("build-p-workstation-1a2b", uid="old") is False  # replaced meanwhile
+    assert await cluster.delete_build("gone") is False
+
+    secrets = "/api/v1/namespaces/exradius-builds/secrets"
+    responses[("POST", secrets)] = httpx.Response(201, json={})
+    await cluster.create_secret({"metadata": {"name": "build-p-workstation-1a2b", "namespace": "exradius-builds"}})
+    assert requests[-1].url.path == secrets  # in the namespace the Secret names
+
+
 async def test_client_watch(api):
     cluster, requests, responses = api
     lines = [

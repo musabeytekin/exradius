@@ -21,8 +21,9 @@ metadata:
   name: {{ .Values.namespaces.builds }}
   labels:
     {{- include "exradius.labels" . | nindent 4 }}
-    # Rootless BuildKit needs seccomp and AppArmor unconfined (phase 2; phase 5 checks
-    # whether user namespaces let it drop to baseline).
+    # Rootless BuildKit needs seccomp and AppArmor unconfined: rootlesskit creates a user
+    # namespace, which seccomp RuntimeDefault refuses, with or without hostUsers: false
+    # (checked on kind, docs/kubernetes.md §24). Phase 5 may try a Localhost profile.
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/enforce-version: latest
 {{- end }}

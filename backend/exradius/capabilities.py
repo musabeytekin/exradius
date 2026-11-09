@@ -1,9 +1,10 @@
-"""What this version of Exradius can run (docs/kubernetes-plan.md, phase 1).
+"""What this version of Exradius can run (docs/kubernetes-plan.md, phases 1 and 2).
 
-Phase 1 runs image-based projects without services. A config that needs image builds or
-services is valid but not runnable yet: the reason is the project's health reason, so tasks
-are rejected with it and Verify stops at "Read config". ``workstation.cache`` is accepted and
-ignored with a warning until the project volume exists.
+Phase 2 builds workstation Dockerfiles (Build objects, docs/kubernetes.md §12). Services
+come in phase 3: a config with services is valid but not runnable yet, and the reason is the
+project's health reason, so tasks are rejected with it and Verify stops at "Read config".
+``workstation.cache`` is accepted and ignored with a warning until the project volume
+exists.
 """
 
 from __future__ import annotations
@@ -15,12 +16,7 @@ def unsupported(config: ProjectConfig | None) -> list[str]:
     """Why ``config`` cannot run on this version, in file order; empty when it can."""
     if config is None:
         return []
-    reasons = []
-    if config.workstation.dockerfile:
-        reasons.append("workstation.dockerfile needs image builds, not available yet")
-    for name in config.services:
-        reasons.append(f"services.{name}: services are not available yet")
-    return reasons
+    return [f"services.{name}: services are not available yet" for name in config.services]
 
 
 def warnings(config: ProjectConfig | None) -> list[str]:

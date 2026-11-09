@@ -1,0 +1,133 @@
+---
+metadata:
+  labels:
+    exradius.dev/image: workstation
+    exradius.dev/project: saleor
+    exradius.dev/purpose: build
+  name: build-saleor-workstation-1a2b3c4d5e6f
+  namespace: exradius-builds
+  ownerReferences:
+  - apiVersion: exradius.dev/v1alpha1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Build
+    name: build-saleor-workstation-1a2b3c4d5e6f
+    uid: uid-b1
+spec:
+  automountServiceAccountToken: false
+  containers:
+  - command:
+    - sh
+    - -c
+    - buildctl-daemonless.sh "$@" && cat /tmp/metadata.json > /dev/termination-log
+    - buildctl
+    - build
+    - --progress
+    - plain
+    - --frontend
+    - dockerfile.v0
+    - --local
+    - context=/workspace/context
+    - --local
+    - dockerfile=/workspace/context
+    - --opt
+    - filename=docker/Dockerfile
+    - --output
+    - type=image,name=kind-registry:5000/exradius/saleor/workstation:1a2b3c4d5e6f,push=true
+    - --export-cache
+    - type=registry,ref=kind-registry:5000/exradius/saleor/workstation:buildcache,mode=max
+    - --import-cache
+    - type=registry,ref=kind-registry:5000/exradius/saleor/workstation:buildcache
+    - --metadata-file
+    - /tmp/metadata.json
+    env:
+    - name: BUILDKITD_FLAGS
+      value: --oci-worker-no-process-sandbox --config /etc/buildkit/buildkitd.toml
+    - name: TMPDIR
+      value: /tmp
+    - name: DOCKER_CONFIG
+      value: /tmp/docker
+    image: moby/buildkit:v0.34.1-rootless
+    imagePullPolicy: IfNotPresent
+    name: build
+    resources:
+      requests:
+        memory: 1Gi
+    securityContext:
+      appArmorProfile:
+        type: Unconfined
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      seccompProfile:
+        type: Unconfined
+    volumeMounts:
+    - mountPath: /workspace
+      name: workspace
+      readOnly: true
+    - mountPath: /home/user/.local/share/buildkit
+      name: buildkit
+    - mountPath: /run/user/1000
+      name: run
+    - mountPath: /tmp
+      name: tmp
+    - mountPath: /etc/buildkit
+      name: buildkitd-config
+      readOnly: true
+  enableServiceLinks: false
+  initContainers:
+  - command:
+    - sh
+    - -c
+    - |-
+      set -eo pipefail
+      mkdir -p /workspace/context
+      wget -q -O - --header "Authorization: Bearer $EXRADIUS_BUILD_TOKEN" \
+        "$EXRADIUS_API_URL/internal/builds/$EXRADIUS_BUILD_ID/context" | tar -x -f - -C /workspace/context
+      echo "fetched the build context: $(find /workspace/context -type f | wc -l) files"
+    env:
+    - name: EXRADIUS_API_URL
+      value: http://exradius-api-internal.exradius:8001
+    - name: EXRADIUS_BUILD_ID
+      value: b1
+    - name: EXRADIUS_BUILD_TOKEN
+      valueFrom:
+        secretKeyRef:
+          key: token
+          name: build-saleor-workstation-1a2b3c4d5e6f
+    image: moby/buildkit:v0.34.1-rootless
+    imagePullPolicy: IfNotPresent
+    name: context
+    resources: {}
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+    volumeMounts:
+    - mountPath: /workspace
+      name: workspace
+  restartPolicy: Never
+  securityContext:
+    runAsGroup: 1000
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  serviceAccountName: exradius-build
+  terminationGracePeriodSeconds: 30
+  volumes:
+  - emptyDir: {}
+    name: workspace
+  - emptyDir: {}
+    name: buildkit
+  - emptyDir: {}
+    name: run
+  - emptyDir: {}
+    name: tmp
+  - configMap:
+      defaultMode: 292
+      name: exradius-buildkitd
+    name: buildkitd-config
+status: {}

@@ -119,7 +119,7 @@ def test_what_this_version_cannot_run():
     config = parse_config(DECLARED).config
     assert capabilities.unsupported(config) == ["services.minio: services are not available yet"]
     built = parse_config(MINIMAL + "workstation: {dockerfile: Dockerfile}\n", lookup=lambda path: "tree" if path in ("", ".") else "blob").config
-    assert capabilities.unsupported(built) == ["workstation.dockerfile needs image builds, not available yet"]
+    assert capabilities.unsupported(built) == []  # phase 2 builds workstations
     assert capabilities.unsupported(parse_config(MINIMAL).config) == [] and capabilities.unsupported(None) == []
 
 

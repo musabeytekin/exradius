@@ -170,75 +170,8 @@ func Observe(run *v1.Run, pod *corev1.Pod, now time.Time) Observation {
 		st.Workstation = ws
 	}
 
-	// Scheduling.
-	scheduled := true
-	for _, c := range pod.Status.Conditions {
-		if c.Type != corev1.PodScheduled {
-			continue
-		}
-		reason := c.Reason
-		if reason == "" {
-			reason = "Scheduled"
-		}
-		before := meta.FindStatusCondition(prev.Conditions, ConditionScheduled)
-		meta.SetStatusCondition(&st.Conditions, metav1.Condition{
-			Type: ConditionScheduled, Status: metav1.ConditionStatus(c.Status), Reason: reason,
-			Message: c.Message, ObservedGeneration: run.Generation,
-		})
-		if c.Status != corev1.ConditionTrue {
-			scheduled = false
-			if before == nil || before.Status == metav1.ConditionTrue || before.Message != c.Message {
-				obs.Events = append(obs.Events, Event{corev1.EventTypeWarning, v1.ReasonUnschedulable, c.Message})
-			}
-		}
-	}
-	if pod.Spec.NodeName == "" && pod.Status.Phase == corev1.PodPending {
-		scheduled = false
-	}
-
-	// Waiting containers: image pulls and config errors.
-	var failReason, failMessage string
-	configError := false
-	all := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
-	for _, cs := range all {
-		w := cs.State.Waiting
-		if w == nil {
-			markPull(&st, cs.Name, "")
-			continue
-		}
-		switch w.Reason {
-		case "ErrImagePull", "ImagePullBackOff":
-			pf := markPull(&st, cs.Name, w.Reason)
-			pf.Image, pf.Message = cs.Image, w.Message
-			if pf.Attempts >= PullAttempts && failReason == "" {
-				failReason = v1.ReasonImagePullFailed
-				failMessage = fmt.Sprintf("the image %s of %s cannot be pulled after %d attempts: %s",
-					cs.Image, cs.Name, pf.Attempts, w.Message)
-			}
-		case "InvalidImageName", "ErrImageNeverPull":
-			if failReason == "" {
-				failReason = v1.ReasonImagePullFailed
-				failMessage = fmt.Sprintf("the image %s of %s cannot be pulled: %s", cs.Image, cs.Name, w.Message)
-			}
-		case "CreateContainerConfigError", "CreateContainerError":
-			configError = true
-			if st.ConfigErrorSince == nil {
-				st.ConfigErrorSince = &metav1.Time{Time: now}
-			}
-			waited := now.Sub(st.ConfigErrorSince.Time)
-			if waited >= ConfigErrorGrace && failReason == "" {
-				failReason = v1.ReasonConfigError
-				failMessage = fmt.Sprintf("%s could not be created for %s: %s", cs.Name, waited.Round(time.Second), w.Message)
-			} else if waited < ConfigErrorGrace {
-				obs.RequeueAfter = ConfigErrorGrace - waited
-			}
-		default:
-			markPull(&st, cs.Name, w.Reason)
-		}
-	}
-	if !configError {
-		st.ConfigErrorSince = nil
-	}
+	scheduled := observeScheduling(pod, prev.Conditions, &st.Conditions, run.Generation, &obs.Events)
+	failReason, failMessage := observeWaiting(pod, &st.PullFailures, &st.ConfigErrorSince, now, &obs.RequeueAfter)
 
 	// The phase.
 	st.Reason, st.Message = "", ""
@@ -265,13 +198,92 @@ func Observe(run *v1.Run, pod *corev1.Pod, now time.Time) Observation {
 	return obs
 }
 
+// observeScheduling mirrors the pod's PodScheduled condition into conditions and reports
+// whether the pod is on a node; a new or changed refusal is an Unschedulable event.
+func observeScheduling(pod *corev1.Pod, prev []metav1.Condition, conditions *[]metav1.Condition, generation int64, events *[]Event) bool {
+	scheduled := true
+	for _, c := range pod.Status.Conditions {
+		if c.Type != corev1.PodScheduled {
+			continue
+		}
+		reason := c.Reason
+		if reason == "" {
+			reason = "Scheduled"
+		}
+		before := meta.FindStatusCondition(prev, ConditionScheduled)
+		meta.SetStatusCondition(conditions, metav1.Condition{
+			Type: ConditionScheduled, Status: metav1.ConditionStatus(c.Status), Reason: reason,
+			Message: c.Message, ObservedGeneration: generation,
+		})
+		if c.Status != corev1.ConditionTrue {
+			scheduled = false
+			if before == nil || before.Status == metav1.ConditionTrue || before.Message != c.Message {
+				*events = append(*events, Event{corev1.EventTypeWarning, v1.ReasonUnschedulable, c.Message})
+			}
+		}
+	}
+	if pod.Spec.NodeName == "" && pod.Status.Phase == corev1.PodPending {
+		scheduled = false
+	}
+	return scheduled
+}
+
+// observeWaiting looks at waiting containers: image pulls (counted in failures) and config
+// errors (timed from configErrorSince). It returns the failure the operator decides
+// itself, if any, and asks for a requeue while a config error's grace period runs.
+func observeWaiting(pod *corev1.Pod, failures *[]v1.PullFailure, configErrorSince **metav1.Time, now time.Time,
+	requeue *time.Duration) (failReason, failMessage string) {
+	configError := false
+	all := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+	for _, cs := range all {
+		w := cs.State.Waiting
+		if w == nil {
+			markPull(failures, cs.Name, "")
+			continue
+		}
+		switch w.Reason {
+		case "ErrImagePull", "ImagePullBackOff":
+			pf := markPull(failures, cs.Name, w.Reason)
+			pf.Image, pf.Message = cs.Image, w.Message
+			if pf.Attempts >= PullAttempts && failReason == "" {
+				failReason = v1.ReasonImagePullFailed
+				failMessage = fmt.Sprintf("the image %s of %s cannot be pulled after %d attempts: %s",
+					cs.Image, cs.Name, pf.Attempts, w.Message)
+			}
+		case "InvalidImageName", "ErrImageNeverPull":
+			if failReason == "" {
+				failReason = v1.ReasonImagePullFailed
+				failMessage = fmt.Sprintf("the image %s of %s cannot be pulled: %s", cs.Image, cs.Name, w.Message)
+			}
+		case "CreateContainerConfigError", "CreateContainerError":
+			configError = true
+			if *configErrorSince == nil {
+				*configErrorSince = &metav1.Time{Time: now}
+			}
+			waited := now.Sub((*configErrorSince).Time)
+			if waited >= ConfigErrorGrace && failReason == "" {
+				failReason = v1.ReasonConfigError
+				failMessage = fmt.Sprintf("%s could not be created for %s: %s", cs.Name, waited.Round(time.Second), w.Message)
+			} else if waited < ConfigErrorGrace {
+				*requeue = ConfigErrorGrace - waited
+			}
+		default:
+			markPull(failures, cs.Name, w.Reason)
+		}
+	}
+	if !configError {
+		*configErrorSince = nil
+	}
+	return failReason, failMessage
+}
+
 // markPull counts an image pull attempt when a container's waiting reason moves to
 // ErrImagePull (or straight to ImagePullBackOff, when the error itself was not seen).
-func markPull(st *v1.RunStatus, container, reason string) *v1.PullFailure {
+func markPull(failures *[]v1.PullFailure, container, reason string) *v1.PullFailure {
 	var pf *v1.PullFailure
-	for i := range st.PullFailures {
-		if st.PullFailures[i].Container == container {
-			pf = &st.PullFailures[i]
+	for i := range *failures {
+		if (*failures)[i].Container == container {
+			pf = &(*failures)[i]
 		}
 	}
 	pulling := reason == "ErrImagePull" || reason == "ImagePullBackOff"
@@ -279,8 +291,8 @@ func markPull(st *v1.RunStatus, container, reason string) *v1.PullFailure {
 		if !pulling {
 			return nil
 		}
-		st.PullFailures = append(st.PullFailures, v1.PullFailure{Container: container})
-		pf = &st.PullFailures[len(st.PullFailures)-1]
+		*failures = append(*failures, v1.PullFailure{Container: container})
+		pf = &(*failures)[len(*failures)-1]
 	}
 	last := pf.LastReason
 	if reason == "ErrImagePull" && last != "ErrImagePull" {

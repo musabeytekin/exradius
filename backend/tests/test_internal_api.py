@@ -10,7 +10,7 @@ import uuid
 import pytest
 
 from exradius.crypto import hash_token
-from exradius.models import Attachment, InfoRequest, ProjectVerification, ProviderTest, Run, Task, utcnow
+from exradius.models import Attachment, ImageBuild, InfoRequest, ProjectVerification, ProviderTest, Run, Task, utcnow
 from tests.test_api import admin, client, control, make_run, setup_configuration, sync_db  # noqa: F401 - fixtures
 
 AUTH = {"Authorization": "Bearer tok"}
@@ -232,6 +232,36 @@ def test_probe_result(client, admin, sync_db):
     assert client.post(url, json=body, headers={"Authorization": "Bearer ptok"}).status_code == 204
     sync_db.expire_all()
     assert sync_db.get(ProviderTest, test.id).report == {"ok": True, "detail": "claude-x replied 'OK'", "error": None}
+
+
+# Build pods ---------------------------------------------------------------------------------------
+
+
+def test_build_context_with_the_builds_token(client, admin, sync_db, store, settings, tmp_path):
+    import asyncio
+
+    project = setup_configuration(admin, tmp_path)["project"]
+    build = ImageBuild(project_id=uuid.UUID(project["id"]), name="workstation", tree_hash="a" * 40,
+                       image="kind-registry:5000/exradius/billing-platform/workstation:aaaaaaaaaaaa", state="running",
+                       build_object="build-billing-platform-workstation-aaaaaaaaaaaa",
+                       context_key="builds/x/context.tar", token_hash=hash_token("btok"))
+    sync_db.add(build)
+    sync_db.commit()
+    asyncio.run(store.put("builds/x/context.tar", b"tar bytes", "application/x-tar"))
+    path = f"/internal/builds/{build.id}/context"
+    internal = f"http://testserver:{settings.internal_port}"
+
+    response = client.get(internal + path, headers={"Authorization": "Bearer btok"})
+    assert response.status_code == 200 and response.content == b"tar bytes"
+    assert response.headers["content-type"] == "application/x-tar"
+    assert client.get(internal + path, headers={"Authorization": "Bearer nope"}).status_code == 401
+    assert client.get(internal + path).status_code == 401
+    assert client.get(f"http://testserver:{settings.api_port}{path}", headers={"Authorization": "Bearer btok"}).status_code == 404
+
+    row = sync_db.get(ImageBuild, build.id)
+    row.state = "succeeded"
+    sync_db.commit()
+    assert client.get(internal + path, headers={"Authorization": "Bearer btok"}).status_code == 401  # ended
 
 
 # The two ports -----------------------------------------------------------------------------------

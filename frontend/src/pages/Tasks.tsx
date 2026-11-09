@@ -12,6 +12,7 @@ import { elideBase64, fileToAttachment } from "@/lib/files";
 import { absoluteTime, pretty, relativeTime } from "@/lib/format";
 import { agentSlugsOf, agentsOf, configOf, projectHealth, projectName } from "@/lib/projectConfig";
 import { qk, useProject, useProjects } from "@/lib/queries";
+import { waitingLabel } from "@/lib/states";
 import { toast } from "@/lib/toast";
 import { ALL_STATES, type ConfigAgent, type TaskMessage } from "@/lib/types";
 import type { TasksSearch } from "@/router";
@@ -88,7 +89,7 @@ export function TasksPage() {
                   <Table.Td>
                     <span className="flex items-center gap-2">
                       <StateChip state={t.state} />
-                      {t.waiting_for === "capacity" && t.state === "preparing" && <span className="text-xs text-muted">waiting for cluster capacity</span>}
+                      {waitingLabel(t.state, t.waiting_for) && <span className="text-xs text-muted">{waitingLabel(t.state, t.waiting_for)}</span>}
                     </span>
                   </Table.Td>
                   <Table.Td className="text-right">

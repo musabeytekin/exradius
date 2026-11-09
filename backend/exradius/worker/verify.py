@@ -2,7 +2,9 @@
 docs/kubernetes.md §13).
 
 "Read config" runs in the worker: commit, errors, warnings, missing keys, and whether this
-version can run the config. Then the worker creates a Run with ``purpose: verify``: the same
+version can run the config. "Build workstation" and "Build service <name>" wait on the
+image's Build object, with its log in the step, or say the image is up to date
+(docs/kubernetes.md §12). Then the worker creates a Run with ``purpose: verify``: the same
 pod as a task's, whose steps are the Run's steps ("Prepare workspace", "Clone <repo>
 (<branch>)", "Setup: <command>"), and whose runner lists the tools of every connection an
 agent uses ("List tools <name>", docs/agent-routing.md §3.1) with the services and setup of
@@ -28,6 +30,7 @@ from exradius.resolve import StoreValues
 from exradius.routing import definition_hash
 from exradius.schemas.project_config import ProjectConfig
 from exradius.worker import run_objects
+from exradius.worker.builds import WORKSTATION, BuildFailed, BuildJob, build_jobs
 from exradius.worker.diagnose import diagnose_steps
 from exradius.worker.run_objects import RunView, run_name
 from exradius.worker.runs import RunManager, exceeded_memory
@@ -213,24 +216,67 @@ class ProjectVerifier:
         await self._save(verification_id, steps, state="running", started_at=utcnow())
         error = await self._step(verification_id, steps, 0, read_config_step)
         if error is None:
-            error = await self._verify_run(verification_id, project_id, slug, read, steps)
+            config: ProjectConfig = read["config"]
+            jobs = build_jobs(config)
+            offset = len(steps)
+            steps += [_pending(job.step) for job in jobs]
+            steps += run_steps(config)
+            await self._save(verification_id, steps)
+            images: dict[str, str] = {}
+            for index, job in enumerate(jobs, start=offset):
+                error = await self._step(verification_id, steps, index,
+                                         self._build_step(verification_id, steps, index, project_id, slug, read["commit"],
+                                                          job, images))
+                if error is not None:
+                    break
+            if error is None:
+                workstation = images.get(WORKSTATION) or self.runs.workstation_image(config)
+                error = await self._verify_run(verification_id, project_id, slug, read, steps,
+                                               steps[offset + len(jobs):], workstation)
+            else:
+                for step in steps[offset:]:
+                    if step["state"] == "pending":
+                        step["state"] = "skipped"
+                await self._save(verification_id, steps)
         await self._finish(verification_id, steps, slug, error)
 
+    def _build_step(self, verification_id: uuid.UUID, steps: list[dict[str, Any]], index: int, project_id: uuid.UUID,
+                    slug: str, commit: str, job: BuildJob, images: dict[str, str]):
+        """Wait on the image's Build, copying its log into the step as it grows."""
+        step = steps[index]
+
+        async def progress(status: dict[str, Any]) -> None:
+            text = _tail(status.get("log") or "")
+            if not text and status.get("phase") == "Pending" and status.get("reason") == "Unschedulable":
+                text = f"waiting for cluster capacity: {status.get('message') or ''}".strip()
+            if text and text != step["log"]:
+                step["log"] = text
+                await self._save(verification_id, steps)
+
+        async def action() -> str:
+            try:
+                result = await self.runs.builder.ensure(project_id, slug, commit, job, progress=progress)
+            except BuildFailed as exc:
+                # The step names the image already: its log starts with what ended the build.
+                raise StepFailed(str(exc).partition("\n")[2] or str(exc)) from exc
+            images[job.name] = result.image
+            return result.describe()
+
+        return action
+
     async def _verify_run(self, verification_id: uuid.UUID, project_id: uuid.UUID, slug: str,
-                          read: dict[str, Any], steps: list[dict[str, Any]]) -> str | None:
+                          read: dict[str, Any], steps: list[dict[str, Any]], own: list[dict[str, Any]],
+                          workstation_image: str) -> str | None:
         config: ProjectConfig = read["config"]
         secrets: StoreValues = read["secrets"]
-        offset = len(steps)
-        steps += run_steps(config)
         token = new_run_token()
         await self._save(verification_id, steps, token_hash=hash_token(token), tool_reports={})
         runtime = next(iter(config.agents.values())).runtime
         objects = run_objects.verify_run(
             verification_id=verification_id, namespace=self.runs.namespace, project=slug, config=config,
             secrets=secrets, runtime=runtime, runtime_image=self.settings.runtime_image(runtime),
-            workstation_image=self.runs.workstation_image(config), token=token,
+            workstation_image=workstation_image, token=token,
         )
-        own = steps[offset:]
         try:
             await self.runs.create(objects)
         except Exception as exc:  # recorded on the first step

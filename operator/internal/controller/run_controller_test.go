@@ -90,6 +90,19 @@ func TestMain(m *testing.M) {
 	if err := reconciler.SetupWithManager(mgr, 4); err != nil {
 		panic(err)
 	}
+	builds := &BuildReconciler{
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Builder: podspec.BuildConfig{
+			APIURL: "http://exradius-api-internal.exradius:8001", Image: "buildkit:rootless",
+			ServiceAccount: "exradius-build", BuildkitdConfigMap: "exradius-buildkitd",
+		},
+		Logs:     fakeLogs{},
+		Recorder: mgr.GetEventRecorder("exradius-operator"),
+	}
+	if err := builds.SetupWithManager(mgr, 4); err != nil {
+		panic(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	testCtx = ctx
 	go func() {
@@ -120,6 +133,7 @@ func namespace(t *testing.T) string {
 	name := fmt.Sprintf("runs-%d", counter.Add(1))
 	must(t, k8s.Create(testCtx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}))
 	must(t, k8s.Create(testCtx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "exradius-run", Namespace: name}}))
+	must(t, k8s.Create(testCtx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "exradius-build", Namespace: name}}))
 	return name
 }
 

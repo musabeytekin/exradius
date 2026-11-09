@@ -1,9 +1,10 @@
 """The worker's Kubernetes client (docs/kubernetes.md §3): Runs and per-run Secrets in the
-runs namespace, and the operator's Lease.
+runs namespace, Builds and their token Secrets in the builds namespace, and the operator's
+Lease.
 
 What the worker may do there is its RBAC: create, patch, delete, get, list and watch Runs;
-create, patch and delete Secrets (never read them); get the operator's Lease. It never
-creates pods. The client speaks to the API server over HTTPS with the pod's
+create, get and delete Builds; create, patch and delete Secrets (never read them); get the
+operator's Lease. It never creates pods. The client speaks to the API server over HTTPS with the pod's
 ServiceAccount token, which the kubelet rotates, so the token file is re-read.
 
 ``Cluster`` is the protocol ``RunManager`` uses; the tests give it a fake.
@@ -61,9 +62,22 @@ class Cluster(Protocol):
         """Delete the Run (its pod, workspace and Secret go with it); ``False`` if absent."""
         ...
 
-    async def create_secret(self, body: dict[str, Any]) -> None: ...
+    async def create_secret(self, body: dict[str, Any]) -> None:
+        """Create a Secret in the namespace its metadata names (an existing one is replaced)."""
+        ...
 
     async def delete_secret(self, name: str) -> None: ...
+
+    async def create_build(self, body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Create a Build; ``(object, created)``, with the existing one when it is there."""
+        ...
+
+    async def get_build(self, name: str) -> dict[str, Any] | None: ...
+
+    async def delete_build(self, name: str, uid: str | None = None) -> bool:
+        """Delete the Build (its pod and Secret go with it), only the one with ``uid`` when
+        given; ``False`` if absent or replaced meanwhile."""
+        ...
 
     def watch_runs(self, resource_version: str) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         """``(type, object)`` from ``resource_version`` on; raises ``Gone`` when it expired."""
@@ -74,8 +88,9 @@ class Cluster(Protocol):
 
 class KubeCluster:
     def __init__(self, runs_namespace: str, api_url: str | None = None, token_file: Path | None = None,
-                 ca_file: Path | None = None):
+                 ca_file: Path | None = None, builds_namespace: str = "exradius-builds"):
         self.namespace = runs_namespace
+        self.builds_namespace = builds_namespace
         if api_url is None:
             host = os.environ.get("KUBERNETES_SERVICE_HOST")
             port = os.environ.get("KUBERNETES_SERVICE_PORT", "443")
@@ -108,8 +123,12 @@ class KubeCluster:
         path = f"/apis/{GROUP}/{VERSION}/namespaces/{self.namespace}/runs"
         return f"{path}/{name}" if name else path
 
-    def _secrets(self, name: str | None = None) -> str:
-        path = f"/api/v1/namespaces/{self.namespace}/secrets"
+    def _builds(self, name: str | None = None) -> str:
+        path = f"/apis/{GROUP}/{VERSION}/namespaces/{self.builds_namespace}/builds"
+        return f"{path}/{name}" if name else path
+
+    def _secrets(self, name: str | None = None, namespace: str | None = None) -> str:
+        path = f"/api/v1/namespaces/{namespace or self.namespace}/secrets"
         return f"{path}/{name}" if name else path
 
     async def _request(self, method: str, path: str, *, body: Any = None, content_type: str = "application/json",
@@ -171,10 +190,11 @@ class KubeCluster:
         return True
 
     async def create_secret(self, body: dict[str, Any]) -> None:
-        response = await self._request("POST", self._secrets(), body=body)
+        namespace = body["metadata"].get("namespace")
+        response = await self._request("POST", self._secrets(namespace=namespace), body=body)
         if response.status_code == 409:
-            # Left by an earlier attempt for the same Run: replace its data and owner.
-            response = await self._request("PATCH", self._secrets(body["metadata"]["name"]), body=body,
+            # Left by an earlier attempt for the same object: replace its data and owner.
+            response = await self._request("PATCH", self._secrets(body["metadata"]["name"], namespace), body=body,
                                            content_type="application/merge-patch+json")
         if response.status_code >= 300:
             raise self._error(response)
@@ -183,6 +203,35 @@ class KubeCluster:
         response = await self._request("DELETE", self._secrets(name))
         if response.status_code not in (200, 202, 404):
             raise self._error(response)
+
+    async def create_build(self, body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        response = await self._request("POST", self._builds(), body=body)
+        if response.status_code == 409:
+            existing = await self.get_build(body["metadata"]["name"])
+            if existing is not None:
+                return existing, False
+        if response.status_code >= 300:
+            raise self._error(response)
+        return response.json(), True
+
+    async def get_build(self, name: str) -> dict[str, Any] | None:
+        response = await self._request("GET", self._builds(name))
+        if response.status_code == 404:
+            return None
+        if response.status_code >= 300:
+            raise self._error(response)
+        return response.json()
+
+    async def delete_build(self, name: str, uid: str | None = None) -> bool:
+        body: dict[str, Any] = {"propagationPolicy": "Background"}
+        if uid:
+            body["preconditions"] = {"uid": uid}
+        response = await self._request("DELETE", self._builds(name), body=body)
+        if response.status_code in (404, 409):  # 409: a precondition failed (replaced already)
+            return False
+        if response.status_code >= 300:
+            raise self._error(response)
+        return True
 
     async def watch_runs(self, resource_version: str) -> AsyncIterator[tuple[str, dict[str, Any]]]:
         params = {"watch": "1", "resourceVersion": resource_version, "allowWatchBookmarks": "true",

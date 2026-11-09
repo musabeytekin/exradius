@@ -201,3 +201,77 @@ func TestStepNames(t *testing.T) {
 		t.Error("a probe has no steps")
 	}
 }
+
+func buildConfig() BuildConfig {
+	return BuildConfig{
+		APIURL:             "http://exradius-api-internal.exradius:8001",
+		Image:              "moby/buildkit:v0.34.1-rootless",
+		ServiceAccount:     "exradius-build",
+		BuildkitdConfigMap: "exradius-buildkitd",
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+		},
+	}
+}
+
+func build() *v1.Build {
+	return &v1.Build{
+		ObjectMeta: metav1.ObjectMeta{Name: "build-saleor-workstation-1a2b3c4d5e6f", Namespace: "exradius-builds", UID: "uid-b1"},
+		Spec: v1.BuildSpec{
+			ID: "b1", Project: "saleor", Name: "workstation",
+			Image:      "kind-registry:5000/exradius/saleor/workstation:1a2b3c4d5e6f",
+			Cache:      "kind-registry:5000/exradius/saleor/workstation:buildcache",
+			Dockerfile: "docker/Dockerfile", SecretName: "build-saleor-workstation-1a2b3c4d5e6f",
+		},
+	}
+}
+
+func TestBuildPod(t *testing.T) {
+	checkGolden(t, "build", buildConfig().BuildPod(build()))
+}
+
+func TestBuildPodWithoutCacheOrConfig(t *testing.T) {
+	c := buildConfig()
+	c.BuildkitdConfigMap = ""
+	b := build()
+	b.Spec.Cache = ""
+	pod := c.BuildPod(b)
+	if len(pod.Spec.Volumes) != 4 {
+		t.Fatalf("expected the four emptyDirs only, got %d volumes", len(pod.Spec.Volumes))
+	}
+	for _, arg := range pod.Spec.Containers[0].Command {
+		if arg == "--export-cache" || arg == "--import-cache" {
+			t.Fatalf("no cache, but %s", arg)
+		}
+	}
+	for _, e := range pod.Spec.Containers[0].Env {
+		if e.Name == "BUILDKITD_FLAGS" && e.Value != "--oci-worker-no-process-sandbox" {
+			t.Fatalf("BUILDKITD_FLAGS = %q", e.Value)
+		}
+	}
+}
+
+// Build pods carry no Kubernetes identity; only the build container is unconfined, and
+// the token reaches the context fetch only.
+func TestBuildPodSecurity(t *testing.T) {
+	pod := buildConfig().BuildPod(build())
+	if *pod.Spec.AutomountServiceAccountToken || *pod.Spec.EnableServiceLinks || pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Fatal("no service account token, no service links, never restarted")
+	}
+	ctx := pod.Spec.InitContainers[0]
+	if sc := ctx.SecurityContext; !*sc.ReadOnlyRootFilesystem || *sc.AllowPrivilegeEscalation || sc.Capabilities.Drop[0] != "ALL" {
+		t.Fatalf("context container: weak security context %+v", sc)
+	}
+	main := pod.Spec.Containers[0]
+	if main.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined || !*main.SecurityContext.ReadOnlyRootFilesystem {
+		t.Fatalf("build container: %+v", main.SecurityContext)
+	}
+	for _, e := range main.Env {
+		if e.ValueFrom != nil {
+			t.Fatalf("the build container gets no secret, got %s", e.Name)
+		}
+	}
+	if pod.OwnerReferences[0].Kind != "Build" || !*pod.OwnerReferences[0].Controller {
+		t.Fatal("the pod is controlled by its Build")
+	}
+}

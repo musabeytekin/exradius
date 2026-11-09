@@ -279,6 +279,13 @@ BUILD_DOCKERFILE = ".exradius.Dockerfile"
 """Name of a Dockerfile from outside the context, added to the build context."""
 
 
+def build_dockerfile_name(context: str, dockerfile: str) -> str:
+    """The Dockerfile's name inside the context tar ``build_context`` makes."""
+    if not context:
+        return dockerfile
+    return dockerfile.removeprefix(context + "/") if dockerfile.startswith(context + "/") else BUILD_DOCKERFILE
+
+
 def build_context(mirror: Path, commit: str, context: str, dockerfile: str) -> tuple[bytes, str]:
     """A tar of the context directory at ``commit`` and the Dockerfile's name in it. A
     Dockerfile outside the context is added to the tar as ``BUILD_DOCKERFILE``."""
@@ -288,9 +295,8 @@ def build_context(mirror: Path, commit: str, context: str, dockerfile: str) -> t
     )
     if archive.returncode != 0:
         raise GitError(f"git archive of {context or '.'} failed: {archive.stderr.decode(errors='replace').strip()}")
-    inside = dockerfile.removeprefix(context + "/") if context else dockerfile
-    if context and not dockerfile.startswith(context + "/"):
-        inside = BUILD_DOCKERFILE
+    inside = build_dockerfile_name(context, dockerfile)
+    if inside == BUILD_DOCKERFILE:
         content = _git_bytes(mirror, "cat-file", "blob", f"{commit}:{dockerfile}")
         out = io.BytesIO()
         with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as source, tarfile.open(fileobj=out, mode="w") as target:

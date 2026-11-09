@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from exradius import downloads
 from exradius.crypto import hash_token
-from exradius.models import Artifact, InfoRequest, Run, SecretStore, SecretStoreEntry, Task
+from exradius.models import Artifact, ImageBuild, InfoRequest, Run, SecretStore, SecretStoreEntry, Task
 from exradius.states import State
 from exradius.worker.intake import accept_answer
 from exradius.worker.runs import RunManager
@@ -21,9 +21,10 @@ from tests.fakes import FakeCluster, runner
 
 
 @pytest.fixture
-def cluster(sessions):
+def cluster(sessions, store):
     fake = FakeCluster()
     fake.sessions = sessions
+    fake.store = store
     return fake
 
 
@@ -38,6 +39,7 @@ def manager(settings, sessions, store, cluster, published):
         published.extend(e.envelope for e in events)
 
     manager = RunManager(settings, sessions, store, cluster, emit)
+    manager.builder.poll = 0.01
     cluster.manager = manager
     return manager
 
@@ -186,15 +188,138 @@ async def test_agent_removed_before_preparing(manager, sessions, store, cluster,
     assert result["error"] == "agent 'scout' is no longer defined in project 'billing-platform'"
 
 
-async def test_a_dockerfile_workstation_is_not_runnable_yet(
-        manager, sessions, store, cluster, published, configured, accept):
+def builds_of(cluster) -> list[dict]:
+    return [o for o in cluster.created if o["kind"] == "Build"]
+
+
+def runs_of(cluster) -> list[dict]:
+    return [o for o in cluster.created if o["kind"] == "Run"]
+
+
+async def test_workstation_is_built_from_the_config_repository(
+        manager, sessions, store, cluster, published, settings, configured, accept):
+    settings.builds_registry = "kind-registry:5000"
+    await set_config(configured, "workstation:\n  dockerfile: docker/Dockerfile\n  setup: [make deps]\n")
+    commit_config(configured["remote"], {"docker/Dockerfile": "FROM ubuntu:24.04\n", "docker/tools.sh": "echo\n"})
     run_id = await submit_task(accept, published)
-    await set_config(configured, "workstation:\n  dockerfile: docker/Dockerfile\n")
-    commit_config(configured["remote"], {"docker/Dockerfile": "FROM ubuntu:24.04\n"})
+    cluster.behaviours.append(runner(sessions))
     await execute(manager, cluster, run_id)
-    assert cluster.created == []
+
+    assert states(published) == ["queued", "preparing", "running", "completed"]
+    [build] = builds_of(cluster)
+    image = build["spec"]["image"]
+    assert image.startswith("kind-registry:5000/exradius/billing-platform/workstation:")
+    assert len(image.rsplit(":", 1)[1]) == 12
+    assert build["metadata"]["name"] == "build-billing-platform-workstation-" + image.rsplit(":", 1)[1]
+    assert build["metadata"]["namespace"] == settings.builds_namespace
+    assert build["spec"]["dockerfile"] == "Dockerfile"
+    assert build["spec"]["cache"] == image.rsplit(":", 1)[0] + ":buildcache"
+    assert build["spec"]["secretName"] == build["metadata"]["name"]
+    assert set(cluster.contexts[build["metadata"]["name"]]) == {"Dockerfile", "tools.sh"}  # the context only
+    [run] = runs_of(cluster)
+    assert run["spec"]["workstation"]["image"] == image
+    async with sessions() as session:
+        [row] = (await session.scalars(select(ImageBuild))).all()
+    assert (row.name, row.state, row.image, row.build_object) == ("workstation", "succeeded", image,
+                                                                  build["metadata"]["name"])
+    assert row.digest.startswith("sha256:") and row.token_hash is None and "RUN make tools" in row.log_tail
+    assert str(row.id) == build["spec"]["id"]
+    owner = cluster.secrets[build["metadata"]["name"]]["metadata"]["ownerReferences"][0]
+    assert owner["kind"] == "Build"
+
+    # Same context: no second Build, even though the commit changed.
+    commit_config(configured["remote"], {"README": "unrelated\n"})
+    run_id = await submit_task(accept, published, task_id="T-2")
+    cluster.behaviours.append(runner(sessions))
+    await execute(manager, cluster, run_id)
+    assert len(builds_of(cluster)) == 1 and len(cluster.build_pods) == 1
+    assert runs_of(cluster)[1]["spec"]["workstation"]["image"] == image
+
+
+async def test_a_dockerfile_outside_its_context_rebuilds_when_only_it_changes(
+        manager, sessions, store, cluster, published, configured, accept):
+    await set_config(configured, "workstation:\n  dockerfile: workstation.Dockerfile\n  context: docker\n")
+    commit_config(configured["remote"], {"workstation.Dockerfile": "FROM ubuntu:24.04\n", "docker/tools.sh": "echo\n"})
+    run_id = await submit_task(accept, published)
+    cluster.behaviours.append(runner(sessions))
+    await execute(manager, cluster, run_id)
+    [first] = builds_of(cluster)
+    assert first["spec"]["dockerfile"] == ".exradius.Dockerfile"
+    assert set(cluster.contexts[first["metadata"]["name"]]) == {"tools.sh", ".exradius.Dockerfile"}
+
+    commit_config(configured["remote"], {"workstation.Dockerfile": "FROM ubuntu:24.04\nRUN true\n"})
+    run_id = await submit_task(accept, published, task_id="T-2")
+    cluster.behaviours.append(runner(sessions))
+    await execute(manager, cluster, run_id)
+    second = builds_of(cluster)[1]
+    assert second["spec"]["image"] != first["spec"]["image"]
+    assert cluster.contexts[second["metadata"]["name"]][".exradius.Dockerfile"].endswith(b"RUN true\n")
+
+
+async def test_two_runs_at_a_new_commit_share_one_build(
+        manager, sessions, store, cluster, published, configured, accept):
+    await set_config(configured, "workstation:\n  dockerfile: Dockerfile\n")
+    commit_config(configured["remote"], {"Dockerfile": "FROM ubuntu:24.04\n"})
+    first = await submit_task(accept, published)
+    second = await submit_task(accept, published, task_id="T-2")
+    cluster.behaviours += [runner(sessions), runner(sessions)]
+    cluster.build_seconds = 0.2
+    await asyncio.wait_for(asyncio.gather(manager.execute(first), manager.execute(second)), 10)
+    await asyncio.wait_for(cluster.idle(), 10)
+    assert len(builds_of(cluster)) == 1 and len(cluster.build_pods) == 1
+    assert [r["state"] for r in results(published)] == ["completed", "completed"]
+    images = {r["spec"]["workstation"]["image"] for r in runs_of(cluster)}
+    assert images == {builds_of(cluster)[0]["spec"]["image"]}
+    async with sessions() as session:
+        assert len((await session.scalars(select(ImageBuild))).all()) == 1
+
+
+async def test_failed_build_fails_the_run_in_preparing(manager, sessions, store, cluster, published, configured, accept):
+    await set_config(configured, "workstation:\n  dockerfile: Dockerfile\n")
+    commit_config(configured["remote"], {"Dockerfile": "FROM ubuntu:24.04\nRUN make tools\n"})
+    cluster.build_failure = {"log": "#5 [2/2] RUN make tools\n#5 0.2 make: *** No rule to make target 'tools'.  Stop.\n"
+                                    "error: failed to solve: process \"/bin/sh -c make tools\" did not complete successfully"}
+    run_id = await submit_task(accept, published)
+    await execute(manager, cluster, run_id)
+    assert states(published) == ["queued", "preparing", "failed"]
+    assert runs_of(cluster) == []
     [result] = results(published)
-    assert result["error"] == "workstation.dockerfile needs image builds, not available yet"
+    assert result["error"].startswith("building workstation from Dockerfile failed:\nthe build exited with 1\n#5 [2/2]")
+    assert "No rule to make target 'tools'" in result["error"]
+    async with sessions() as session:
+        row = await session.scalar(select(ImageBuild))
+        assert row.state == "failed" and "No rule to make target" in row.log_tail
+        run = await session.get(Run, run_id)
+        assert run.waiting_for is None
+
+    # The next run builds again: the failed Build is replaced.
+    run_id = await submit_task(accept, published, task_id="T-2")
+    cluster.behaviours.append(runner(sessions))
+    await execute(manager, cluster, run_id)
+    assert results(published)[1]["state"] == "completed"
+    assert len(builds_of(cluster)) == 2 and len(cluster.build_pods) == 2
+
+
+async def test_a_run_waits_in_preparing_while_its_image_builds(
+        manager, sessions, store, cluster, published, configured, accept):
+    await set_config(configured, "workstation:\n  dockerfile: Dockerfile\n")
+    commit_config(configured["remote"], {"Dockerfile": "FROM ubuntu:24.04\n"})
+    cluster.build_seconds = 5
+    run_id = await submit_task(accept, published)
+    running = asyncio.create_task(manager.execute(run_id))
+    for _ in range(200):
+        async with sessions() as session:
+            run = await session.get(Run, run_id)
+        if run.waiting_for == "build":
+            break
+        await asyncio.sleep(0.01)
+    assert run.state == State.PREPARING and run.waiting_for == "build"
+
+    await manager.cancel(run_id)  # stops the wait; the Build goes on
+    await asyncio.wait_for(running, 5)
+    assert states(published) == ["queued", "preparing", "cancelled"]
+    assert runs_of(cluster) == [] and len(builds_of(cluster)) == 1
+    assert builds_of(cluster)[0]["metadata"]["name"] in cluster.builds
 
 
 async def test_repositories_and_setup_go_into_the_spec(
