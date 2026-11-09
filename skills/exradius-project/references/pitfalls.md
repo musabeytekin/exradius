@@ -191,8 +191,9 @@ about 0.8 GB in the home and as much again in `/tmp`.
 **Fix:** keep setup to what the agent needs; reduce parallelism where the tool allows it
 (`yarn config set networkConcurrency`, `pnpm --network-concurrency`, `-n 0` for
 pytest-xdist in tests, `MAVEN_OPTS=-Xmx...`); declare the peak in `resources.memory` (and
-a service's own in its `memory`) so Exradius reserves it and starts the run only when it
-fits next to the others. A declared memory is also the limit: a process over it is killed
+a service's own in its `memory`), so Exradius places the run on a node with room for it
+(it waits as "waiting for cluster capacity" until one has). A declared memory is also the
+limit: a process over it is killed
 and the run fails with "exceeded its declared memory (6g)", so leave headroom over the
 measured peak (`docker stats` during the check). check.sh applies it the same way
 (`--memory` and `--memory-swap`) and says when a step went over it. Undeclared, the run
@@ -235,15 +236,41 @@ not allowed in `command`. A service Dockerfile is still needed when the entrypoi
 must change (it ignores or rewrites the arguments), or for files the image must contain
 (an extension, seed data).
 
-## BuildKit-only Dockerfile syntax
+## BuildKit-only Dockerfile syntax (v0.1.0 servers only)
 
-**Symptom:** the local `docker build` works, Verify's "Build workstation" fails with
-"the --mount option requires BuildKit".
+**Symptom:** on an Exradius v0.1.0 (Docker-based) server, the local `docker build` works and
+Verify's "Build workstation" fails with "the --mount option requires BuildKit".
 
-**Cause:** Exradius builds through the Docker Engine API's classic builder.
+**Cause:** v0.1.0 built through the Docker Engine API's classic builder. Exradius 0.2.0
+builds with rootless BuildKit in the cluster, where `RUN --mount=type=cache` and heredocs
+work (build secrets and SSH mounts are not given).
 
-**Fix:** no `RUN --mount=type=cache`, no `RUN <<EOF` heredocs, no `# syntax=` directive.
-check.sh builds with the classic builder by default to catch this.
+**Fix:** for a v0.1.0 server, no `RUN --mount`, no `RUN <<EOF` heredocs, no `# syntax=`
+directive; `check.sh --classic` builds that way.
+
+## A `tcp` check on a service that listens only on 127.0.0.1
+
+**Symptom:** "Start service cache" fails after 120 s with "did not become ready within 120s
+waiting for port 6379", while the service's log says it is ready.
+
+**Cause:** in a run, a `tcp` check is a connection to the run's own address (the
+kubelet's TCP probe), not to `127.0.0.1`. A service started with `--bind 127.0.0.1` (or a
+config that listens on localhost only) never accepts it. The workstation itself still
+reaches it: services and the workstation share `localhost`.
+
+**Fix:** a `ready` `command` instead (`[valkey-cli, ping]`, `[pg_isready, -h, 127.0.0.1]`),
+or let the service listen on all addresses.
+
+## Two services on one port
+
+**Symptom:** the second of two services exits before it is ready ("Address already in
+use"), or the file check refuses "5432 is also a port of service db".
+
+**Cause:** a run's services share one `localhost`, as compose publishes them on a
+developer's machine: two Postgres, or Postgres and something else on 5432, collide.
+
+**Fix:** give the second one another port (Postgres: `command: [postgres, -p, "5433"]` and
+`PGPORT`, Redis: `command: [redis-server, --port, "6380"]`) and point the app at it.
 
 ## Files that are only local
 

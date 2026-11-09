@@ -7,7 +7,9 @@ still fail here; `scripts/check.sh` reproduces all of them locally.
 From the inside, a run looks like a developer's own workstation: a normal user with a
 home, the project's tools, its services by host name, outbound network. Exradius deviates
 only where security requires it, and enforces each deviation at the level of the kernel,
-Docker or the command line, where no project setting, tool or agent can change it.
+Kubernetes or the command line, where no project setting, tool or agent can change it.
+Exradius runs each task as one Kubernetes pod: the setup commands, the services and the
+agent's container are containers of that pod.
 
 ## Two limits to know before anything else
 
@@ -34,12 +36,11 @@ Docker or the command line, where no project setting, tool or agent can change i
 - No Exradius base image or label is needed. Without a workstation the project gets
   Exradius's default image: Ubuntu 24.04 with git, curl, ca-certificates and
   build-essential. Nothing inherits from it; write a Dockerfile for anything more.
-- Built by the Exradius worker with the **classic builder** (no BuildKit): `RUN --mount`,
-  heredoc `RUN <<EOF` and `# syntax=` lines fail. Multi-stage builds and
-  `COPY --from=<image>` work.
-- Built for the **server's CPU architecture** (usually `linux/amd64`). A Mac with Apple
+- Built in the cluster with **rootless BuildKit**: multi-stage builds, `COPY --from=<image>`,
+  heredocs and cache mounts work; build secrets and SSH mounts are not given.
+- Built for the **cluster's CPU architecture** (usually `linux/amd64`). A Mac with Apple
   Silicon builds `linux/arm64` locally; `check.sh --platform linux/amd64` builds and runs
-  the server's architecture under emulation (slower, but catches downloads of
+  the cluster's architecture under emulation (slower, but catches downloads of
   architecture-specific binaries).
 
 ## The user
@@ -67,10 +68,10 @@ Docker or the command line, where no project setting, tool or agent can change i
     working directory of setup commands and of the agent;
   - `/home/runner`: the run's home, empty at the start of a run;
   - `/tmp`: the run's temporary directory (mode 1777), empty at the start;
-  - each `workstation.cache` folder (schema.md), mounted at its path from a per-project
-    directory on the server's disk that outlives the run: the same folders in every run of
-    the project, concurrent ones included.
-- `/work`, the home and `/tmp` are directories **on the server's disk, not in memory**:
+  - each `workstation.cache` folder (schema.md), mounted at its path from the project's
+    volume, which outlives the run: the same folders in every run of the project,
+    concurrent ones included.
+- `/work`, the home and `/tmp` are directories **on the run's disk volume, not in memory**:
   package manager caches (`~/.cache/yarn`, `~/.npm`, `~/.cache/uv`, `~/.m2`,
   `~/go/pkg/mod`), Yarn Berry's staging in `/tmp` and build output take disk space. They
   persist from the setup commands to the agent session and across a resumed session of
@@ -87,7 +88,8 @@ Docker or the command line, where no project setting, tool or agent can change i
   run time. Prepare shared tool state (corepack's cache, uv's Python installs, a Maven
   repository) in the Dockerfile under a world-readable path (`chmod -R a+rX`) and point
   the tool at it with an `ENV`, or copy it into the home in a setup command.
-- Repositories are cloned by the Exradius worker and handed to uid 1000. Git runs with
+- Repositories are cloned as uid 1000 from mirrors on the project's volume, before the
+  services and the setup commands. Git runs with
   `safe.directory=*` (set through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`),
   so ownership warnings do not occur. The agent's git identity and push credential are
   configured by Exradius.
@@ -102,31 +104,35 @@ Docker or the command line, where no project setting, tool or agent can change i
 
 ## Memory
 
-- `resources.memory` is the workstation's cgroup limit, swap included, and a service's
-  `memory` the service's. A process that goes over it is killed (exit 137) and the run
-  fails with "exceeded its declared memory". Without a declaration there is no limit and
-  nothing reserved: the run competes for the server's memory with every other run.
-- A declared memory is also reserved: the run waits (`waiting for memory`) until it fits
-  next to the runs in progress.
+- `resources.memory` is the workstation's request and limit, and a service's `memory` the
+  service's. A process that goes over it is killed (exit 137) and the run fails with
+  "exceeded its declared memory". Without a declaration there is no limit: the run
+  competes for the node's memory with every other run.
+- The cluster places the run where its declared memory is free; when no node has room the
+  task waits as "waiting for cluster capacity" until another run ends.
 - Memory is used by processes only: the home, `/tmp` and the caches are on disk.
 
 ## The network
 
 - Outbound network access is available (package registries, git hosts).
-- Services run on a network of their own per run; the workstation joins it and reaches
-  each service by its name (`postgres:5432`). No ports are published, no Docker daemon is
-  available inside the workstation (the first limit above), and there is no Kubernetes.
+- The services and the workstation share one network namespace, the pod's: each service
+  is reached by its name, which resolves to `127.0.0.1` (`postgres:5432` and
+  `localhost:5432` are the same), as compose publishes ports on a developer's machine.
+  Two services cannot listen on the same port. Parallel runs never share services: each
+  run is its own pod.
+- No ports are published, no Docker daemon is available inside the workstation (the first
+  limit above), and the run has no Kubernetes credentials.
 - Services start before the setup commands and stay up for the whole task.
 
 ## The order of a run (and of Verify)
 
 1. Read `exradius.yaml` at the branch head; refuse the task if it has errors or the store
-   lacks a key. Wait until the declared memory fits the server's budget.
+   lacks a key.
 2. Build the workstation and service images that come from Dockerfiles (cached by
-   content), pull the others.
+   content), pull the others. Wait for a node with room for the declared memory.
 3. Clone each repository into `/work/<name>` at its branch.
-4. Start the services (with their `command` and `memory`); wait for each to be ready
-   (120 seconds each).
+4. Start the services in order (with their `command` and `memory`); wait for each to be
+   ready (120 seconds from its start).
 5. Run each setup command in its own container from the workstation image, under the
    conditions above (cache folders mounted, memory limit applied), cwd `/work`. A non-zero exit fails the run with the output's tail.
    There is no time limit per command, but every run pays for them, so keep them to
@@ -137,5 +143,6 @@ Docker or the command line, where no project setting, tool or agent can change i
 ## What the local check does not cover
 
 The agent runtime itself, providers and models, pushing with the repository credential,
-MCP connections, the server's network policies, and its CPU architecture unless
-`--platform` is given. Only a Verify on the server, then a real task, covers those.
+MCP connections, the cluster's network policies and egress allowlist, and its CPU
+architecture unless `--platform` is given. Only a Verify in Exradius, then a real task,
+covers those.

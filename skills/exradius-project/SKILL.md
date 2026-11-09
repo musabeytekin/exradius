@@ -197,12 +197,13 @@ README).
 bash ${CLAUDE_SKILL_DIR}/scripts/check.sh --repo <name>=<path to checkout> [--repo ...] <config folder>
 ```
 
-It builds the images with the classic builder (as the server does), checks the
+It builds the images with BuildKit (as Exradius does in the cluster), checks the
 workstation image (glibc, bash, git, and lists the tools on PATH), copies each local
 checkout to a fresh clone under `/work/<name>` (repositories without `--repo` or
 `--repos-dir` are cloned from their URL with the developer's own git credentials), starts
-the services on a temporary network and waits for `ready` with the server's 120-second
-timeout, runs every setup command as uid 1000 with a read-only root filesystem, no
+the services in one shared network namespace, as a run's pod has them (reached by name on
+`localhost`; a `tcp` check connects to the run's own address), and waits for `ready` with
+Exradius's 120 seconds from each service's start, runs every setup command as uid 1000 with a read-only root filesystem, no
 capabilities, `no-new-privileges`, the generated `runner` passwd entry, `HOME=/home/runner`
 and the project `env` with a throwaway value for each secret, applies `resources.memory`
 and each service's `memory` as the containers' limits (`--memory` and `--memory-swap`) and

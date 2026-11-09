@@ -50,8 +50,9 @@ DB_PASSWORD=
 - Setup: <one line per command and what it prepares>.
 - Agents: `developer` (<what it does, whether it pushes and opens pull requests>), `scout`
   (investigates and reports, never changes code).
-- Resources: `resources.memory` is `<N>g`: Exradius reserves that much per run (a run
-  waits until it fits next to the others) and kills the workstation if it goes over it
+- Resources: `resources.memory` is `<N>g`: each run needs a cluster node with that much
+  memory free (it waits as "waiting for cluster capacity" until one has), and the
+  workstation is killed if it goes over it
   (<the heaviest step>)<; services: <name> `<N>m`, ...>. Disk: about <N> GB per run
   (<the biggest install>).
 - Caches: <the package managers' stores, e.g. the pnpm store and uv's cache> are kept

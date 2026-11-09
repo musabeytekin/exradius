@@ -5,8 +5,10 @@
 # read-only root filesystem, no capabilities, no-new-privileges, resources.memory as the
 # memory limit, workstation.cache mounted from .exradius-cache/ next to exradius.yaml),
 # then clean up everything but the cache.
-# The container flags mirror backend/exradius/worker/containers.py in the Exradius
-# repository; exradius_check.py holds them.
+# Like a run's pod on Kubernetes, the services and the setup commands share one network
+# namespace: services are reached by name on localhost. The flags mirror the operator's pod
+# builder (operator/internal/podspec/podspec.go in the Exradius repository);
+# exradius_check.py holds them.
 #
 #   check.sh [options] [config dir]        check.sh --help for the options
 #

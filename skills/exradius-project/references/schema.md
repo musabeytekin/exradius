@@ -27,7 +27,7 @@ project:                          # required
 secret_store: bank-platform       # [a-z][a-z0-9-]*; required as soon as the file has a ${secret:...}
 
 resources:                        # default: none
-  memory: 6g                      # the workstation's memory; default: unreserved and unlimited
+  memory: 6g                      # the workstation's memory: request and limit; default: none
 
 repositories:                     # default: none. Each is cloned into /work/<name>
   - name: bank-of-anthos          # required; folder name, [A-Za-z0-9][A-Za-z0-9._-]*
@@ -46,16 +46,16 @@ workstation:                      # the agents' container image; default: Exradi
     - ~/.m2/repository
     - ~/.cache/uv
 
-services:                         # default: none; containers next to the agent, reachable by name
+services:                         # default: none; next to the agent, by name on the run's localhost
   postgres:                       # the host name; [a-z][a-z0-9-]*
     image: postgres:16            # or dockerfile: (+ context:) as for the workstation
     env:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: "${secret:DB_PASSWORD}"
-    ports: [5432]                 # documentation for the agent; nothing is published
+    ports: [5432]                 # documentation for the agent; unique across services
     ready:                        # default: the image's HEALTHCHECK, else "the container is running"
       command: [pg_isready, -h, 127.0.0.1, -U, app]   # or: tcp: 5432
-    memory: 512m                  # default: unreserved and unlimited
+    memory: 512m                  # request and limit; default: none
   minio:
     image: minio/minio
     command: [server, /data]      # default: the image's CMD; its ENTRYPOINT is always kept
@@ -105,8 +105,9 @@ reads as a date (`2026-11-07`) must also be quoted. `branch: 2026` becomes the s
 **Names.** `project.slug`, `secret_store`, service, connection and agent names match
 `[a-z][a-z0-9-]*` (at most 63 characters). Repository `name` matches
 `[A-Za-z0-9][A-Za-z0-9._-]*` and is unique. Env keys match `[A-Za-z_][A-Za-z0-9_]*`.
-Service names may not be `api`, `workstation`, anything starting with `exradius`, or a
-repository folder name. The connection name `exradius` is reserved (every agent already
+Service names may not be `api`, `workstation`, `localhost`, anything starting with
+`exradius`, or a repository folder name, and are at most 55 characters (a run's container is
+`service-<name>`). The connection name `exradius` is reserved (every agent already
 has a built-in connection of that name). `model` matches `[A-Za-z0-9][A-Za-z0-9._:@/[\]-]*`;
 `identity.email` must look like an email address and `identity.name` may not contain
 `<`, `>` or control characters.
@@ -118,51 +119,55 @@ default image: Ubuntu 24.04 with git, curl, ca-certificates and build-essential)
 must exist in the repository, may not be absolute, use `..` or pass through a symlink.
 Exradius builds a Dockerfile from the committed tree of the config repository (files that
 are only local or git-ignored are not in the build), tags the image by the context's git
-tree hash, and rebuilds only when the context changes. It builds with the Docker Engine's
-classic builder: BuildKit-only syntax (`RUN --mount=...`, heredocs, `# syntax=`) fails.
-Images named with `image:` are pulled by the server, so they must be reachable from it.
+tree hash, and rebuilds only when the context changes. It builds with rootless BuildKit in
+the cluster, with a layer cache in its registry; build secrets (`RUN --mount=type=secret`)
+and SSH mounts are not given. Images named with `image:` are pulled by the cluster's nodes,
+so they must be reachable from them (a private registry needs the install's pull secret).
 
-**Memory.** `resources.memory` (the workstation: the setup commands, the agent's session
-and a resumed session) and a service's `memory` are Docker size strings: a number and one
-of `b`, `k`, `m`, `g` (`512m`, `6g`, `1.5g`; upper case works too), at least `6m`, always
-with a unit (`memory: 512` is refused: there is no unit-less form). A declared memory does
-two things:
+**Memory.** `resources.memory` (the workstation: the setup commands and the agent's
+session) and a service's `memory` are sizes: a number and one of `b`, `k`, `m`, `g`
+(`512m`, `6g`, `1.5g`; binary units, upper case works too), at least `6m`, always with a
+unit (`memory: 512` is refused: there is no unit-less form). Exradius runs on Kubernetes,
+and a declared memory is the container's request and limit:
 
-- **Reservation.** The Exradius worker admits a run only when its reservation (the
-  workstation's `memory` plus every service's `memory`) fits the server's memory budget
-  next to the runs and verifications in progress; until then the task waits, shown as
-  `waiting for memory` in the panel. The budget is the server's Docker memory minus 1 GiB
-  unless the admin sets another; a reservation larger than the whole budget can never
-  start, and Verify fails at its "Reserve memory" step.
-- **Limit.** It is the container's cgroup limit, swap included (`--memory` and
-  `--memory-swap` equal). A container that exceeds it is killed by its own limit, not by
-  the host killing a neighbour; the run fails with "exceeded its declared memory (6g)".
+- **Placement.** The cluster puts the run's pod on a node with that much memory free. When
+  no node has room, the task waits in `preparing`, shown as "waiting for cluster capacity"
+  in the panel, and starts when another run ends.
+- **Limit.** A container that exceeds it is killed by its own limit, not by the node
+  killing a neighbour; the run fails with "exceeded its declared memory (6g)".
 
-Undeclared means nothing reserved and no limit: the run competes for the server's memory
-with every other run. Verify reserves and limits the same way, so a limit that is too low
+Undeclared means the install's small default request and no limit: the run competes for
+the node's memory with every other run. Verify is the same pod, so a limit that is too low
 shows up in Verify, not in the first task. Declare the peak of the heaviest step (the
-dependency install or a type check, usually) with some headroom.
+dependency install or a type check, usually) with some headroom, and less than a cluster
+node has.
 
 **Caches.** `workstation.cache` lists folders inside the container that survive from run
 to run of the project: `~/...` (in the run's home, `/home/runner`) or absolute paths,
 never inside `/work`, `/exradius`, `/opt/exradius`, `/proc`, `/sys` or `/dev`, never `~`,
 `/`, `/home`, `/tmp`, `/etc`, `/usr`, `/bin`, `/lib`, `/var` or `/opt` themselves, no
-`..`, each listed once. Exradius bind-mounts each from `<data
-dir>/caches/<slug>/<n>-<path>/` (created on first use, owned by uid 1000) into the setup,
-agent and resumed containers and into Verify. The same folders are shared by every run of
-the project, concurrent ones included, so list only caches whose tool is safe with
-concurrent writers (the package managers' download stores are: pnpm, npm, Yarn, uv, pip,
-Maven, Gradle, Go, Cargo). Nothing cleans them; the project page shows their size, and the
-admin deletes the folder to reset. Hard links do not cross bind mounts, so tools that link
-from their store (pnpm, uv) copy instead: still no download. A cache is per project, so a
+`..`, each listed once. Exradius keeps each as a folder of the project's volume (created on
+first use, owned by uid 1000) and mounts it into the setup commands and the agent's
+container, of tasks and Verify. The same folders are shared by every run of the project,
+concurrent ones included, so list only caches whose tool is safe with concurrent writers
+(the package managers' download stores are: pnpm, npm, Yarn, uv, pip, Maven, Gradle, Go,
+Cargo). Nothing cleans them; the admin deletes the project's volume to reset them. Hard
+links do not cross mounts, so tools that link from their store (pnpm, uv) copy instead:
+still no download. A cache is per project, so a
 run can only affect later runs of the same project. The paths per package manager are in
 pitfalls.md.
 
-**Services.** `ready` gives exactly one of `command` (a list, run inside the service
-container with `exec`; exit 0 means ready) or `tcp` (a port that must be listening inside
-the container). Without `ready`: the image's HEALTHCHECK when it has one (must report
-healthy), else ready once the container has been running for a second. Each service has
-120 seconds to become ready; one that exits or times out fails the run with its log tail.
+**Services.** A run's services and the agent's container share one network: each service
+is reached by its name, which points at `127.0.0.1`, and listens on the same `localhost` as
+the agent, as on a developer's machine. So a port belongs to one service (two that listen on
+the same port collide, declared or not), and an app configured for `localhost:5432` also
+works. `ready` gives exactly one of `command` (a list, run inside the service container;
+exit 0 means ready) or `tcp` (a port the cluster connects to on the run's own address, not
+`127.0.0.1`: a service that listens only on 127.0.0.1 never passes a `tcp` check and needs
+a `command`). Without `ready`: the image's HEALTHCHECK when it has one, else ready once its
+process runs. Each service has 120 seconds from its start to become ready; one that exits,
+restarts or times out fails the run with its log tail. One that crashes after it was ready
+is restarted.
 `command` (a list of strings, at least one; quote numbers, `"6380"`, and write an empty
 argument as `""`) is the container's command, as compose's `command:` and `docker run
 <image> <args>`: it replaces the image's `CMD` and keeps its `ENTRYPOINT`. There is no
@@ -170,9 +175,9 @@ argument as `""`) is the container's command, as compose's `command:` and `docke
 Secrets are not allowed in `command`; put them in the service's `env` and refer to them as
 `$NAME` inside a `sh -c` command.
 
-Services run with all capabilities dropped except CHOWN, SETUID, SETGID, FOWNER,
-DAC_OVERRIDE and NET_BIND_SERVICE, `no-new-privileges`, no mounts and no published ports.
-Service images may be Alpine; only the workstation must be glibc-based.
+Services run as their image's user with all capabilities dropped except CHOWN, SETUID,
+SETGID, FOWNER, DAC_OVERRIDE and NET_BIND_SERVICE, `no-new-privileges`, no mounts and no
+published ports. Service images may be Alpine; only the workstation must be glibc-based.
 
 **Connections.** Exactly one of `catalog`, `command` or `url`. `config` goes only with
 `catalog`; `args` and `env` only with `command`; `headers` only with `url`. `type` is
@@ -227,8 +232,7 @@ the task.
 3. Per store: create the secret store the file names and fill every required key. The
    panel accepts a pasted `.env` block for several keys at once.
 
-Then Verify runs: "Read config" (commit, errors, warnings, missing keys), "Reserve
-memory" (when the file declares some), "Build
-workstation" and "Build service <name>", clone each repository, "Start service <name>",
-"Setup: <command>" for each setup command, then stop the services and remove the
-directory.
+Then Verify runs: "Read config" (commit, errors, warnings, missing keys), "Build
+workstation" and "Build service <name>", "Prepare workspace", "Clone <repo>" for each
+repository, "Start service <name>", "Setup: <command>" for each setup command, and "List
+tools <name>" for each connection an agent uses. A failure gets a diagnosis.

@@ -80,12 +80,12 @@ Steps, in Verify's order:
 | step | what it does |
 |---|---|
 | Read config | parses `exradius.yaml` (or `.exradius/exradius.yaml`) with the same strict rules as Exradius, lists the required secret keys, warns about uncommitted or git-ignored files the server would not see |
-| Build workstation / Build service *name* | `docker build` of each Dockerfile from its declared context, with the classic builder like the server (`--buildkit` to compare); `image:` entries are pulled when missing |
+| Build workstation / Build service *name* | `docker build` of each Dockerfile from its declared context with BuildKit, as Exradius builds in the cluster (`--classic` for a v0.1.0 server, which used Docker's classic builder); `image:` entries are pulled when missing |
 | Check workstation image | glibc (no Alpine/musl), `bash`, `git`, and the tools found on PATH, as uid 1000 on a read-only root |
 | Prepare /work | a fresh clone of each local checkout (`--repo NAME=PATH`, `--repos-dir DIR`, or the config's own repository for `.exradius/`), else a clone from the URL; `--live` mounts the checkouts as they are |
-| Start service *name* | on a temporary network under its name, with the server's capabilities, its `command` and `memory`, and its `ready` check (`command`, `tcp`, image HEALTHCHECK, or running), 120 s timeout |
-| Setup: *command* | `/bin/sh -c` in the workstation with `--user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges`, generated `/etc/passwd`/`/etc/group` (`runner`, home `/home/runner`), `/work`, home and `/tmp` as writable bind mounts, `HOME=/home/runner`, the project `env` with one throwaway value per `${secret:NAME}`, joined to the services' network; `resources.memory` as `--memory` and `--memory-swap`; each `workstation.cache` folder mounted from `.exradius-cache/` next to `exradius.yaml` |
-| Clean up | removes the containers, the network and the temporary folders (`--keep` keeps the folders); built images and `.exradius-cache/` stay |
+| Start service *name* | in the run's network namespace, as a sidecar of the run's pod: a holder container owns it, with every service name as `127.0.0.1` in its `/etc/hosts`, and each service joins it (`--network container:`), with the operator's capabilities, its `command` and `memory`, and its `ready` check (`command`, `tcp` against the pod's own address, image HEALTHCHECK, or running), 120 s from its start |
+| Setup: *command* | `/bin/sh -c` in the workstation with `--user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges`, generated `/etc/passwd`/`/etc/group` (`runner`, home `/home/runner`), `/work`, home and `/tmp` as writable bind mounts, `HOME=/home/runner`, the project `env` with one throwaway value per `${secret:NAME}`, in the same network namespace (services on `localhost` by name); `resources.memory` as `--memory` and `--memory-swap`; each `workstation.cache` folder mounted from `.exradius-cache/` next to `exradius.yaml` |
+| Clean up | removes the containers and the temporary folders (`--keep` keeps the folders); built images and `.exradius-cache/` stay |
 
 Exit status 0 when every step passed, 1 with the first failing step and its output
 otherwise, 2 for usage errors. `--validate` only reads the file (no Docker),
@@ -95,7 +95,8 @@ streams output, `--help` lists the rest. The skill adds `.exradius-cache/` to th
 repository's `.gitignore`.
 
 Not covered locally: the agent runtime, providers and models, pushes with the repository
-credential, MCP connections and the server's network. A Verify on the server covers those.
+credential, MCP connections and the cluster's network (its policies and, from Exradius's
+next phase, its egress allowlist). A Verify in Exradius covers those.
 
 ## What Exradius needs from a project
 
@@ -116,10 +117,28 @@ The skill's references are the developer documentation for Exradius projects:
 
 | skill (plugin) | writes `exradius.yaml` |
 |---|---|
+| 0.3.0 | version 1, checked the way Exradius 0.2.0 (on Kubernetes) runs it |
 | 0.2.0 | version 1, with `resources`, service `memory` and `command`, `workstation.cache` |
 | 0.1.0 | version 1 |
 
 A change of the file's schema in Exradius is followed by a release of this plugin.
+
+### 0.3.0
+
+For Exradius 0.2.0, which runs each task as a Kubernetes pod (no schema change):
+
+- The check mirrors the run's pod: the services and the setup commands share one network
+  namespace, so services are reached by name on `localhost`, and a `tcp` check connects to
+  the run's own address (a service that listens only on 127.0.0.1 fails it, as in
+  Exradius). Services keep 120 s from their start.
+- The file check refuses a port that two services list, the service name `localhost`, and
+  service names longer than 55 characters, as Exradius does.
+- Images are built with BuildKit, as Exradius does in the cluster; `--classic` builds as a
+  v0.1.0 server did.
+- Memory is placement, not a reservation: a declared size is the pod's request and limit,
+  and a run waits as "waiting for cluster capacity" until a node has room. The check warns
+  when the declared total is more than the Docker host has.
+- Caches live on the project's volume in Exradius; the panel no longer shows their size.
 
 ### 0.2.0
 

@@ -132,7 +132,7 @@ Choices:
 - `ln -s .../python3.14 /usr/local/bin/python3`: the first Verify failed with `python3: not found`; uv's interpreter is not on PATH by itself.
 - `cache: [~/.m2/repository, ~/.cache/uv]`: Maven's local repository and uv's cache are kept between runs, so only the first run downloads. Java finds `~/.m2` because the run's passwd entry makes its `user.home` `/home/runner`; with the image's own `ubuntu` user it would look in `/home/ubuntu`.
 - The setup command seeds the Maven cache once from the image's pre-fetch: `/opt/m2` holds the artifacts at its top level (it was the `maven.repo.local`), so its contents go into `~/.m2/repository`; the marker file skips the copy in later runs. (The earlier `cp -r /opt/m2 ~/.m2` put them in `~/.m2` itself, where Maven does not look.)
-- `resources.memory: 4g`: a Maven build of one service plus the Python tests stay well under it; Exradius reserves it and enforces it as the limit.
+- `resources.memory: 4g`: a Maven build of one service plus the Python tests stay well under it; Exradius places the run where 4 GiB are free and enforces it as the limit.
 - `UV_LINK_MODE: copy`: uv cannot hard-link from the cache folder into a `.venv` in `/work` (separate mounts) and copies anyway; this only silences its warning.
 - `services.postgres` with `pg_isready -h 127.0.0.1`: a TCP check, so readiness is not reported during the image's init-time socket-only server.
 - `env.DATABASE_URL` uses the same `${secret:DB_PASSWORD}` as the service: one store key, consistent on both sides.

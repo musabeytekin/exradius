@@ -6,10 +6,19 @@ Docker CLI alone and no Exradius installed.
 
 Steps, in Verify's order: read and validate exradius.yaml; build the workstation and the
 service images; check the workstation image (glibc, sh, bash, git); put the code
-repositories under /work; start the services on a temporary network and wait until they
-are ready; run every setup command in the workstation under the run's conditions (with
-``resources.memory`` as its memory limit and ``workstation.cache`` mounted from a local cache
-directory that persists between checks); stop and remove everything but the cache. The first failing step is printed with its output.
+repositories under /work; start the services and wait until they are ready; run every setup
+command in the workstation under the run's conditions (with ``resources.memory`` as its
+memory limit and ``workstation.cache`` mounted from a local cache directory that persists
+between checks); stop and remove everything but the cache. The first failing step is
+printed with its output.
+
+Like an Exradius run on Kubernetes, the check is one "pod": a holder container owns the
+network namespace, with every service name mapped to 127.0.0.1 in its /etc/hosts (the pod's
+hostAliases), and the services and the setup commands join it with
+``--network container:<holder>``. Services and the workstation share localhost, a ``tcp``
+check connects to the pod's own address as the kubelet does, and a service has 120 s from
+its start to become ready. The flags mirror the operator's pod builder
+(operator/internal/podspec/podspec.go in the Exradius repository).
 
 Standard library only, Python 3.8 or later. The YAML reader below covers the YAML an
 exradius.yaml uses (block and flow collections, quoted, plain and block scalars,
@@ -582,7 +591,9 @@ FOLDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 IDENTITY_NAME = re.compile(r"^[^<>\x00-\x1f]+$")
 IDENTITY_EMAIL = re.compile(r"^[^@<>\s]+@[^@<>\s]+$")
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]*$")
-RESERVED_SERVICES = ("api", "workstation")
+RESERVED_SERVICES = ("api", "workstation", "localhost")
+MAX_SERVICE_NAME = 55
+"""A service's container in a run is ``service-<name>``, a DNS label of at most 63 characters."""
 MEMORY = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([bkmgBKMG])$")
 """A Docker size string: ``512m``, ``6g`` (docs/run-environment.md §4)."""
 MEMORY_UNITS = {"b": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
@@ -652,8 +663,8 @@ def cache_target(text):
 
 
 def cache_folder(index, entry):
-    """The folder of cache entry ``index`` as the worker names it under
-    ``<data_dir>/caches/<slug>/`` (``worker/caches.py`` ``sanitise``):
+    """The folder of cache entry ``index`` as the worker names it, ``caches/<name>`` on the
+    project's volume (``worker/caches.py`` ``cache_specs``):
     ``~/.local/share/pnpm/store`` -> ``0-local_share_pnpm_store``."""
     text = entry[1:] if entry.startswith("~") else entry
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-")
@@ -989,10 +1000,13 @@ def validate(raw, config_dir="", lookup=None):
         if not isinstance(services, dict):
             v.err(("services",), "must be a mapping")
             services = {}
+        service_ports = {}
         for name, service in services.items():
             p = ("services", name)
-            if not isinstance(name, str) or not NAME.match(name) or len(name) > 63:
+            if not isinstance(name, str) or not NAME.match(name):
                 v.err(p, "service names must match %s" % NAME.pattern)
+            elif len(name) > MAX_SERVICE_NAME:
+                v.err(p, "service names are at most %d characters" % MAX_SERVICE_NAME)
             elif name in RESERVED_SERVICES or name.startswith("exradius"):
                 v.err(p, "the name %r is reserved" % name)
             elif name in folders:
@@ -1011,6 +1025,12 @@ def validate(raw, config_dir="", lookup=None):
                     ports = [x for x in (v.port(p + ("ports", i), x) for i, x in enumerate(service["ports"])) if x]
                     if len(set(ports)) != len(ports):
                         v.err(p + ("ports",), "ports must be unique")
+                    for port in dict.fromkeys(ports):
+                        owner = service_ports.get(port)
+                        if owner is not None and owner != name:
+                            v.err(p + ("ports",), "%d is also a port of service %s; services share the run's "
+                                  "localhost, so each port is one service's" % (port, owner))
+                        service_ports.setdefault(port, name)
             item["ports"] = ports
             item["memory"] = memory(p + ("memory",), service["memory"]) if service.get("memory") is not None else None
             item["command"] = None
@@ -1140,8 +1160,10 @@ def validate(raw, config_dir="", lookup=None):
 # Docker: the run's conditions
 # ---------------------------------------------------------------------------------------
 #
-# These flags mirror backend/exradius/worker/containers.py in the Exradius repository
-# (ContainerManager._create, _start_service, _wait_ready). Change both together.
+# These flags mirror the run pod the Exradius operator builds (operator/internal/podspec/
+# podspec.go in the Exradius repository: the workstation's and setup's security context and
+# mounts, the services' sidecars, the shared network namespace) and its readiness rules
+# (operator/internal/status/status.go). Change both together.
 
 RUN_UID, RUN_GID = 1000, 1000
 WORK_DIR = "/work"
@@ -1241,18 +1263,6 @@ def tail(text, lines=60):
     return "... (%d lines above)\n" % (len(rows) - lines) + "\n".join(rows[-lines:])
 
 
-def listening_ports(proc_net):
-    ports = set()
-    for line in proc_net.splitlines():
-        fields = line.split()
-        if len(fields) > 3 and fields[3] == "0A" and ":" in fields[1]:
-            try:
-                ports.add(int(fields[1].rsplit(":", 1)[1], 16))
-            except ValueError:
-                continue
-    return ports
-
-
 class StepFailed(Exception):
     def __init__(self, summary, output=""):
         super().__init__(summary)
@@ -1323,7 +1333,8 @@ class Check(object):
         self.steps = []  # (name, state, seconds, summary)
         self.failure = None  # (name, summary, output)
         self.root = None
-        self.network = None
+        self.pod = None  # the container that holds the shared network namespace
+        self.pod_ip = None
         self.secrets = {}
         self.log = None
         self.log_path = None
@@ -1408,8 +1419,8 @@ class Check(object):
             self.step("Setup: %s" % command, lambda c=command: self.setup(c))
 
     def check_budget(self):
-        """Exradius's default memory budget is the Docker host's memory minus 1 GiB; a run
-        that declares more fails Verify's "Reserve memory" step there."""
+        """Exradius places a run's pod on a node whose free memory fits the declared sizes
+        (requests); a pod larger than every node waits as "waiting for cluster capacity"."""
         cfg = self.config
         declared = [cfg.memory] + [s["memory"] for s in cfg.services.values()]
         reservation = sum(memory_bytes(m) for m in declared if m)
@@ -1417,13 +1428,13 @@ class Check(object):
             return
         code, out = run(["docker", "info", "--format", "{{.MemTotal}}"])
         try:
-            budget = int(out.strip()) - 1024 ** 3
+            total = int(out.strip())
         except ValueError:
             return
-        if reservation > budget:
-            self.say("      warning: the declared memory (%.1f GiB in all) is more than this Docker host's memory "
-                     "minus 1 GiB (%.1f GiB), Exradius's default budget: on a server this size Verify fails at "
-                     "\"Reserve memory\"" % (reservation / 1024 ** 3, budget / 1024 ** 3))
+        if reservation > total:
+            self.say("      warning: the declared memory (%.1f GiB in all) is more than this Docker host has "
+                     "(%.1f GiB): a cluster node needs at least that much free, or the run waits as \"waiting "
+                     "for cluster capacity\"" % (reservation / 1024 ** 3, total / 1024 ** 3))
 
     def report(self):
         self.say("")
@@ -1433,8 +1444,8 @@ class Check(object):
         elif self.failure is None:
             self.say("RESULT: passed. The setup commands ran under the run's conditions.")
             if not self.args.validate:
-                self.say("Not covered locally: the Exradius runtime, providers, pushes, the server's CPU "
-                         "architecture and its network.")
+                self.say("Not covered locally: the Exradius runtime, providers, pushes, the cluster's CPU "
+                         "architecture, and its network and egress allowlist.")
             code = 0
         else:
             name, summary, output = self.failure
@@ -1542,14 +1553,16 @@ class Check(object):
         tag = "exradius-check/%s/%s:latest" % (self.config.slug, name)
         dockerfile = os.path.join(self.repo_root, item["dockerfile"])
         context = os.path.join(self.repo_root, item["context"] or "")
-        # The Exradius worker builds through the Engine API's classic builder (no BuildKit),
-        # so BuildKit-only syntax (RUN --mount, heredocs) fails there; build the same way.
+        # Exradius builds with rootless BuildKit in the cluster (since 0.2.0); --classic builds
+        # as v0.1.0's Docker-based servers did, where BuildKit-only syntax failed.
         cmd = ["docker", "build", "-f", dockerfile, "-t", tag, "--label", "exradius.build=%s" % name]
+        if not self.args.classic:
+            cmd.append("--progress=plain")
         cmd += self.platform_args()
         if self.args.no_cache:
             cmd.append("--no-cache")
         cmd.append(context)
-        env = docker_env({"DOCKER_BUILDKIT": "0"} if not self.args.buildkit else None)
+        env = docker_env({"DOCKER_BUILDKIT": "0" if self.args.classic else "1"})
         code, out = stream(cmd, self.log, self.verbose, env=env)
         if code != 0:
             raise StepFailed("building %s from %s failed (exit %d)%s" % (
@@ -1559,7 +1572,7 @@ class Check(object):
 
     def build_default(self):
         cmd = ["docker", "build", "-t", DEFAULT_IMAGE_TAG] + self.platform_args() + ["-"]
-        code, out = stream(cmd, self.log, self.verbose, env=docker_env({"DOCKER_BUILDKIT": "0"}),
+        code, out = stream(cmd, self.log, self.verbose, env=docker_env({"DOCKER_BUILDKIT": "0" if self.args.classic else "1"}),
                            input_text=DEFAULT_IMAGE_DOCKERFILE)
         if code != 0:
             raise StepFailed("building the default workstation stand-in failed (exit %d)" % code, out)
@@ -1603,7 +1616,7 @@ class Check(object):
 
     def cache_mounts(self):
         """``workstation.cache``: one folder per entry under the local cache directory,
-        shared by every check of this config (on the server: <data_dir>/caches/<slug>/)."""
+        shared by every check of this config (in Exradius: the project volume's caches/)."""
         mounts = []
         for index, entry in enumerate(self.config.workstation["cache"]):
             source = os.path.join(self.cache_dir, cache_folder(index, entry["path"]))
@@ -1765,19 +1778,37 @@ class Check(object):
         env.update({k: SECRET_REF.sub(lambda m: self.secrets[m.group(1)], v) for k, v in self.config.env.items()})
         return env
 
+    def start_pod(self):
+        """The holder of the run's network namespace, as a pod's: a container of the
+        workstation image that only sleeps, with every service name as 127.0.0.1 in its
+        /etc/hosts (the pod's hostAliases). Services and setup containers join it."""
+        if self.pod is not None:
+            return
+        container = "exradius-check-%s-pod" % self.id
+        cmd = ["docker", "run", "-d", "--name", container, "--label", self.label, "--user", "%d:%d" % (RUN_UID, RUN_GID),
+               "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"] + self.platform_args()
+        for name in self.config.services:
+            cmd += ["--add-host", "%s:127.0.0.1" % name]
+        cmd += ["--entrypoint", "/bin/sh", self.images["workstation"], "-c",
+                'trap "exit 0" TERM INT; while :; do sleep 3600 & wait $!; done']
+        code, out = run(cmd)
+        if code != 0:
+            raise StepFailed("could not start the container that holds the run's network", out)
+        self.pod = container
+        code, out = run(["docker", "inspect", "--format",
+                         "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", container])
+        addresses = out.split()
+        self.pod_ip = addresses[0] if code == 0 and addresses else "127.0.0.1"
+
     def start_service(self, name):
         service = self.config.services[name]
         image = self.images[name]
-        if self.network is None:
-            self.network = "exradius-check-%s" % self.id
-            code, out = run(["docker", "network", "create", "--driver", "bridge", "--label", self.label, self.network])
-            if code != 0:
-                self.network = None
-                raise StepFailed("could not create the services network", out)
+        self.start_pod()
         env = self.service_env(service)
         container = "exradius-check-%s-%s" % (self.id, name)
-        cmd = ["docker", "run", "-d", "--name", container, "--hostname", name, "--network", self.network,
-               "--network-alias", name, "--cap-drop", "ALL"]
+        # A run's service is a sidecar of its pod (operator: podspec.service): its image's
+        # user and entrypoint, a writable root, these capabilities and nothing else.
+        cmd = ["docker", "run", "-d", "--name", container, "--network", "container:%s" % self.pod, "--cap-drop", "ALL"]
         for cap in SERVICE_CAPS:
             cmd += ["--cap-add", cap]
         cmd += ["--security-opt", "no-new-privileges", "--label", self.label] + self.platform_args()
@@ -1793,7 +1824,7 @@ class Check(object):
         started = time.time()
         ready = service["ready"] or {}
         if "tcp" in ready:
-            check = "port %d listening" % ready["tcp"]
+            check = "port %d" % ready["tcp"]
         elif "command" in ready:
             check = "command " + " ".join(ready["command"])
         else:
@@ -1814,17 +1845,20 @@ class Check(object):
                 state = {}
             if state.get("Status") in ("exited", "dead") or (state and not state.get("Running", True)):
                 if state.get("ExitCode") == KILLED and service["memory"]:
-                    # As the worker (containers.py _wait_ready): exit 137 under a declared limit.
+                    # As the worker (run_objects.service_failure): exit 137 under a declared limit.
                     raise StepFailed("service %s (%s) exceeded its declared memory (%s): exited with code 137 "
                                      "before it was ready" % (name, image, service["memory"]),
                                      self.service_logs(container))
                 raise StepFailed("service %s (%s) exited with code %s before it was ready"
                                  % (name, image, state.get("ExitCode")), self.service_logs(container))
             if "tcp" in ready:
-                code, out = run(["docker", "exec", container, "cat", "/proc/net/tcp", "/proc/net/tcp6"])
-                if ready["tcp"] in listening_ports(out):
+                # As the kubelet's tcpSocket probe: a connection to the pod's own address, so a
+                # service that listens only on 127.0.0.1 never passes (use a ready command).
+                code, out = run(["docker", "exec", self.pod, "bash", "-c",
+                                 "exec 3<>/dev/tcp/%s/%d" % (self.pod_ip, ready["tcp"])], timeout=5)
+                if code == 0:
                     break
-                last = "" if code == 0 else " (last check: exit %d: %s)" % (code, out.strip()[:200])
+                last = " (last check: no connection to %s:%d)" % (self.pod_ip, ready["tcp"])
             elif "command" in ready:
                 code, out = run(["docker", "exec", container] + list(ready["command"]))
                 if code == 0:
@@ -1838,12 +1872,17 @@ class Check(object):
             elif time.time() - started >= SERVICE_RUNNING_GRACE:
                 break
             if time.time() - started >= timeout:
-                raise StepFailed("service %s (%s) did not become ready within %ds waiting for %s%s"
-                                 % (name, image, timeout, check, last), self.service_logs(container))
+                hint = ""
+                if "tcp" in ready:
+                    hint = ("\nA tcp check connects to the run's own address, not 127.0.0.1: a service that listens "
+                            "only on 127.0.0.1 needs a ready command instead.")
+                raise StepFailed("service %s (%s) did not become ready within %ds waiting for %s%s%s"
+                                 % (name, image, timeout, check, last, hint), self.service_logs(container))
             time.sleep(SERVICE_POLL_INTERVAL)
         extra = "".join([", memory %s" % service["memory"] if service["memory"] else "",
                          ", command %s" % " ".join(service["command"])[:80] if service["command"] else ""])
-        return "%s ready in %.1fs (%s), reachable as %s%s" % (image, time.time() - started, check, name, extra)
+        return "%s ready in %.1fs (%s), reachable as %s on localhost%s" % (image, time.time() - started, check, name,
+                                                                            extra)
 
     def service_logs(self, container):
         code, out = run(["docker", "logs", "--tail", "40", container])
@@ -1856,8 +1895,8 @@ class Check(object):
         env.update(GIT_ENV)
         container = "exradius-check-%s-setup-%s" % (self.id, _random.token_hex(3))
         cmd = ["docker", "run", "--name", container] + self.run_flags(self.live_mounts) + self.platform_args()
-        if self.network:
-            cmd += ["--network", self.network]
+        if self.pod:
+            cmd += ["--network", "container:%s" % self.pod]
         for key, value in env.items():
             # Explicit values (throwaway secrets, the project env): passing them through the
             # docker CLI's own environment would also change its HOME and PATH.
@@ -1887,8 +1926,6 @@ class Check(object):
         ids = run(["docker", "ps", "-aq", "--filter", "label=" + self.label])[1].split()
         if ids:
             run(["docker", "rm", "-f", "-v"] + ids)
-        if self.network:
-            run(["docker", "network", "rm", self.network])
         if self.root and os.path.isdir(self.root):
             if self.args.keep:
                 self.say("DONE  Clean up: kept %s (work, home, tmp) as asked" % self.root)
@@ -1908,8 +1945,6 @@ class Check(object):
         removed = []
         if ids:
             removed.append("%d container%s" % (len(ids), "" if len(ids) == 1 else "s"))
-        if self.network:
-            removed.append("network %s" % self.network)
         if self.root:
             removed.append("the temporary folder")
         if removed:
@@ -1917,7 +1952,7 @@ class Check(object):
 
 
 CACHE_DIR_NAME = ".exradius-cache"
-"""The local stand-in for <data_dir>/caches/<slug>/, next to exradius.yaml (git-ignored)."""
+"""The local stand-in for the project volume's caches/, next to exradius.yaml (git-ignored)."""
 
 
 def memory_flags(memory):
@@ -1939,12 +1974,25 @@ def cache_summary(cache_dir, entries):
     return ", ".join(parts)
 
 
+BUILDKIT_STEP = re.compile(r"^#\d+ \[[^\]]*\] ((?:RUN|COPY|ADD)\s.*)$")
+BUILDKIT_PREFIX = re.compile(r"^#\d+ (?:\d+\.\d+ )?")
+
+
 def failed_instruction(output):
-    """The Dockerfile step that failed and its first error line, from a classic build log."""
+    """The Dockerfile step that failed and its first error line, from a BuildKit (plain
+    progress) or a classic build log."""
     step = None
     for line in output.splitlines():
         if line.startswith("Step ") and "/" in line.split(":")[0]:
             step = line.strip()
+        elif BUILDKIT_STEP.match(line.strip()):
+            step = line.strip()
+    if step and step.startswith("#"):
+        lines = output.splitlines()
+        after = [BUILDKIT_PREFIX.sub("", l.strip()) for l in lines[[i for i, l in enumerate(lines) if l.strip() == step][-1] + 1:]]
+        error = next((l for l in after if any(w in l.lower() for w in ("error", "not found", "failed", "denied",
+                                                                     "unable", "no such", "e: ", "cannot"))), None)
+        return ":\n%s%s" % (BUILDKIT_STEP.match(step).group(1), "\n" + error if error else "")
     error = None
     lines = output.splitlines()
     if step:
@@ -1989,8 +2037,9 @@ def parse_args(argv):
     parser.add_argument("--platform", help="build and run for this platform, e.g. linux/amd64 (the server's)")
     parser.add_argument("--pull", action="store_true", help="pull images named with image: even when present locally")
     parser.add_argument("--no-cache", action="store_true", help="build without the Docker layer cache")
-    parser.add_argument("--buildkit", action="store_true",
-                        help="build with BuildKit (Exradius builds without it; use only to compare)")
+    parser.add_argument("--classic", action="store_true",
+                        help="build with Docker's classic builder, as v0.1.0 (Docker-based) Exradius servers do")
+    parser.add_argument("--buildkit", action="store_true", help=argparse.SUPPRESS)  # the default since 0.3.0
     parser.add_argument("--keep", action="store_true", help="keep the temporary work, home and tmp folders")
     parser.add_argument("--cache-dir", metavar="DIR",
                         help="where workstation.cache folders live between checks (default: .exradius-cache "
