@@ -95,8 +95,11 @@ The schema is strict pydantic with `extra="forbid"` in `schemas/project_config.p
   the API caches the latest snapshot on `projects.snapshot` for the panel only.
 - The worker never trusts that cache: intake and `preparing` read the file afresh and
   record `runs.config_commit`. Tasks for a project with errors or missing keys are rejected
-  with the reason. `capabilities.py` says what this version cannot run yet (a `dockerfile`,
-  `services`); that is the health reason too.
+  with the reason. `capabilities.py` says what this version cannot run yet (`services`);
+  that is the health reason too.
+- `worker/builds.py` turns each Dockerfile into a `Build` object (create-if-absent, tag by
+  tree hash, context tar in the object store, served by `/internal/builds/{id}/context`)
+  and waits on it in `preparing` and in Verify's "Build workstation" step.
 - `resolve.py` turns the config into run inputs; secrets are decrypted only there, when the
   Run and its per-run Secret are created. Everything shown to the panel, the agent's environment section, events and logs
   uses `$NAME` placeholders.
@@ -144,13 +147,15 @@ The schema is strict pydantic with `extra="forbid"` in `schemas/project_config.p
   names and the publisher. `git.py`: git helpers shared by the api, worker and runner.
 - `cli.py`: the `exradius` CLI (publish-task, answer, events, generate-key, migrate).
 
-**Operator `operator/`.** Go, controller-runtime. `api/v1alpha1` is the `Run` CRD
-(`exradius.dev`); `internal/podspec` builds the PVC and the pod from a Run (prepare,
-clone-<n>, setup-<n>, the files sidecar, the workstation with the bundle as an image volume)
-and writes the security context itself; `internal/status` maps the pod onto Run status
-(steps, log tails, pull failures, cancel, pod lost, podGeneration); `internal/controller`
-reconciles. The Run spec is the contract with `worker/run_objects.py`: change both and the
-CRD in one commit.
+**Operator `operator/`.** Go, controller-runtime. `api/v1alpha1` holds the `Run` and
+`Build` CRDs (`exradius.dev`); `internal/podspec` builds the PVC and the pod from a Run
+(prepare, clone-<n>, setup-<n>, the files sidecar, the workstation with the bundle as an
+image volume) and the build pod from a Build (`build.go`: context fetch, rootless BuildKit),
+and writes the security context itself; `internal/status` maps pods onto Run and Build
+status (steps, log tails, pull failures, cancel, pod lost, podGeneration, digest);
+`internal/controller` reconciles both. The Run spec is the contract with
+`worker/run_objects.py`, the Build spec with `worker/builds.py`: change both and the CRD in
+one commit.
 
 **Prompt layout (architecture §13, prompt.py).** System prompt = Claude Code's preset, then
 the fixed Exradius operating rules, then a generated `# Your environment` section from the
@@ -170,7 +175,8 @@ pod's security: uid 1000, `/etc/passwd` from the `exradius-run-identity` ConfigM
 home `/home/runner`), read-only root, all capabilities dropped, no ServiceAccount token, no
 service links. `/work`, the home, `/tmp` and the state directory are subPaths of one
 workspace PVC per Run. Runs live in the `exradius-runs` namespace (Pod Security `baseline`),
-the stack in `exradius` (`restricted`). NetworkPolicy and the egress proxy come in phase 4.
+the stack in `exradius` (`restricted`), builds in `exradius-builds` (`privileged`: rootless
+BuildKit needs seccomp `Unconfined`; kubernetes.md §24). NetworkPolicy and the egress proxy come in phase 4.
 
 **Frontend `frontend/src/`.** React 19 + TypeScript, TanStack Router (`router.tsx`) and
 Query (`lib/queries.ts`), Tailwind 4, Radix primitives, `lib/api.ts` as the only API client.

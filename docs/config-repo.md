@@ -198,16 +198,28 @@ an error on that project until resolved (the row keeps the old slug).
 
 ## 4. Builds
 
-`workstation.dockerfile` and `services.*.dockerfile` are built by the worker with the
-Docker SDK from a checkout of the config repository at the run's commit, context limited
+`workstation.dockerfile` and `services.*.dockerfile` are built in the cluster
+(`docs/kubernetes.md` §12) from the config repository at the run's commit, context limited
 to the declared directory. Tag: `exradius/<project slug>/<workstation|service name>:<hash>`
-where `hash` is the git tree hash of the context directory at that commit
-(`git rev-parse <commit>:<context path>`), so unchanged contexts never rebuild.
-Builds are serialised per project with a file lock under the data directory and
-recorded in `image_builds` (`project_id`, `name`, `tree_hash`, `image`, `state`,
-`started_at`, `ended_at`, `log_tail`). Verify builds every image first ("Build
-workstation", "Build service postgres") and shows the log tail; a run whose build fails
-ends `failed` in `preparing` with the log tail in the error.
+under the registry prefix (`builds.registry`), where `hash` is the first 12 hex digits of
+the git tree hash of the context directory at that commit (`git rev-parse <commit>:<context
+path>`), or of `<tree hash>:<Dockerfile blob>` when the Dockerfile lies outside the context,
+so an unchanged context never rebuilds and editing that Dockerfile does.
+
+The worker turns each tag into a `Build` object, `build-<project>-<name>-<hash>`, created if
+absent: concurrent runs and Verify wait on the same one. The operator runs it in a
+single-use rootless BuildKit pod, which fetches the context (the `git archive` the worker
+stored in the object store) from the api's internal port with the Build's token and pushes
+the image and its layer cache (`<image>:buildcache`) to the registry. A succeeded Build means
+the image exists; a failed one is replaced by the next run or Verify that needs the image.
+Each Build is recorded in `image_builds` (`project_id`, `name`, `tree_hash`, `image`,
+`state`, `started_at`, `ended_at`, `log_tail`, `build_object`, `digest`, `context_key`).
+
+Verify builds every image first ("Build workstation", "Build service postgres") and shows
+the build's log as it grows, or says the image is up to date; a run waits for its images in
+`preparing` ("building images") and a run whose build fails ends `failed` in `preparing`
+with the log tail in the error. Services stay unavailable until phase 3, so only workstation
+Dockerfiles are built for now.
 
 Images named with `image:` are pulled as today.
 

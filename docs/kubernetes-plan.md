@@ -262,8 +262,10 @@ in pods; the "Exradius's own egress proxy" entry in `ideas.md`.
 
 **Scope**
 
-- `runs.userNamespaces` (`hostUsers: false`) for run pods, and for build pods if rootless
-  BuildKit then runs at `baseline`.
+- `runs.userNamespaces` (`hostUsers: false`) for run pods. Build pods: phase 2 found that
+  `hostUsers: false` does not let rootless BuildKit run with seccomp `RuntimeDefault`, and
+  that a node-installed `Localhost` seccomp profile does let it run at `baseline`
+  (`kubernetes.md` §24); write and install a tailored profile, or keep `privileged`.
 - `runs.runtimeClassName`, and `make dev-gvisor` (runsc in the kind node, a `gvisor`
   RuntimeClass).
 - Pod Security review of all three namespaces.

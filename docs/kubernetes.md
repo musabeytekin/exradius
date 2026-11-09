@@ -1,6 +1,7 @@
 # Exradius on Kubernetes
 
-Status: agreed design, 2026-11-08; details settled by phase 1 folded in the same day (§23). Supersedes the Docker-based execution of `architecture.md`
+Status: agreed design, 2026-11-08; details settled by phase 1 folded in the same day (§23),
+and by phase 2 on 2026-11-09 (§24). Supersedes the Docker-based execution of `architecture.md`
 (§3, §5, §9, §10, the run-container parts of §12), `runtime-bundles.md` §2.2, the services
 lifecycle and networks of `environment-and-services.md` §2, and the memory budget and cache
 mounts of `run-environment.md` §4 and §5. The phases are in `kubernetes-plan.md`. The last
@@ -67,11 +68,11 @@ reset.
 | Component | Kind | Holds | May do in Kubernetes | May not |
 |---|---|---|---|---|
 | `api` | Deployment, `exradius-backend` image | master key, Postgres | create TokenReviews (to authenticate the egress proxy) | touch Runs, pods or Secrets |
-| `worker` | Deployment, same image | master key, Postgres, broker | in `exradius-runs`: create, patch, delete and watch `Run`; create, patch and delete Secrets (no get or list); list and delete PVCs. In `exradius-builds`: create, watch and delete `Build`. Read the operator's Lease | create pods; read Secrets |
-| `operator` | Deployment, Go (controller-runtime) | nothing secret | in `exradius-runs` and `exradius-builds`: create, watch and delete pods and PVCs; read `pods/log`; update `runs/status` and `builds/status`; write Events; its leader-election Lease | read Secrets; reach Postgres or the broker |
+| `worker` | Deployment, same image | master key, Postgres, broker | in `exradius-runs`: create, patch, delete and watch `Run`; create, patch and delete Secrets (no get or list); list and delete PVCs. In `exradius-builds`: create, get, watch and delete `Build`; create, patch and delete Secrets (the Build's token). Read the operator's Lease | create pods; read Secrets |
+| `operator` | Deployment, Go (controller-runtime) | nothing secret | in `exradius-runs`: create, watch and delete pods and PVCs; in `exradius-builds`: create, watch and delete pods. In both: read `pods/log`; update `runs/status` or `builds/status`; write Events. Its leader-election Lease | read Secrets; reach Postgres or the broker |
 | `egress` | Deployment, Go | decrypted credentials of active runs, in memory only | list and watch pods in `exradius-runs` | anything else |
 | run pod | Pod per Run | the per-run Secret (§10) | nothing: `automountServiceAccountToken: false`, and NetworkPolicy blocks the API server | reach anything but the proxy, the api's internal port and DNS |
-| build pod | Pod per Build | registry push identity | nothing | |
+| build pod | Pod per Build | its Build's token (for the context); registry push identity from phase 6 | nothing: no ServiceAccount token | |
 | `frontend` | Deployment, nginx | nothing | nothing | |
 
 - **Why three Python and Go parts.** The worker keeps today's job: intake, the state machine,
@@ -94,7 +95,7 @@ reset.
 |---|---|---|
 | `exradius` | api, worker, frontend, operator, egress; locally also Postgres, RabbitMQ and SeaweedFS | `restricted` |
 | `exradius-runs` | `Run` objects, run pods, per-run Secrets, workspace PVCs, project volumes | `baseline` enforced, `restricted` warned (services run as their image's user, often root) |
-| `exradius-builds` | `Build` objects, build pods | `privileged` until phase 5 shows that rootless BuildKit needs less (§12) |
+| `exradius-builds` | `Build` objects, build pods, their token Secrets | `privileged`: rootless BuildKit needs seccomp `Unconfined`, which `baseline` refuses (checked in phase 2, §24); phase 5 may try a `Localhost` profile |
 
 The names come from values. One install per cluster is the supported shape.
 
@@ -604,7 +605,7 @@ does not; it was checked on 2026-11-08.
 
 ## 12. Image builds and the registry
 
-Builds become `Build` objects (`exradius.dev/v1alpha1`) run by single-use rootless BuildKit pods
+Builds are `Build` objects (`exradius.dev/v1alpha1`) run by single-use rootless BuildKit pods
 in `exradius-builds`.
 
 - **Tags are unchanged:** `exradius/<project>/<name>:<first 12 hex digits of the tree hash>`, or
@@ -612,35 +613,99 @@ in `exradius-builds`.
   registry prefix from values (`builds.registry`). The worker computes them from its
   config-repository mirror, as `builds.py` does.
 - **The object name** is `build-<project>-<name>-<hash>`. The worker creates it if absent, and
-  concurrent runs wait on the same object. This replaces the per-project file lock. A
-  succeeded Build means the image exists. Builds are kept, as `image_builds` rows are;
-  deleting one forces a rebuild. Registry garbage collection is out of scope, as cleaning old
-  tags is today.
+  concurrent runs wait on the same object: creating it is atomic, which replaces the
+  per-project file lock. A succeeded Build means the image exists. Builds are kept, as
+  `image_builds` rows are; deleting one forces a rebuild. A failed Build is replaced by the
+  next run or Verify that needs the image (deleted with a `uid` precondition, so a Build
+  another caller just made is never deleted), because a failure may be transient; runs
+  waiting on it when it failed all fail with its log. Registry garbage collection is out of
+  scope, as cleaning old tags is today.
 - **The context comes from the api, not from git.** The worker stores the `git archive` tar it
-  builds today in the object store. The build pod's init container downloads it from
-  `/internal/builds/{id}/context`. Build pods therefore need no config-repository credential
-  and no git.
-- **The build:**
-  - `buildctl-daemonless.sh` with the Dockerfile frontend (`moby/buildkit:<pinned>-rootless`,
-    with `--oci-worker-no-process-sandbox`; one build per pod, so `RUN` steps need no sandbox
-    from the builder);
-  - `--output type=image,push=true`;
-  - layer cache in the registry: `--export-cache` and `--import-cache` at
-    `<image>:buildcache`, `mode=max`;
-  - status (phase, times, digest, log tail of 4000 characters) goes into Build status and then
-    into `image_builds`.
-- **Pod security.** Rootless BuildKit needs seccomp and AppArmor `Unconfined`, which is why
-  `exradius-builds` starts at `privileged`. Phase 5 checks whether user namespaces let it drop
-  to `baseline`. kaniko is not an option: it was archived in June 2025.
+  builds today in the object store (`builds/<image build id>/context.tar`). The build pod's
+  init container `context` downloads it from `/internal/builds/{id}/context` with the
+  Build's token. Build pods therefore need no config-repository credential and no git.
+- **Order of creation.** The worker creates the Build, then (only if it created it) stores
+  the context, the `image_builds` row with the token's hash, and last the Secret with the
+  token, owned by the Build. The pod cannot start before its Secret exists
+  (`CreateContainerConfigError`, which the operator tolerates for 120 s as for runs), so a
+  worker that dies in between leaves a Build that fails and is replaced.
+- **The Build resource:**
+
+  ```yaml
+  apiVersion: exradius.dev/v1alpha1
+  kind: Build
+  metadata:
+    name: build-saleor-workstation-1a2b3c4d5e6f
+    namespace: exradius-builds
+    labels: {exradius.dev/project: saleor, exradius.dev/image: workstation, exradius.dev/purpose: build}
+  spec:
+    id: <image build uuid>              # the internal API path of the context
+    project: saleor
+    name: workstation                    # or the service's name
+    image: kind-registry:5000/exradius/saleor/workstation:1a2b3c4d5e6f
+    cache: kind-registry:5000/exradius/saleor/workstation:buildcache   # absent: no cache
+    dockerfile: docker/Dockerfile        # inside the context (.exradius.Dockerfile when outside)
+    secretName: build-saleor-workstation-1a2b3c4d5e6f                  # key token
+  status:
+    phase: Succeeded                     # Pending | Running | Succeeded | Failed
+    reason: ""                           # BuildFailed, ContextFailed, OOMKilled, ImagePullFailed, PodLost, ...
+    message: ""                          # one line: "the build exited with 1"
+    podName: build-saleor-workstation-1a2b3c4d5e6f
+    startedAt: ...
+    finishedAt: ...
+    digest: sha256:...                   # the pushed manifest
+    log: "..."                           # last 4000 characters, refreshed every 5 s while it runs
+  ```
+
+  Printer columns: project, name, phase, age (and the image with `-o wide`).
+- **The build pod** (`operator/internal/podspec/build.go`), named like its Build and owned
+  by it:
+  - init `context`: the builder image, `wget` with the token in its environment, `tar -x`
+    into an `emptyDir` at `/workspace/context`; restricted-shaped security context;
+  - `build`: `buildctl-daemonless.sh build --frontend dockerfile.v0`, `--opt
+    filename=<dockerfile>`, `--output type=image,name=<image>,push=true`, and with a cache
+    `--export-cache type=registry,ref=<cache>,mode=max` and `--import-cache`.
+    `BUILDKITD_FLAGS=--oci-worker-no-process-sandbox` (one build per pod, so `RUN` steps
+    need no sandbox from the builder) and `--config` for the `exradius-buildkitd`
+    ConfigMap, which lists the registries reached over HTTP (`builds.insecureRegistries`).
+    Read-only root with `emptyDir`s for BuildKit's state, `/run/user/1000` and `/tmp`;
+    `TMPDIR=/tmp`, `DOCKER_CONFIG=/tmp/docker`;
+  - the digest: buildctl's `--metadata-file` is copied into the termination message (a few
+    hundred bytes, which the 12 KiB budget allows) and the operator reads
+    `containerimage.digest` from it;
+  - no ServiceAccount token, no service links, `restartPolicy: Never`, `runAsUser` 1000
+    (the image's user), resources from `builds.resources`, the runs' `nodeSelector` and
+    `tolerations`.
+- **Status and the pod's end.** The operator maps the pod onto status like a Run's (§5):
+  scheduling, image pulls (three attempts), config errors, then the outcome of `context`
+  and `build`. Once a final status (with the log) is stored, it deletes the pod: a
+  succeeded Build costs nothing but the object. A pod deleted by hand while building fails
+  the Build (`PodLost`). Status-only updates do not reconcile a Build again (its log
+  changes), so the controller requeues itself every 5 s while a build runs.
+- **Waiting.** The worker polls the Build every 2 s. A run waits in `preparing` with
+  `runs.waiting_for = 'build'` ("building images" on the task row); a cancel stops its wait
+  and the Build goes on for whoever else needs it. Verify's "Build workstation" step copies
+  the log as it grows and ends with `built <image> in <s>s (<digest>)`, or says `<image> is
+  up to date (context unchanged)` without a build pod. Each Build's outcome goes into its
+  `image_builds` row (state, digest, log tail); the token's hash is cleared and its Secret
+  deleted.
+- **Pod security.** Rootless BuildKit creates a user namespace (rootlesskit), which seccomp
+  `RuntimeDefault` refuses, and maps subordinate ids with the setuid `newuidmap`. So the
+  `build` container has seccomp and AppArmor `Unconfined`, keeps the runtime's default
+  capabilities (they bound what root has inside that namespace, which `apt-get` needs) and
+  no `allowPrivilegeEscalation: false`; `exradius-builds` is `privileged`. What was checked
+  is in §24. kaniko is not an option: it was archived in June 2025.
 
 | | Local (kind) | EKS | GKE | AKS |
 |---|---|---|---|---|
 | registry | `registry:2` container `kind-registry` on kind's Docker network: `localhost:5001` from the host, `kind-registry:5000` from pods and nodes (containerd `hosts.toml`) | ECR | Artifact Registry | ACR |
-| push identity of build pods | none (HTTP) | EKS Pod Identity + `docker-credential-ecr-login` | Workload Identity + `docker-credential-gcr` | Workload Identity + an ACR token helper |
+| push identity of build pods | none (HTTP, `builds.insecureRegistries`) | EKS Pod Identity + `docker-credential-ecr-login` | Workload Identity + `docker-credential-gcr` | Workload Identity + an ACR token helper |
 | pull by nodes | containerd mirror config | node role | node service account | kubelet identity with `AcrPull` |
 
-- Exradius's builder image is the rootless BuildKit image plus those credential helpers. Values
-  name the one to use (`builds.credentialHelper`).
+- The builder image is the pinned upstream rootless BuildKit image
+  (`builds.builderImage`, `moby/buildkit:v0.34.1-rootless` by digest). Phase 6 replaces it
+  with an Exradius builder image that adds those credential helpers, and values name the one
+  to use (`builds.credentialHelper`).
 - `image:` references are pulled by the nodes. Private registries named in configs get
   `runs.imagePullSecrets` from values, which replaces the Docker daemon's own login.
 
@@ -762,7 +827,8 @@ runs:
 runtime: {claudeCode: {image: ...}}
 projectDefaultImage: ...
 egress: {upstreamProxy: "", allow: [], caBundle: {configMap: ""}}
-builds: {registry: ..., credentialHelper: none, resources: {}}
+builds: {registry: ..., builderImage: moby/buildkit:<pinned>-rootless, cache: true, insecureRegistries: [],
+         resources: {}, credentialHelper: none}   # credentialHelper: phase 6
 objectStore: {kind: s3, bucket: exradius, s3: {endpoint: ...}, inCluster: {seaweedfs: true}}
 postgres: {existingSecret: ..., inCluster: {cloudnativepg: true, storage: 10Gi}}
 rabbitmq: {existingSecret: ..., inCluster: {operator: true}}
@@ -798,7 +864,8 @@ Terraform (phase 6, `deploy/terraform/<cloud>/`) creates what the values point a
     publishes arm64 builds; whether it works in a kind node on this Mac is phase 5's check.
 - **Tilt** (`Tiltfile` at the root):
   - `tilt up` builds the images (backend, frontend, operator, egress, runtime bundle, project
-    default, builder) and pushes them to `localhost:5001`;
+    default; the builder from phase 6, until then the pinned upstream BuildKit image) and
+    pushes them to `localhost:5001`;
   - installs the chart with `values-local.yaml`;
   - syncs changed Python files into the api and worker pods and restarts the process, with no
     image rebuild;
@@ -1028,3 +1095,54 @@ Details the earlier sections left open or got wrong, decided while building phas
   agent's uid, so the agent can read the run token in `/proc/1/environ`. The token reaches
   only this run's internal API. Phases 4 and 5 should decide whether to pass it as a file
   readable by another uid.
+
+## 24. Settled in phase 2
+
+Details decided while building image builds (2026-11-09). §12 is written to match; this is
+the list.
+
+- **The Build spec** is `id` (the `image_builds` row, the context's path), `project`,
+  `name`, `image`, `cache`, `dockerfile` (its name inside the context) and `secretName`.
+  Status carries `phase`, `reason`, `message`, `podName`, `nodeName`, `startedAt`,
+  `finishedAt`, `digest`, `log`, `conditions`, `pullFailures`, `configErrorSince`. The
+  worker builds both in `worker/builds.py`; the operator's side is `podspec/build.go`,
+  `status/build.go` and `controller/build_controller.go`.
+- **The token** of a Build is a Secret in `exradius-builds` owned by the Build, written by
+  the worker (its RBAC there: Builds create/get/watch/delete, Secrets create/patch/delete).
+  `/internal/builds/{id}/context` accepts it while the row is `running`; the worker clears
+  the hash and deletes the Secret once it records the outcome. `image_builds` gains
+  `build_object`, `digest`, `context_key` and `token_hash` (migration 0007).
+- **A failed Build is retried** by the next caller, not kept as the answer for its tag.
+- **The pod is deleted when the Build ends**, after its status and log are stored.
+- **The operator's cache** is per type: Runs and PVCs in the runs namespace, Builds in the
+  builds namespace, pods in both. A cache that watched every type in both namespaces asked
+  for rights RBAC rightly refuses (found on kind).
+- **Rootless BuildKit in a read-only root** needs `TMPDIR=/tmp` (the image sets it under the
+  home) and `DOCKER_CONFIG` outside the home; buildctl writes its metadata file through a
+  temporary file beside it, so it goes to `/tmp` and is copied into the termination message.
+- **The registry cache works across builds:** a build whose Dockerfile's first `RUN` was
+  unchanged extracted that layer from `<image>:buildcache` instead of running it (14 s
+  became 6 s on kind). The first build of an image logs a failed cache import, which is
+  harmless.
+- **The builder image is upstream's**, pinned by digest in values, until phase 6 needs
+  credential helpers. Tilt does not build one.
+- **`exradius-builds` below `privileged`, checked on kind** (v1.36.4 on Docker Desktop, Mac
+  arm64; `moby/buildkit:v0.34.1-rootless`, `--oci-worker-no-process-sandbox`):
+
+  | Pod Security shape of the build container | Result |
+  |---|---|
+  | seccomp and AppArmor `Unconfined` (needs `privileged`) | builds and pushes |
+  | `baseline`: seccomp `RuntimeDefault` | fails: `[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: operation not permitted` |
+  | `baseline`, `RuntimeDefault`, `hostUsers: false` | the same failure |
+  | `restricted` shape (`allowPrivilegeEscalation: false`, drop `ALL`), `RuntimeDefault`, `hostUsers: false` | the same failure |
+  | `baseline`, seccomp `Localhost` with an allow-all profile on the node | builds and pushes (no AppArmor setting needed on this node) |
+  | `restricted` shape with that `Localhost` profile | fails: `newuidmap: operation not permitted` (no setuid under no_new_privs) |
+  | `baseline`, `Localhost` profile, `hostUsers: false` | fails: `newuidmap: write to uid_map failed` (the image's 65536 subordinate ids do not fit the pod's mapping) |
+
+  So: not below `privileged` with the runtime's default seccomp profile, with or without
+  user namespaces. `baseline` is possible with a node-installed `Localhost` seccomp profile
+  that allows creating user namespaces; phase 5 can write a tailored one (an allow-all
+  profile proves only that seccomp is the one obstacle). `restricted` is not possible with
+  rootless BuildKit.
+- **Diagnosis** reads BuildKit's plain progress (`#10 0.044 /bin/sh: 1: corepack: not
+  found`) without its step and time prefix.

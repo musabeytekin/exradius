@@ -192,8 +192,8 @@ services and runs setup; when that fails, it names the cause.
 
 Exradius runs on Kubernetes (since 0.2.0; [docs/kubernetes.md](docs/kubernetes.md)). The
 same Helm chart installs it on a local kind cluster and, with another values file, on a
-cloud cluster. This version runs projects whose workstation is an image and that have no
-services; Dockerfile workstations and services come in the next phases
+cloud cluster. This version runs projects without services, whose workstation is an image
+or is built from a Dockerfile in the config repository; services come in the next phase
 ([docs/kubernetes-plan.md](docs/kubernetes-plan.md)). v0.1.0 is the last Docker Compose
 version.
 
@@ -326,7 +326,7 @@ backend/exradius/
   schemas/      broker messages, API bodies and the exradius.yaml schema
   messaging/    RabbitMQ topology and publishing
 backend/tests/
-operator/       Go operator: the Run CRD, the pod builder, status mapping, the controller
+operator/       Go operator: the Run and Build CRDs, the pod builders, status mapping, the controllers
 charts/exradius/  the Helm chart
 frontend/src/   the admin panel
 deploy/         Dockerfiles (backend, operator, Claude Code runtime bundle, default project
