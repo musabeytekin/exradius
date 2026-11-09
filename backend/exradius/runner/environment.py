@@ -54,7 +54,10 @@ def isolate(environ: MutableMapping[str, str] | None = None) -> RunnerEnvironmen
     environ = os.environ if environ is None else environ
     runtime_dir = environ.pop(RUNTIME_DIR, None)
     run_token = environ.pop(RUN_TOKEN, None)
-    container = {k: v for k, v in environ.items() if not KUBELET_VARIABLES.match(k)}
+    for name in [k for k in environ if KUBELET_VARIABLES.match(k)]:
+        # From the runner's process too: the SDK starts the CLI with it, overlaid by the copy.
+        environ.pop(name)
+    container = dict(environ)
     for name in INTERPRETER_VARIABLES:
         environ.pop(name, None)
     return RunnerEnvironment(

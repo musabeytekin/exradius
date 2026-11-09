@@ -51,8 +51,10 @@ def test_the_kubelets_api_server_variables_do_not_reach_the_agent():
         "KUBERNETES_PORT_443_TCP": "tcp://10.96.0.1:443", "KUBERNETES_PORT_443_TCP_ADDR": "10.96.0.1",
         "KUBERNETES_PORT_443_TCP_PORT": "443", "KUBERNETES_PORT_443_TCP_PROTO": "tcp",
     }
-    env = isolate({**PROJECT_ENV, **kubelet, "KUBERNETES_NAMESPACE": "the project's own"})
+    environ = {**PROJECT_ENV, **kubelet, "KUBERNETES_NAMESPACE": "the project's own"}
+    env = isolate(environ)
     assert env.container == {**PROJECT_ENV, "KUBERNETES_NAMESPACE": "the project's own"}
+    assert not set(kubelet) & set(environ)  # nor in the runner's process, which the SDK passes on
 
 
 @pytest.fixture
@@ -80,6 +82,8 @@ async def test_agent_environment_is_the_container_environment(fake_bundle, monke
     monkeypatch.setenv("EXRADIUS_RUN_TOKEN", "tok")
     monkeypatch.setenv("EXRADIUS_RUNTIME_DIR", str(bundle))
     monkeypatch.setenv("EXRADIUS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")  # added by the kubelet
+    monkeypatch.setenv("KUBERNETES_PORT_443_TCP", "tcp://10.96.0.1:443")
 
     environment = isolate()  # as the runner does first thing, on the real os.environ
     container = environment.container
@@ -95,6 +99,7 @@ async def test_agent_environment_is_the_container_environment(fake_bundle, monke
         async with asyncio.timeout(20):
             await client.connect()  # the fake CLI exits; it only records its environment
     agent_env = json.loads(record.read_text())
+    assert not [key for key in agent_env if key.startswith("KUBERNETES_")]  # live check, 2026-11-09
 
     def without_sdk(env):
         return {key: value for key, value in env.items() if key not in SDK_OWN}

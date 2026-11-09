@@ -1017,9 +1017,14 @@ Details the earlier sections left open or got wrong, decided while building phas
 - **The kubelet's API server variables.** `enableServiceLinks: false` does not remove
   `KUBERNETES_SERVICE_HOST` and the other `KUBERNETES_SERVICE_*`/`KUBERNETES_PORT*`
   variables: the kubelet adds them to every container (checked on kind). The runner's
-  `isolate()` leaves them out of the agent's environment; setup commands still see them.
+  `isolate()` removes them from its own process and from the agent's environment (the SDK
+  starts the CLI with both); setup commands still see them.
   They give no access: run pods have no ServiceAccount token, and NetworkPolicy blocks the
   API server from phase 4.
 - **Supplementary groups.** containerd gives the run uid the groups the image's own
   `/etc/group` lists for that uid (`sudo`, `adm` on Ubuntu images), before the generated
   `/etc/group` is mounted. `supplementalGroupsPolicy: Strict` (§7.8) prevents that.
+- **Known gap, unchanged from v0.1.0:** the runner is the workstation's PID 1 and runs as the
+  agent's uid, so the agent can read the run token in `/proc/1/environ`. The token reaches
+  only this run's internal API. Phases 4 and 5 should decide whether to pass it as a file
+  readable by another uid.
