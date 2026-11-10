@@ -65,7 +65,7 @@ DB_PASSWORD=
 
 Edit `exradius.yaml` or the Dockerfile and push to `<branch>`. Before pushing, the
 developers check it locally with the `exradius-project` Claude Code skill
-(`musabeytekin/exradius-skill`), whose `check.sh` runs the same steps as Verify with Docker.
+(`skill/` in `musabeytekin/exradius`), whose `check.sh` runs the same steps as Verify with Docker.
 ````
 
 ## Formats and sources for common keys

@@ -109,7 +109,7 @@ The integration token is created in the Exradius panel with the bridge `jira`.
 Python 3.14 with uv; `exradius-bridge-kit`, httpx, Starlette and uvicorn for the webhook
 listener, markdown-it-py. One Docker image, running as an unprivileged user. Until the kit
 has a remote, the image builds with the kit as a named build context:
-`docker build --build-context kit=../exradius-bridge-kit .`
+`docker build --build-context kit=../kit .`
 
 ```
 exradius_jira/

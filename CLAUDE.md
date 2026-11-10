@@ -103,6 +103,15 @@ Publishing a task from a shell: `uv run exradius publish-task --project <slug> -
 (broker from `EXRADIUS_BROKER_URL`, credentials in the `exradius-rabbitmq-default-user`
 Secret). A task id that was already used, even by a failed task, is rejected as a duplicate.
 
+Bridges and the setup skill (each its own Python project; `bridges/jira` depends on `bridges/kit` by path):
+
+```bash
+cd bridges/kit && uv run pytest              # the kit (tests/test_broker.py needs a real RabbitMQ URL)
+cd bridges/jira && uv run pytest             # the Jira bridge; bridges/github likewise
+cd bridges/jira && docker build --build-context kit=../kit -t exradius-jira .
+claude plugin validate . && claude plugin validate skill   # the marketplace (repo root) and the plugin
+```
+
 ## Architecture
 
 **Config-repo model (docs/config-repo.md).** A project is a git repository holding
@@ -253,6 +262,16 @@ Pages: Overview, Projects (detail tabs config / secrets / verify / tasks), Store
 Tasks, Settings. The panel talks to `/api` on the same origin; nginx (in the chart) or the Vite
 proxy (dev) forwards it. Forms offer known values and only ask for free text when the
 information exists nowhere else.
+
+**Bridges and the skill.** `bridges/` holds the integration layer that Exradius itself
+leaves outside its core: `kit/` (the bridge kit library: directory fetch, routing hand-off,
+task publishing, events, bridge status, over the integration API and the broker),
+`jira/` (Jira Cloud on the kit) and `github/` (GitHub issues; written before the kit and
+agent routing, so it still uses agent labels). They speak only the public contracts
+(`docs/integration-api.md`) and import nothing from `backend/`. Their design notes are in
+each one's `docs/`. `skill/` is the setup skill (a Claude Code plugin); the repository
+root's `.claude-plugin/marketplace.json` publishes it, so it installs with
+`claude plugin marketplace add musabeytekin/exradius`.
 
 ## Conventions worth knowing
 

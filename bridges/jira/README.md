@@ -1,7 +1,7 @@
 # exradius-jira
 
 Connects one Jira Cloud site to one [Exradius](https://github.com/musabeytekin/exradius)
-installation, on [exradius-bridge-kit](../exradius-bridge-kit). Assign a Jira issue to the
+installation, on [the bridge kit](../kit). Assign a Jira issue to the
 bot account: Exradius picks the agent, the bot says which one took it, asks the agent's
 questions in comments (mention the bot to answer), posts the result and assigns the issue
 back to its reporter.
@@ -41,5 +41,5 @@ as `exradius-jira-v0`.
 
 ```bash
 uv sync && uv run pytest
-docker build --build-context kit=../exradius-bridge-kit -t exradius-jira .
+docker build --build-context kit=../kit -t exradius-jira .
 ```

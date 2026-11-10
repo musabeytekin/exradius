@@ -181,16 +181,16 @@ The full format is in [docs/config-repo.md](docs/config-repo.md).
 ### Writing the config: the setup skill
 
 Working out a project's toolchain and services is where onboarding takes the most time,
-so it is automated by a Claude Code plugin,
-[exradius-skill](https://github.com/musabeytekin/exradius-skill). Run in the project's
+so it is automated by a Claude Code plugin, the setup skill in [`skill/`](skill/). Run in
+the project's
 checkout, it reads the code, writes `exradius.yaml`, a workstation Dockerfile when a stock
 image is not enough, and a README for the admin. It checks all of it locally with Docker,
 using the same container flags as Exradius, then creates the config repository. Plane was
 set up this way and passed Exradius's Verify on the first try.
 
 ```bash
-claude plugin marketplace add musabeytekin/exradius-skill
-claude plugin install exradius@exradius-skill
+claude plugin marketplace add musabeytekin/exradius
+claude plugin install exradius@exradius
 ```
 
 Then `/exradius:exradius-project` inside Claude Code. In the panel, Verify runs by itself
@@ -344,6 +344,8 @@ cd backend && uv sync && uv run pytest      # 500+ tests: SQLite, a fake Kuberne
 make -C operator test                       # the operator: unit tests and envtest (a real API server)
 cd frontend && npm install && npm run dev   # http://localhost:5173; EXRADIUS_API_URL=http://localhost:8100 for the kind install
 cd frontend && npm run lint && npm test && npm run build
+cd bridges/kit && uv run pytest             # the bridge kit; likewise bridges/jira and bridges/github
+cd bridges/jira && docker build --build-context kit=../kit -t exradius-jira .
 ```
 
 Under `tilt up`, a change to a Python file is synced into the api and restarts it in place;
@@ -376,6 +378,12 @@ frontend/src/   the admin panel
 deploy/         Dockerfiles (backend, operator, Claude Code runtime bundle, default project
                 image) and kind/ (the local cluster)
 Tiltfile        the local developer loop
+bridges/
+  kit/          the bridge kit: the whole task flow for a tracker, as a library
+  jira/         the Jira Cloud bridge, on the kit
+  github/       the GitHub issues bridge (predates the kit and agent routing)
+skill/          the setup skill, a Claude Code plugin; .claude-plugin/ makes this repository
+                its marketplace
 docs/           design notes
 ```
 

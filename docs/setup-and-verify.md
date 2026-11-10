@@ -104,9 +104,11 @@ running verification shows the current step. The list of past verifications stay
 
 ## 2. The setup skill
 
-A Claude Code skill, `exradius-project`, in its own repository
-(`musabeytekin/exradius-skill`), packaged as a plugin so developers add that repository
-as a marketplace and install the skill without access to the Exradius source. The skill
+A Claude Code skill, `exradius-project`, in `skill/` of this repository, packaged as a
+plugin: the repository root's `.claude-plugin/marketplace.json` makes the repository a
+marketplace, so developers install the skill with
+`claude plugin marketplace add musabeytekin/exradius` (it was `musabeytekin/exradius-skill`
+until 2026-11-10). The skill
 states which `exradius.yaml` `version` it writes; a schema change in Exradius is followed
 by a release of the skill, and this document names the skill repository so the two are
 found together. A developer invokes it inside a checkout of their code (or an empty

@@ -1,4 +1,4 @@
-# exradius-skill
+# The Exradius setup skill
 
 A Claude Code plugin with one skill, `exradius-project`, that puts a codebase on
 [Exradius](#what-exradius-needs-from-a-project), the self-hosted harness that runs AI
@@ -33,22 +33,22 @@ Every Exradius run, and so every project, lives with two limits:
 In Claude Code:
 
 ```
-/plugin marketplace add musabeytekin/exradius-skill
-/plugin install exradius@exradius-skill
+/plugin marketplace add musabeytekin/exradius
+/plugin install exradius@exradius
 ```
 
 Or from a shell:
 
 ```bash
-claude plugin marketplace add musabeytekin/exradius-skill
+claude plugin marketplace add musabeytekin/exradius
 ```
 
 ```bash
-claude plugin install exradius@exradius-skill
+claude plugin install exradius@exradius
 ```
 
-Update later with `/plugin marketplace update exradius-skill`. To try a local clone
-without installing: `claude --plugin-dir /path/to/exradius-skill`.
+Update later with `/plugin marketplace update exradius`. To try a local clone
+without installing: `claude --plugin-dir /path/to/exradius/skill`.
 
 ## Use
 
@@ -167,7 +167,7 @@ them means what it meant before):
 
 ```
 .claude-plugin/plugin.json        the plugin (name: exradius)
-.claude-plugin/marketplace.json   this repository as a marketplace (name: exradius-skill)
+../.claude-plugin/marketplace.json the repository root as a marketplace (name: exradius)
 skills/exradius-project/
   SKILL.md                        the flow
   references/                     schema, run conditions, pitfalls, examples, admin README

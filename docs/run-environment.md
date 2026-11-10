@@ -189,7 +189,7 @@ whose freshness is not `current` gets a verification enqueued, under the one-ope
 
 ## 9. The skill
 
-The skill (`musabeytekin/exradius-skill`) is updated in step, as a release after this
+The skill (then `musabeytekin/exradius-skill`, now `skill/`) is updated in step, as a release after this
 batch lands: the schema reference gains `resources`, service `memory`, service `command`
 and `workstation.cache`; the pitfalls gain the cache paths per package manager (pnpm, yarn
 Berry, npm, uv, pip, Maven, Gradle, Go, Cargo) and the hard-link note; the run conditions

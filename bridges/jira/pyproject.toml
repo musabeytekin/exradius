@@ -16,8 +16,8 @@ dependencies = [
 exradius-jira = "exradius_jira.main:run"
 
 [tool.uv.sources]
-# Until the kit has a remote; the image builds with it as a named build context (design §8).
-exradius-bridge-kit = { path = "../exradius-bridge-kit" }
+# The kit lives next to this bridge in bridges/kit; the image builds with it as a named build context (design §8).
+exradius-bridge-kit = { path = "../kit" }
 
 [dependency-groups]
 dev = [
