@@ -128,6 +128,25 @@ func TestRunningAndSucceeded(t *testing.T) {
 	}
 }
 
+// The Run ends with its workstation, not with the pod: the services' sidecars are stopped
+// after it, and one that ignores SIGTERM keeps the pod Running for the grace period.
+func TestEndsWithTheWorkstationWhileSidecarsStop(t *testing.T) {
+	r := serviceRun()
+	db := podspec.ServiceContainer("db")
+	inits := []corev1.ContainerStatus{
+		terminated(podspec.ContainerPrepare, 0, "Completed"), terminated(podspec.CloneContainer(0), 0, "Completed"),
+		started(runningSince(db, now.Add(-time.Minute)), true), started(runningSince(podspec.ServiceContainer("cache"), now.Add(-time.Minute)), true),
+		terminated(podspec.SetupContainer(0), 0, "Completed"),
+	}
+	for code, phase := range map[int32]v1.Phase{0: v1.PhaseSucceeded, 1: v1.PhaseFailed} {
+		obs := Observe(r, pod(corev1.PodRunning, "node", inits,
+			[]corev1.ContainerStatus{terminated(podspec.ContainerWorkstation, code, "Completed")}), now)
+		if obs.Status.Phase != phase || obs.Fail {
+			t.Fatalf("exit %d: got %+v", code, obs.Status)
+		}
+	}
+}
+
 func TestFailedStepWithLog(t *testing.T) {
 	inits := []corev1.ContainerStatus{
 		terminated(podspec.ContainerPrepare, 0, "Completed"),

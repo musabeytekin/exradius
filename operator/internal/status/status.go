@@ -200,6 +200,15 @@ func Observe(run *v1.Run, pod *corev1.Pod, now time.Time) Observation {
 		st.Phase = v1.PhaseSucceeded
 	case pod.Status.Phase == corev1.PodFailed:
 		st.Phase = v1.PhaseFailed
+	case st.Workstation != nil && st.Workstation.State == "terminated":
+		// The run is over once its workstation is. Kubernetes stops the services' sidecars
+		// only then, and one that ignores SIGTERM (a shell as PID 1) would hold the pod for
+		// its whole grace period: Plane's minio held every Verify and task 30 s.
+		if st.Workstation.ExitCode != nil && *st.Workstation.ExitCode == 0 {
+			st.Phase = v1.PhaseSucceeded
+		} else {
+			st.Phase = v1.PhaseFailed
+		}
 	case !scheduled:
 		st.Phase = v1.PhasePending
 		if c := meta.FindStatusCondition(st.Conditions, ConditionScheduled); c != nil && c.Status != metav1.ConditionTrue {
