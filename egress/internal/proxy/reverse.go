@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -30,19 +31,59 @@ var credentialHeaders = []string{"Authorization", "X-Api-Key", "Proxy-Authorizat
 func (p *Proxy) Reverse() http.Handler {
 	p.init()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == PhasePath:
-			p.phase(w, r)
-		case r.URL.Path == ModelPrefix || strings.HasPrefix(r.URL.Path, ModelPrefix+"/"):
-			p.route(w, r, "model")
-		case strings.HasPrefix(r.URL.Path, GitPrefix):
-			p.route(w, r, "git")
-		case strings.HasPrefix(r.URL.Path, MCPPrefix):
-			p.route(w, r, "mcp")
-		default:
+		switch kind := routeKind(r.URL.Path); kind {
+		case "":
 			http.NotFound(w, r)
+		case "phase":
+			p.phase(w, r)
+		default:
+			p.route(w, r, kind)
 		}
 	})
+}
+
+// routeKind is the route a path names. The route itself refuses an unsafe path (below),
+// once it knows the calling pod, so the refusal is recorded with the run.
+func routeKind(urlPath string) string {
+	switch {
+	case urlPath == PhasePath:
+		return "phase"
+	case urlPath == ModelPrefix || strings.HasPrefix(urlPath, ModelPrefix+"/"):
+		return "model"
+	case strings.HasPrefix(urlPath, GitPrefix):
+		return "git"
+	case strings.HasPrefix(urlPath, MCPPrefix):
+		return "mcp"
+	}
+	return ""
+}
+
+// unsafePath is why a route refuses r's path, or "". A route picks its repository or
+// connection by a prefix of the decoded path and forwards the rest with that one's
+// credential, so a path that an upstream (or a proxy in front of it) would resolve
+// differently could leave the repository or the connection's path: "objects/../git-receive-pack"
+// is a push that the push check never sees, "objects/../../other.git" another repository.
+// git, Claude Code and MCP clients never send dot segments, empty segments or encoded
+// slashes, dots, backslashes or percent signs, so they are refused rather than cleaned.
+func unsafePath(r *http.Request) string {
+	decoded := r.URL.Path
+	if strings.ContainsAny(decoded, `\%`) {
+		return "the path has a backslash or an encoded percent sign"
+	}
+	clean := decoded
+	if len(clean) > 1 {
+		clean = strings.TrimSuffix(clean, "/")
+	}
+	if path.Clean(decoded) != clean {
+		return "the path has a dot segment or an empty segment"
+	}
+	escaped := strings.ToLower(r.URL.EscapedPath())
+	for _, encoded := range []string{"%2f", "%2e", "%5c"} {
+		if strings.Contains(escaped, encoded) {
+			return "the path has an encoded slash, dot or backslash"
+		}
+	}
+	return ""
 }
 
 // phase answers {"run", "pod", "phase"} for the calling pod. The runner waits for "agent"
@@ -84,6 +125,12 @@ func (p *Proxy) route(w http.ResponseWriter, r *http.Request, kind string) {
 	}
 	if src.Build() {
 		refuse(http.StatusForbidden, "build pods have no routes")
+		return
+	}
+	// Before any repository, connection or model URL is resolved from the path.
+	if problem := unsafePath(r); problem != "" {
+		rec.Path = r.URL.EscapedPath()
+		refuse(http.StatusBadRequest, problem)
 		return
 	}
 	policy, err := p.Policies.Get(r.Context(), src)

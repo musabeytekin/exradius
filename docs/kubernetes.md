@@ -588,6 +588,13 @@ Every request of a run or build pod goes through `exradius-egress`, a Go binary
   - `/mcp/<connection>` → an HTTP connection whose headers hold a secret, with those
     headers; agent phase only;
   - `GET /phase` → what the proxy sees of the calling pod (`{"run", "pod", "phase"}`).
+
+  A route matches its repository or connection by a prefix of the path, so a path the
+  upstream would resolve differently is refused with `400` before anything is matched. That
+  covers a dot or empty segment, a backslash, and an encoded slash, dot, backslash or percent
+  sign. Without the refusal, `<repo>/objects/../git-receive-pack` would be a push the push
+  check never sees, and `<repo>/objects/../../<other>` another repository with this one's
+  credential. git, Claude Code and MCP clients send none of these.
 - **The pod's variables** (operator, §7.8), in every run container after the project's own:
   `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (`localhost`, `127.0.0.1`, `::1`, every service
   name, the api's internal host and the proxy's), the same in lower case, and
@@ -1333,6 +1340,11 @@ Details decided while building the egress proxy, NetworkPolicy and credential in
   are. bank's build tries Google's Maven Central mirror first
   (`maven-central.storage-download.googleapis.com`), which its `network.allow` now names; the
   task page showed the 215 refusals.
+- **Paths on the routes are refused, not cleaned,** when they hold a dot or empty segment or
+  an encoded separator (§11). Found in review: the git route matched the repository by
+  prefix, so `objects/../git-receive-pack` passed both the git-path check and the push check.
+  github.com answers `403` to such paths, but a self-hosted forge behind a proxy that
+  resolves dot segments would not.
 - **`git remote -v` shows the route**, because git expands `insteadOf` there; `origin` in the
   clone's config stays the plain URL.
 - **Kubelet probes** (a service's `tcp` check, the stack's readiness probes) pass under the

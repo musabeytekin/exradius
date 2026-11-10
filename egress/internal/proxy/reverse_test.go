@@ -308,3 +308,111 @@ func TestARefusedRepositoryCredentialNeverPromptsGit(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 }
+
+// A path an upstream would resolve differently from the route's prefix match never leaves
+// the proxy: not a push to a push: false repository, not another repository with this one's
+// credential, not another path on a connection's host.
+func TestRoutesRefuseDotSegmentsAndEncodedSeparators(t *testing.T) {
+	var mu sync.Mutex
+	var reached []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reached = append(reached, r.Method+" "+r.URL.RequestURI())
+		mu.Unlock()
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	secret := map[string]string{"Authorization": "Bearer secret"}
+	h := newHarness(t, PhaseAgent, &Policy{
+		Repositories: []Repository{
+			{URL: upstream.URL + "/acme/rw.git", Push: true, Headers: secret},
+			{URL: upstream.URL + "/acme/ro.git", Push: false, Headers: secret},
+		},
+		Connections: []Connection{{Name: "tracker", URL: upstream.URL + "/mcp", Headers: secret}},
+	})
+	git := "/git/" + host + "/acme/"
+	for _, c := range []struct{ method, path string }{
+		// A push to the push: false repository that the push check would not see.
+		{"POST", git + "ro.git/objects/../git-receive-pack"},
+		{"GET", git + "ro.git/objects/%2e%2e/info/refs?service=git-receive-pack"},
+		{"GET", git + "ro.git/objects/%2E%2E/info/refs?service=git-receive-pack"},
+		{"POST", git + "ro.git/info/.%2e/git-receive-pack"},
+		{"POST", git + "ro.git/objects/./../git-receive-pack"},
+		// Another repository with this one's credential.
+		{"GET", git + "rw.git/objects/../../other.git/info/refs"},
+		{"GET", git + "rw.git/objects/..%2f..%2fother.git/info/refs"},
+		{"GET", git + "rw.git/objects%2F..%2F..%2Fother.git/info/refs"},
+		{"GET", git + "rw.git/objects/%252e%252e/%252e%252e/other.git/info/refs"},
+		{"GET", git + `rw.git/objects/..\..\other.git/info/refs`},
+		{"GET", git + "rw.git/objects/..%5c..%5cother.git/info/refs"},
+		{"GET", git + "rw.git//info/refs"},
+		// Another path on a connection's host, with its secret header.
+		{"POST", "/mcp/tracker/../admin"},
+		{"POST", "/mcp/tracker/%2e%2e/admin"},
+		{"POST", "/mcp/tracker%2f..%2fadmin"},
+		{"POST", "/mcp/tracker/sub/./../../admin"},
+		// The model route and a crossing between routes.
+		{"POST", "/anthropic/v1/../../mcp/tracker"},
+		{"GET", "/mcp/../git/" + host + "/acme/rw.git/info/refs"},
+	} {
+		req, err := http.NewRequest(c.method, h.reverse.URL+c.path, strings.NewReader("0000"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "the path has") {
+			t.Errorf("%s %s: %d %q", c.method, c.path, resp.StatusCode, body)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reached) != 0 {
+		t.Fatalf("refused paths reached the upstream: %v", reached)
+	}
+	records := h.records(t)
+	if len(records) != 18 {
+		t.Fatalf("%d records, want 18", len(records))
+	}
+	for _, rec := range records {
+		if rec.Allowed || rec.Status != http.StatusBadRequest || rec.Run != "run-1" || rec.Host != "" {
+			t.Errorf("record %+v", rec)
+		}
+	}
+}
+
+// The clean forms of the same routes still go through, a trailing slash included.
+func TestRoutesAcceptCleanPaths(t *testing.T) {
+	var reached []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = append(reached, r.URL.Path)
+	}))
+	defer upstream.Close()
+	host := strings.TrimPrefix(upstream.URL, "http://")
+	h := newHarness(t, PhaseAgent, &Policy{
+		Repositories: []Repository{{URL: upstream.URL + "/acme/my%20app.git", Push: true}},
+		Connections:  []Connection{{Name: "tracker", URL: upstream.URL + "/mcp/"}},
+	})
+	for _, path := range []string{
+		"/git/" + host + "/acme/my%20app.git/info/refs?service=git-upload-pack",
+		"/git/" + host + "/acme/my%20app.git/objects/info/packs",
+		"/mcp/tracker",
+		"/mcp/tracker/",
+	} {
+		resp, err := http.Get(h.reverse.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Errorf("%s: %d", path, resp.StatusCode)
+		}
+	}
+	if len(reached) != 4 || reached[0] != "/acme/my app.git/info/refs" {
+		t.Fatalf("upstream saw %q", reached)
+	}
+}
