@@ -3,6 +3,7 @@ mirrors and caches, and Verify's service steps (docs/kubernetes.md §7.4, §7.6,
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import uuid
@@ -364,3 +365,115 @@ def test_clone_through_a_mirror_on_the_project_volume(tmp_path, remote_repo, cap
     # Objects are copied, not linked: the mirror is on another volume.
     objects = [p for p in (work2 / "app" / ".git" / "objects").rglob("*") if p.is_file()]
     assert objects and all(p.stat().st_nlink == 1 for p in objects)
+
+
+# The builds registry of a cloud install, read with the worker's pod identity ---------------------
+
+
+def private_registry(challenge: str, accepted: str):
+    """A registry that answers ``challenge`` until a request carries ``accepted``; its token
+    endpoint (for a Bearer challenge) takes Basic credentials."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/v2/token":
+            if request.headers.get("authorization") != "Basic " + base64.b64encode(b"user:secret").decode():
+                return httpx.Response(401)
+            return httpx.Response(200, json={"access_token": "registry-token"})
+        if request.headers.get("authorization") != accepted:
+            return httpx.Response(401, headers={"www-authenticate": challenge})
+        if "/manifests/" in request.url.path:
+            return httpx.Response(200, json={"mediaType": "application/vnd.oci.image.manifest.v1+json",
+                                             "config": {"digest": "sha256:cfg"}})
+        return httpx.Response(200, json={"config": {"Healthcheck": {"Test": ["CMD", "pg_isready"]}}})
+
+    return httpx.MockTransport(handler), seen
+
+
+class StaticCredentials:
+    def __init__(self):
+        self.calls = 0
+
+    async def basic(self):
+        self.calls += 1
+        return "user", "secret"
+
+
+async def test_image_configs_sign_in_to_the_builds_registry_only():
+    ecr = "123456789012.dkr.ecr.eu-central-1.amazonaws.com"
+    basic = "Basic " + base64.b64encode(b"user:secret").decode()
+    transport, seen = private_registry(f'Basic realm="https://{ecr}/",service="ecr.amazonaws.com"', basic)
+    credentials = StaticCredentials()
+    configs = ImageConfigs(credentials={ecr: credentials}, transport=transport)
+    assert await configs.healthcheck(f"{ecr}/exradius/bank/db:abc") == ["CMD", "pg_isready"]
+    assert credentials.calls == 1
+
+    # A Bearer challenge (Artifact Registry, ACR): the token endpoint gets the credentials.
+    ar = "europe-west4-docker.pkg.dev"
+    transport, seen = private_registry(f'Bearer realm="https://{ar}/v2/token",service="{ar}"', "Bearer registry-token")
+    configs = ImageConfigs(credentials={ar: StaticCredentials()}, transport=transport)
+    assert await configs.healthcheck(f"{ar}/p/builds/exradius/bank/db:abc") == ["CMD", "pg_isready"]
+    [token_request] = [r for r in seen if r.url.path == "/v2/token"]
+    assert token_request.url.params["scope"] == "repository:p/builds/exradius/bank/db:pull"
+
+    # Another registry never sees them.
+    transport, seen = private_registry(f'Basic realm="https://{ecr}/"', basic)
+    assert await ImageConfigs(credentials={ar: StaticCredentials()}, transport=transport).healthcheck(
+        f"{ecr}/exradius/bank/db:abc") is None
+    assert all("authorization" not in r.headers for r in seen)
+
+
+async def test_registry_credentials_per_cloud(monkeypatch, tmp_path):
+    from datetime import UTC, datetime
+
+    from exradius.worker.registry import (
+        ACR_USER,
+        AcrCredentials,
+        EcrCredentials,
+        GoogleRegistryCredentials,
+        registry_credentials,
+    )
+
+    assert registry_credentials("none", "kind-registry:5000") == {}
+    ecr = "123456789012.dkr.ecr.eu-central-1.amazonaws.com"
+    [(host, creds)] = registry_credentials("ecr", ecr).items()
+    assert host == ecr and isinstance(creds, EcrCredentials) and creds.region == "eu-central-1"
+    with pytest.raises(ValueError):
+        EcrCredentials("europe-west4-docker.pkg.dev")
+
+    class FakeEcr:
+        calls = 0
+
+        def get_authorization_token(self, registryIds):
+            FakeEcr.calls += 1
+            assert registryIds == ["123456789012"]
+            return {"authorizationData": [{"authorizationToken": base64.b64encode(b"AWS:pw").decode(),
+                                           "expiresAt": datetime(2999, 1, 1, tzinfo=UTC)}]}
+
+    creds = EcrCredentials(ecr, client=FakeEcr())
+    assert await creds.basic() == ("AWS", "pw")
+    assert await creds.basic() == ("AWS", "pw") and FakeEcr.calls == 1
+
+    class Tokens:
+        async def token(self):
+            return "aad-or-google"
+
+    [(host, gcr)] = registry_credentials("gcr", "europe-west4-docker.pkg.dev/proj/builds").items()
+    assert host == "europe-west4-docker.pkg.dev" and isinstance(gcr, GoogleRegistryCredentials)
+    assert await GoogleRegistryCredentials(Tokens()).basic() == ("oauth2accesstoken", "aad-or-google")
+
+    exchanged = []
+
+    def acr(request: httpx.Request) -> httpx.Response:
+        exchanged.append(request)
+        return httpx.Response(200, json={"refresh_token": "acr-refresh"})
+
+    creds = AcrCredentials("exradiusbuilds.azurecr.io", tokens=Tokens(), tenant="tenant-id",
+                           transport=httpx.MockTransport(acr))
+    assert await creds.basic() == (ACR_USER, "acr-refresh")
+    assert await creds.basic() == (ACR_USER, "acr-refresh") and len(exchanged) == 1
+    assert str(exchanged[0].url) == "https://exradiusbuilds.azurecr.io/oauth2/exchange"
+    assert dict(httpx.QueryParams(exchanged[0].content.decode())) == {
+        "grant_type": "access_token", "service": "exradiusbuilds.azurecr.io", "tenant": "tenant-id",
+        "access_token": "aad-or-google"}

@@ -42,7 +42,7 @@ from exradius.worker import git_identity, run_objects
 from exradius.worker.builds import BuildAbandoned, BuildFailed, ImageBuilder, Images, build_jobs
 from exradius.worker.kube import Cluster
 from exradius.worker.lifecycle import PendingEvent, run_event, transition
-from exradius.worker.registry import ImageConfigs
+from exradius.worker.registry import ImageConfigs, registry_credentials
 from exradius.worker.run_objects import SERVICE_STEP, RunObjects, RunView, run_name, service_failure, tail
 
 log = logging.getLogger(__name__)
@@ -132,7 +132,10 @@ class RunManager:
         self.emit = emit
         self.box = SecretBox(settings.secret_key)
         self.builder = ImageBuilder(settings, sessions, store, cluster)
-        self.image_configs = ImageConfigs(settings.insecure_registry_hosts)
+        self.image_configs = ImageConfigs(
+            settings.insecure_registry_hosts,
+            credentials=registry_credentials(settings.builds_credentials, settings.builds_registry),
+        )
         """Reads services' HEALTHCHECKs (docs/kubernetes.md §7.4); tests replace it."""
         self.check_directory: Callable[[], Awaitable[None]] = _nothing
         """Run after this worker stored a config snapshot (docs/integration-api.md §3); the
