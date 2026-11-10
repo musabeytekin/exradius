@@ -1630,7 +1630,14 @@ Desktop VM), one run at a time, caches warm.
 
 Details decided while preparing the clouds (2026-11-10), up to the point where only a cloud
 account is missing: the live part (`terraform apply` to a real task and `terraform destroy`)
-is the user's, later. §3, §7.2, §12, §14, §16–§18 are written to match; this is the list.
+is the user's, later, and suspended for now. The ingress and `publicApiUrl` check ran on kind
+(Traefik from `deploy/terraform/traefik.yaml`, the chart's Ingress, this Mac's LAN address):
+the panel, the CLI and the bridge kit's downloads and directory worked through it, and a
+changed signature got 401. The same check on the k3s server, with its AppArmor node setup and
+the amd64 builder image, is deferred: the server was off. On AWS, a new account's Free plan
+restricts services (EKS node groups are reported refused), so the Paid plan is the one to
+choose; its credits still apply. §3, §7.2, §12, §14, §16–§18 are written to match; this is
+the list.
 
 - **Storage backends** (§14). `gcs` and `azure` are httpx clients of the clouds' REST APIs
   (`storage.py`) with tokens from the pod's identity (`pod_identity.py`), not the clouds'
