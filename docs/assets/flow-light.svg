@@ -1,105 +1,115 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 440" width="960" height="440" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
-  <title id="t">How a task runs in Exradius</title>
-  <desc id="d">A tracker publishes a task on exradius.tasks. The worker reads the project's exradius.yaml from its config repository and creates a Run; the operator turns it into one pod that clones the repositories, starts the services, runs setup and runs the Claude Code agent. Every request from the pod leaves through the egress proxy. Status, questions and the result go back to the tracker on exradius.events.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 580" width="960" height="580" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+  <title id="t">What happens to a ticket assigned to Exradius</title>
+  <desc id="d">You assign a ticket to the agent. Exradius checks which project it belongs to, whether that project is ready, and which agent should take it; at each step a ticket that cannot go on is answered with the reason. The chosen agent gets a fresh workstation with the code, services and setup, works on the ticket, asks on the ticket when information is missing, and delivers a branch and pull request, or a patch when it may not push. The result is posted on the ticket and the ticket comes back to you.</desc>
   <style>@media (prefers-reduced-motion: reduce) { .anim { display: none; } }</style>
   <defs>
     <marker id="arrow-light" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 z" fill="#8C959F"/>
     </marker>
+    <marker id="no-light" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#CF222E"/>
+    </marker>
   </defs>
-  <rect x="1" y="1" width="958" height="438" rx="16" fill="#F6F8FA" stroke="#D0D7DE"/>
+  <rect x="1" y="1" width="958" height="578" rx="16" fill="#F6F8FA" stroke="#D0D7DE"/>
 
-  <path d="M180 140 H366" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
-  <path d="M435 70 V97" fill="none" stroke="#8C959F" stroke-width="1.8" stroke-dasharray="4 4" marker-end="url(#arrow-light)"/>
-  <path d="M500 140 H527" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
-  <path d="M640 140 H667" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
-  <path d="M800 240 V297" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
-  <path d="M800 350 V369" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
-  <path d="M435 180 V350 H105 V189" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
-  <rect x="30" y="95" width="150" height="90" rx="12" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
-  <text x="105.0" y="138.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1F2328">Your tracker</text>
-  <text x="105.0" y="157.0" text-anchor="middle" font-size="12" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" fill="#59636E">Jira · GitHub · CLI</text>
-  <rect class="anim" x="30" y="95" width="150" height="90" rx="12" fill="none" stroke="#1A7F37" stroke-width="2.5" opacity="0">
-    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.955;0.961;0.994;1.000;1" dur="9s" repeatCount="indefinite"/>
-  </rect>
-  <rect x="208" y="123" width="134" height="34" rx="17" fill="#EEEBFF" stroke="#6D5EF6" stroke-width="1.5"/>
-  <text x="275.0" y="145" text-anchor="middle" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#1F2328">exradius.tasks</text>
-  <rect x="360" y="20" width="150" height="50" rx="12" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
-  <text x="435.0" y="43.0" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1F2328">Config repository</text>
-  <text x="435.0" y="62.0" text-anchor="middle" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#59636E">exradius.yaml</text>
-  <rect x="370" y="100" width="130" height="80" rx="12" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
-  <text x="435.0" y="138.0" text-anchor="middle" font-size="15" font-weight="600" fill="#1F2328">Worker</text>
-  <text x="435.0" y="157.0" text-anchor="middle" font-size="12" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" fill="#59636E">intake · state</text>
-  <rect x="530" y="110" width="110" height="60" rx="12" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
-  <text x="585.0" y="138.0" text-anchor="middle" font-size="14" font-weight="600" fill="#1F2328">Operator</text>
-  <text x="585.0" y="157.0" text-anchor="middle" font-size="12" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" fill="#59636E">Run → pod</text>
-  <path d="M776 280 H688 Q670 280 670 262 V48 Q670 30 688 30 H912 Q930 30 930 48 V262 Q930 280 912 280 H824"
-        fill="#6D5EF6" fill-opacity="0.05" stroke="#6D5EF6" stroke-width="2"/>
-  <text x="690" y="56" font-size="14.5" font-weight="700" fill="#1F2328">Run pod</text>
-  <text x="910" y="56" text-anchor="end" font-size="12" fill="#59636E">one per task, isolated</text>
-  <rect x="690" y="72" width="220" height="36" rx="10" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.2"/>
-  <rect class="anim" x="690" y="72" width="220" height="36" rx="10" fill="#6D5EF6" fill-opacity="0.16" stroke="#6D5EF6" stroke-width="2" opacity="0">
-    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.24;0.246;0.33;0.336;1" dur="9s" repeatCount="indefinite"/>
-  </rect>
-  <text x="704" y="95" font-size="12" font-weight="700" fill="#6D5EF6">1</text>
-  <text x="720" y="95" font-size="13.5" font-weight="600" fill="#1F2328">Clone repositories</text>
-  <text x="898" y="95" text-anchor="end" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#59636E">git</text>
-  <rect x="690" y="116" width="220" height="36" rx="10" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.2"/>
-  <rect class="anim" x="690" y="116" width="220" height="36" rx="10" fill="#6D5EF6" fill-opacity="0.16" stroke="#6D5EF6" stroke-width="2" opacity="0">
-    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.33;0.336;0.42;0.426;1" dur="9s" repeatCount="indefinite"/>
-  </rect>
-  <text x="704" y="139" font-size="12" font-weight="700" fill="#6D5EF6">2</text>
-  <text x="720" y="139" font-size="13.5" font-weight="600" fill="#1F2328">Start services</text>
-  <text x="898" y="139" text-anchor="end" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#59636E">sidecars</text>
-  <rect x="690" y="160" width="220" height="36" rx="10" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.2"/>
-  <rect class="anim" x="690" y="160" width="220" height="36" rx="10" fill="#6D5EF6" fill-opacity="0.16" stroke="#6D5EF6" stroke-width="2" opacity="0">
-    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.42;0.426;0.51;0.516;1" dur="9s" repeatCount="indefinite"/>
-  </rect>
-  <text x="704" y="183" font-size="12" font-weight="700" fill="#6D5EF6">3</text>
-  <text x="720" y="183" font-size="13.5" font-weight="600" fill="#1F2328">Run setup</text>
-  <text x="898" y="183" text-anchor="end" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#59636E">pnpm install</text>
-  <rect x="690" y="204" width="220" height="36" rx="10" fill="#EEEBFF" stroke="#D0D7DE" stroke-width="1.2"/>
-  <rect class="anim" x="690" y="204" width="220" height="36" rx="10" fill="#6D5EF6" fill-opacity="0.16" stroke="#6D5EF6" stroke-width="2" opacity="0">
-    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.51;0.516;0.79;0.796;1" dur="9s" repeatCount="indefinite"/>
-  </rect>
-  <text x="704" y="227" font-size="12" font-weight="700" fill="#6D5EF6">4</text>
-  <text x="720" y="227" font-size="13.5" font-weight="600" fill="#1F2328">Claude Code agent</text>
-  <text x="898" y="227" text-anchor="end" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#59636E">/work</text>
-  <rect x="700" y="300" width="200" height="50" rx="12" fill="#FFFFFF" stroke="#6D5EF6" stroke-width="1.5"/>
-  <text x="800.0" y="323.0" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1F2328">Egress proxy</text>
-  <text x="800.0" y="342.0" text-anchor="middle" font-size="12" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" fill="#59636E">allowlist · adds credentials</text>
-  <rect x="700" y="372" width="200" height="44" rx="12" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
-  <text x="800.0" y="399.0" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1F2328">Git · model API · packages</text>
-  <rect x="208" y="333" width="134" height="34" rx="17" fill="#EEEBFF" stroke="#6D5EF6" stroke-width="1.5"/>
-  <text x="275.0" y="355" text-anchor="middle" font-size="12.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#1F2328">exradius.events</text>
-  <text x="275" y="388" text-anchor="middle" font-size="12" fill="#59636E">status · questions · result</text>
-  <text x="275" y="116" text-anchor="middle" font-size="12" fill="#59636E">task</text>
+  <path d="M170 170 H186" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
+  <path d="M332 170 H376" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
+  <path d="M522 170 H566" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
+  <path d="M640 220 V358" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
+  <path d="M520 400 H492" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
+  <path d="M320 400 H302" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
+  <path d="M156 400 H142" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
+  <path d="M260 120 V90" fill="none" stroke="#CF222E" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#no-light)"/>
+  <path d="M450 120 V90" fill="none" stroke="#CF222E" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#no-light)"/>
+  <path d="M640 120 V90" fill="none" stroke="#CF222E" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#no-light)"/>
+  <path d="M640 440 V478" fill="none" stroke="#CF222E" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#no-light)"/>
+  <path d="M712 170 H758" fill="none" stroke="#6D5EF6" stroke-width="1.5" stroke-dasharray="2 4"/>
+  <path d="M395 444 V476" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
+  <path d="M415 478 V446" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
+  <path d="M228 450 V478" fill="none" stroke="#8C959F" stroke-width="1.8" marker-end="url(#arrow-light)"/>
+  <text x="354" y="162" text-anchor="middle" font-size="11.5" font-weight="600" fill="#59636E">found</text>
+  <text x="544" y="162" text-anchor="middle" font-size="11.5" font-weight="600" fill="#59636E">yes</text>
+  <text x="652" y="300" text-anchor="start" font-size="11.5" font-weight="600" fill="#59636E">chosen</text>
+  <text x="272" y="106" text-anchor="start" font-size="11.5" font-weight="600" fill="#59636E">none</text>
+  <text x="462" y="106" text-anchor="start" font-size="11.5" font-weight="600" fill="#59636E">no</text>
+  <text x="652" y="106" text-anchor="start" font-size="11.5" font-weight="600" fill="#59636E">none</text>
+  <rect x="20" y="132" width="150" height="76" rx="12" fill="#EEEBFF" stroke="#6D5EF6" stroke-width="1.5"/>
+  <rect class="anim" x="20" y="132" width="150" height="76" rx="12" fill="#6D5EF6" fill-opacity="0.14" stroke="#6D5EF6" stroke-width="2.5" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.0;0.006;0.05;0.056;1" dur="14s" repeatCount="indefinite"/></rect>
+  <text x="95.0" y="165.5" text-anchor="middle" font-size="14" font-weight="600" fill="#1F2328">You assign a ticket</text>
+  <text x="95.0" y="182.5" text-anchor="middle" font-size="12" font-weight="400" fill="#59636E">to the agent</text>
+  <rect x="180" y="34" width="160" height="54" rx="10" fill="#FFEBE9" stroke="#CF222E" stroke-width="1.2"/>
+  <text x="260.0" y="55" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1F2328">Not an Exradius project</text>
+  <text x="260.0" y="72" text-anchor="middle" font-size="11.5" font-weight="400" fill="#59636E">the ticket says so</text>
+  <polygon points="260,120 332,170 260,220 188,170" fill="#FFFFFF" stroke="#6D5EF6" stroke-width="1.8" stroke-linejoin="round"/>
+  <polygon class="anim" points="260,120 332,170 260,220 188,170" fill="#6D5EF6" fill-opacity="0.16" stroke="#6D5EF6" stroke-width="3" stroke-linejoin="round" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.085;0.091;0.14;0.146;1" dur="14s" repeatCount="indefinite"/></polygon>
+  <text x="260" y="167" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1F2328">Which</text>
+  <text x="260" y="184" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1F2328">project?</text>
+  <rect x="370" y="34" width="160" height="54" rx="10" fill="#FFEBE9" stroke="#CF222E" stroke-width="1.2"/>
+  <text x="450.0" y="55" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1F2328">Config or secret missing</text>
+  <text x="450.0" y="72" text-anchor="middle" font-size="11.5" font-weight="400" fill="#59636E">refused, with the reason</text>
+  <polygon points="450,120 522,170 450,220 378,170" fill="#FFFFFF" stroke="#6D5EF6" stroke-width="1.8" stroke-linejoin="round"/>
+  <polygon class="anim" points="450,120 522,170 450,220 378,170" fill="#6D5EF6" fill-opacity="0.16" stroke="#6D5EF6" stroke-width="3" stroke-linejoin="round" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.175;0.181;0.23;0.236;1" dur="14s" repeatCount="indefinite"/></polygon>
+  <text x="450" y="167" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1F2328">Project</text>
+  <text x="450" y="184" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1F2328">ready?</text>
+  <rect x="560" y="34" width="160" height="54" rx="10" fill="#FFEBE9" stroke="#CF222E" stroke-width="1.2"/>
+  <text x="640.0" y="55" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1F2328">No agent can be chosen</text>
+  <text x="640.0" y="72" text-anchor="middle" font-size="11.5" font-weight="400" fill="#59636E">refused, with the reason</text>
+  <polygon points="640,120 712,170 640,220 568,170" fill="#FFFFFF" stroke="#6D5EF6" stroke-width="1.8" stroke-linejoin="round"/>
+  <polygon class="anim" points="640,120 712,170 640,220 568,170" fill="#6D5EF6" fill-opacity="0.16" stroke="#6D5EF6" stroke-width="3" stroke-linejoin="round" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.265;0.271;0.34;0.346;1" dur="14s" repeatCount="indefinite"/></polygon>
+  <text x="640" y="167" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1F2328">Which</text>
+  <text x="640" y="184" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1F2328">agent?</text>
+  <rect x="760" y="104" width="180" height="136" rx="10" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+  <rect class="anim" x="760" y="104" width="180" height="136" rx="10" fill="#6D5EF6" fill-opacity="0.14" stroke="#6D5EF6" stroke-width="2.5" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.265;0.271;0.34;0.346;1" dur="14s" repeatCount="indefinite"/></rect>
+  <text x="774" y="126" text-anchor="start" font-size="12.5" font-weight="700" fill="#6D5EF6">How it picks</text>
+  <text x="774" y="146.0" text-anchor="start" font-size="11.5" font-weight="400" fill="#59636E">Named on the ticket: that one.</text>
+  <text x="774" y="161.5" text-anchor="start" font-size="11.5" font-weight="400" fill="#59636E">Otherwise it compares the</text>
+  <text x="774" y="177.0" text-anchor="start" font-size="11.5" font-weight="400" fill="#59636E">ticket with each agent's role</text>
+  <text x="774" y="192.5" text-anchor="start" font-size="11.5" font-weight="400" fill="#59636E">and tools, and takes the best</text>
+  <text x="774" y="208.0" text-anchor="start" font-size="11.5" font-weight="400" fill="#59636E">match. Unsure? It still runs,</text>
+  <text x="774" y="223.5" text-anchor="start" font-size="11.5" font-weight="400" fill="#59636E">and says that it guessed.</text>
+  <rect x="520" y="360" width="240" height="80" rx="12" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+  <rect class="anim" x="520" y="360" width="240" height="80" rx="12" fill="#6D5EF6" fill-opacity="0.14" stroke="#6D5EF6" stroke-width="2.5" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.38;0.386;0.46;0.466;1" dur="14s" repeatCount="indefinite"/></rect>
+  <text x="640.0" y="387.0" text-anchor="middle" font-size="14" font-weight="600" fill="#1F2328">A workstation of its own</text>
+  <text x="640.0" y="404.0" text-anchor="middle" font-size="12" font-weight="400" fill="#59636E">code cloned, services started,</text>
+  <text x="640.0" y="421.0" text-anchor="middle" font-size="12" font-weight="400" fill="#59636E">setup run</text>
+  <rect x="545" y="480" width="215" height="54" rx="10" fill="#FFEBE9" stroke="#CF222E" stroke-width="1.2"/>
+  <text x="652.5" y="501" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1F2328">Setup fails</text>
+  <text x="652.5" y="518" text-anchor="middle" font-size="11.5" font-weight="400" fill="#59636E">the task stops, naming the cause</text>
+  <rect x="320" y="356" width="170" height="88" rx="12" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+  <rect class="anim" x="320" y="356" width="170" height="88" rx="12" fill="#6D5EF6" fill-opacity="0.14" stroke="#6D5EF6" stroke-width="2.5" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.5;0.506;0.7;0.706;1" dur="14s" repeatCount="indefinite"/></rect>
+  <text x="405.0" y="387.0" text-anchor="middle" font-size="14" font-weight="600" fill="#1F2328">The agent works</text>
+  <text x="405.0" y="404.0" text-anchor="middle" font-size="12" font-weight="400" fill="#59636E">on the ticket, reaching</text>
+  <text x="405.0" y="421.0" text-anchor="middle" font-size="12" font-weight="400" fill="#59636E">only allowed sites</text>
+  <rect x="290" y="478" width="230" height="70" rx="10" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+  <rect class="anim" x="290" y="478" width="230" height="70" rx="10" fill="#6D5EF6" fill-opacity="0.14" stroke="#6D5EF6" stroke-width="2.5" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.555;0.561;0.645;0.651;1" dur="14s" repeatCount="indefinite"/></rect>
+  <text x="405" y="499" text-anchor="middle" font-size="12.5" font-weight="600" fill="#1F2328">Missing information?</text>
+  <text x="405" y="517" text-anchor="middle" font-size="11.5" font-weight="400" fill="#59636E">It asks on the ticket and waits;</text>
+  <text x="405" y="532" text-anchor="middle" font-size="11.5" font-weight="400" fill="#59636E">your reply picks up where it stopped</text>
+  <polygon points="228,350 300,400 228,450 156,400" fill="#FFFFFF" stroke="#6D5EF6" stroke-width="1.8" stroke-linejoin="round"/>
+  <polygon class="anim" points="228,350 300,400 228,450 156,400" fill="#6D5EF6" fill-opacity="0.16" stroke="#6D5EF6" stroke-width="3" stroke-linejoin="round" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.735;0.741;0.79;0.796;1" dur="14s" repeatCount="indefinite"/></polygon>
+  <text x="228" y="397" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1F2328">May it</text>
+  <text x="228" y="414" text-anchor="middle" font-size="13.5" font-weight="600" fill="#1F2328">push?</text>
+  <rect x="130" y="478" width="150" height="70" rx="10" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1.5"/>
+  <rect class="anim" x="130" y="478" width="150" height="70" rx="10" fill="#6D5EF6" fill-opacity="0.14" stroke="#6D5EF6" stroke-width="2.5" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.735;0.741;0.79;0.796;1" dur="14s" repeatCount="indefinite"/></rect>
+  <text x="144" y="499" text-anchor="start" font-size="11.5" font-weight="400" fill="#59636E">Yes: a branch and</text>
+  <text x="144" y="515" text-anchor="start" font-size="11.5" font-weight="400" fill="#59636E">a pull request</text>
+  <text x="144" y="531" text-anchor="start" font-size="11.5" font-weight="400" fill="#59636E">No: a patch instead</text>
+  <rect x="20" y="352" width="122" height="96" rx="12" fill="#DAFBE1" stroke="#1A7F37" stroke-width="1.5"/>
+  <rect class="anim" x="20" y="352" width="122" height="96" rx="12" fill="#1A7F37" fill-opacity="0.14" stroke="#1A7F37" stroke-width="2.5" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.83;0.836;0.97;0.976;1" dur="14s" repeatCount="indefinite"/></rect>
+  <text x="81.0" y="378.5" text-anchor="middle" font-size="14" font-weight="600" fill="#1F2328">Result on</text>
+  <text x="81.0" y="395.5" text-anchor="middle" font-size="14" font-weight="600" fill="#1F2328">the ticket</text>
+  <text x="81.0" y="412.5" text-anchor="middle" font-size="12" font-weight="400" fill="#59636E">back to you</text>
+  <text x="81.0" y="429.5" text-anchor="middle" font-size="12" font-weight="400" fill="#59636E">to review</text>
   <g class="anim" opacity="0">
-    <circle r="11" fill="#6D5EF6" opacity="0.25"/>
-    <circle r="6" fill="#6D5EF6"/>
-    <animateMotion path="M180 140 H366" dur="9s" repeatCount="indefinite" calcMode="linear"
-                   keyPoints="0;0;1;1" keyTimes="0;0.02;0.12;1"/>
-    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.02;0.026;0.12;0.126;1" dur="9s" repeatCount="indefinite"/>
+    <circle r="12" fill="#6D5EF6" opacity="0.25"/>
+    <circle r="6.5" fill="#6D5EF6"/>
+    <animateMotion path="M170 170 H640 V400 H142" dur="14s" repeatCount="indefinite" calcMode="linear" keyPoints="0.0000;0.0000;0.0751;0.0751;0.2337;0.2337;0.3923;0.3923;0.5843;0.5843;0.7805;0.7805;0.9282;0.9282;1.0000;1.0000" keyTimes="0;0.05;0.085;0.14;0.175;0.23;0.265;0.34;0.38;0.46;0.50;0.70;0.735;0.79;0.83;1"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.0;0.006;0.835;0.841;1" dur="14s" repeatCount="indefinite"/>
   </g>
   <g class="anim" opacity="0">
-    <circle r="11" fill="#6D5EF6" opacity="0.25"/>
-    <circle r="6" fill="#6D5EF6"/>
-    <animateMotion path="M500 140 H667" dur="9s" repeatCount="indefinite" calcMode="linear"
-                   keyPoints="0;0;1;1" keyTimes="0;0.13;0.23;1"/>
-    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.13;0.136;0.23;0.236;1" dur="9s" repeatCount="indefinite"/>
-  </g>
-  <g class="anim" opacity="0">
-    <circle r="11" fill="#6D5EF6" opacity="0.25"/>
-    <circle r="6" fill="#6D5EF6"/>
-    <animateMotion path="M800 240 V370" dur="9s" repeatCount="indefinite" calcMode="linear"
-                   keyPoints="0;0;1;1" keyTimes="0;0.58;0.7;1"/>
-    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.58;0.586;0.7;0.706;1" dur="9s" repeatCount="indefinite"/>
-  </g>
-  <g class="anim" opacity="0">
-    <circle r="11" fill="#6D5EF6" opacity="0.25"/>
-    <circle r="6" fill="#6D5EF6"/>
-    <animateMotion path="M435 180 V350 H105 V189" dur="9s" repeatCount="indefinite" calcMode="linear"
-                   keyPoints="0;0;1;1" keyTimes="0;0.8;0.955;1"/>
-    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.8;0.806;0.955;0.961;1" dur="9s" repeatCount="indefinite"/>
+    <circle r="5" fill="#6D5EF6"/>
+    <animateMotion path="M395 444 V478 H415 V444" dur="14s" repeatCount="indefinite" calcMode="linear"
+                   keyPoints="0;0;0.5;0.5;1;1" keyTimes="0;0.555;0.58;0.62;0.645;1"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.555;0.561;0.645;0.651;1" dur="14s" repeatCount="indefinite"/>
   </g>
 </svg>

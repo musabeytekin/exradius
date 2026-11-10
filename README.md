@@ -92,7 +92,7 @@ queue.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/flow-dark.svg">
-    <img src="docs/assets/flow-light.svg" alt="A tracker publishes a task; the worker reads the project's config and creates a Run; the operator starts one pod that clones, starts services, runs setup and runs the agent; every request leaves through the egress proxy; status, questions and the result go back to the tracker." width="100%">
+    <img src="docs/assets/flow-light.svg" alt="What happens to a ticket assigned to the agent: Exradius checks which project it belongs to, whether the project is ready and which agent should take it, answering with the reason when it cannot go on; the agent gets a workstation of its own, asks on the ticket when information is missing, and delivers a branch and pull request or a patch; the result comes back on the ticket." width="100%">
   </picture>
 </p>
 
