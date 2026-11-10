@@ -90,6 +90,16 @@ spec:
     spec:
       serviceAccountName: exradius-egress
       enableServiceLinks: false
+      {{- if gt (int $e.replicas) 1 }}
+      # One proxy per node where there are nodes enough: a node's loss leaves the others.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "exradius.selector" (list . "egress") | nindent 14 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -188,3 +198,18 @@ spec:
     {{- include "exradius.selector" (list . "egress") | nindent 4 }}
   ports:
     - {name: reverse, port: 3129, targetPort: reverse}
+{{- if gt (int $e.replicas) 1 }}
+---
+# A node drain takes one proxy at a time: every run's requests go through them.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: exradius-egress
+  labels:
+    {{- include "exradius.componentLabels" (list . "egress") | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "exradius.selector" (list . "egress") | nindent 6 }}
+{{- end }}

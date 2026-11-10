@@ -116,6 +116,10 @@ operator:
 # the agent reaches its model, its repositories, its connections and the hosts below plus
 # each config's network.allow. Credentials stay in the proxy.
 egress:
+  # Every run's and build's requests go through the proxy. One replica suits one node; with
+  # more, the chart spreads them over nodes and adds a PodDisruptionBudget (one down at a
+  # time). Each replica watches every run pod, and the runner asks each one before the
+  # agent phase (docs/kubernetes.md §11).
   replicas: 1
   # Hosts every run may reach in the agent phase (pypi.org; *.example.com for subdomains).
   allow: []
