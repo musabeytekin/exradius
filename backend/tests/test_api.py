@@ -269,12 +269,12 @@ def test_stores_are_write_only_and_encrypted(admin, tmp_path, sync_db):
 def test_bulk_set_keys(admin, sync_db):
     sid = admin.post("/api/stores", json={"name": "bulk"}).json()["id"]
     admin.put(f"/api/stores/{sid}/keys/OLD", json={"value": "before"})
-    first = admin.put(f"/api/stores/{sid}/keys", json={"values": {"OLD": "after", "NEW_ONE": "v1", "a.b-c": "v2"}})
+    first = admin.put(f"/api/stores/{sid}/keys", json={"values": {"OLD": "after-value", "NEW_ONE": "first-value", "a.b-c": "v2"}})
     assert first.status_code == 200
     assert [k["key"] for k in first.json()] == ["NEW_ONE", "OLD", "a.b-c"]
     assert all(set(k) == {"key", "updated_at"} for k in first.json())
     entries = {e.key: e for e in sync_db.scalars(select(SecretStoreEntry).where(SecretStoreEntry.key.in_(["OLD", "NEW_ONE"])))}
-    assert len(entries) == 2 and all("after" not in e.value_encrypted and "v1" not in e.value_encrypted for e in entries.values())
+    assert len(entries) == 2 and all("after-value" not in e.value_encrypted and "first-value" not in e.value_encrypted for e in entries.values())
 
 
 def test_bulk_set_keys_rejects_the_whole_request(admin):
