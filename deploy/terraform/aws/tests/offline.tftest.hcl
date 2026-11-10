@@ -39,9 +39,9 @@ mock_provider "aws" {
   }
   mock_resource "aws_eks_cluster" {
     defaults = {
-      arn      = "arn:aws:eks:eu-central-1:123456789012:cluster/exradius"
-      endpoint = "https://ABC.gr7.eu-central-1.eks.amazonaws.com"
-      identity = [{ oidc = [{ issuer = "https://oidc.eks.eu-central-1.amazonaws.com/id/ABC" }] }]
+      arn                   = "arn:aws:eks:eu-central-1:123456789012:cluster/exradius"
+      endpoint              = "https://ABC.gr7.eu-central-1.eks.amazonaws.com"
+      identity              = [{ oidc = [{ issuer = "https://oidc.eks.eu-central-1.amazonaws.com/id/ABC" }] }]
       certificate_authority = [{ data = "Y2E=" }]
     }
   }
