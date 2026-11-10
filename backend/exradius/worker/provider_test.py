@@ -84,7 +84,8 @@ class ProviderTester:
                 objects = run_objects.probe_run(
                     test_id=test_id, namespace=self.runs.namespace, runtime=runtime,
                     runtime_image=self.settings.runtime_image(runtime), image=self.settings.project_default_image,
-                    provider_env=runtime_environment(runtime, self.box, provider), model=test.model, token=token,
+                    provider_env=runtime_environment(runtime, provider, self.settings.egress_url), model=test.model,
+                    token=token,
                 )
                 test.token_hash = hash_token(token)
             await session.commit()

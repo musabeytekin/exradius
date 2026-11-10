@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 INTERPRETER_VARIABLES = (
@@ -37,6 +37,11 @@ RUNTIME_DIR = "EXRADIUS_RUNTIME_DIR"
 """Set by the bundle's launcher (``bin/exradius-runner``); not part of the container's
 environment."""
 
+EGRESS_VARIABLES = ("EXRADIUS_EGRESS_URL", "EXRADIUS_EGRESS_PEERS")
+"""The egress proxy's reverse URL and the name of its pods, for the runner's clones and its
+wait for the agent phase (``exradius.runner.egress``); the agent's tools use the proxy
+through ``HTTPS_PROXY`` and their git config instead."""
+
 
 @dataclass(frozen=True)
 class RunnerEnvironment:
@@ -46,6 +51,8 @@ class RunnerEnvironment:
     run_token: str | None
     runtime_dir: Path | None
     """The bundle directory, or ``None`` outside a bundle (tests, development)."""
+    egress: dict[str, str] = field(default_factory=dict)
+    """``EGRESS_VARIABLES`` as the container got them."""
 
 
 def isolate(environ: MutableMapping[str, str] | None = None) -> RunnerEnvironment:
@@ -54,6 +61,7 @@ def isolate(environ: MutableMapping[str, str] | None = None) -> RunnerEnvironmen
     environ = os.environ if environ is None else environ
     runtime_dir = environ.pop(RUNTIME_DIR, None)
     run_token = environ.pop(RUN_TOKEN, None)
+    egress = {name: environ.pop(name) for name in EGRESS_VARIABLES if name in environ}
     for name in [k for k in environ if KUBELET_VARIABLES.match(k)]:
         # From the runner's process too: the SDK starts the CLI with it, overlaid by the copy.
         environ.pop(name)
@@ -64,4 +72,5 @@ def isolate(environ: MutableMapping[str, str] | None = None) -> RunnerEnvironmen
         container=container,
         run_token=run_token,
         runtime_dir=Path(runtime_dir) if runtime_dir else None,
+        egress=egress,
     )

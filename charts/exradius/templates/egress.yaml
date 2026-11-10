@@ -1,0 +1,190 @@
+{{- /* The egress proxy (docs/kubernetes.md §3, §11): every request of run and build pods goes
+through it. A forward proxy on 3128 (HTTP_PROXY, HTTPS_PROXY) decides by host name; an
+injecting reverse proxy on 3129 adds the run's model, repository and connection credentials,
+which it reads from the api's internal port with its ServiceAccount token (audience
+exradius-api, checked there with a TokenReview). Its only Kubernetes right is to watch the
+pods of the runs and builds namespaces: a pod's address is its identity. */ -}}
+{{- $e := .Values.egress -}}
+{{- $runs := .Values.namespaces.runs -}}
+{{- $builds := .Values.namespaces.builds -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exradius-egress
+  labels:
+    {{- include "exradius.componentLabels" (list . "egress") | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: exradius-egress
+  namespace: {{ $runs }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "egress") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: exradius-egress
+  namespace: {{ $runs }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "egress") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: exradius-egress
+subjects:
+  - kind: ServiceAccount
+    name: exradius-egress
+    namespace: {{ .Release.Namespace }}
+{{- if eq .Values.builds.egress "proxy" }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: exradius-egress
+  namespace: {{ $builds }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "egress") | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: exradius-egress
+  namespace: {{ $builds }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "egress") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: exradius-egress
+subjects:
+  - kind: ServiceAccount
+    name: exradius-egress
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exradius-egress
+  labels:
+    {{- include "exradius.componentLabels" (list . "egress") | nindent 4 }}
+spec:
+  replicas: {{ $e.replicas }}
+  selector:
+    matchLabels:
+      {{- include "exradius.selector" (list . "egress") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "exradius.componentLabels" (list . "egress") | nindent 8 }}
+    spec:
+      serviceAccountName: exradius-egress
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: egress
+          image: {{ include "exradius.image" (list . .Values.images.egress) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - --api-url={{ include "exradius.internalApiUrl" . }}
+            - --token-file=/var/run/secrets/exradius-api/token
+            - --runs-namespace={{ $runs }}
+            - --builds-namespace={{ if eq .Values.builds.egress "proxy" }}{{ $builds }}{{ end }}
+            - --upstream-no-proxy={{ join "," $e.upstreamNoProxy }}
+            - --allow-private={{ join "," $e.allowPrivate }}
+            {{- if $e.caBundle.configMap }}
+            - --ca-bundle=/etc/exradius/ca/{{ $e.caBundle.key }}
+            {{- end }}
+            - --log-level={{ $e.logLevel }}
+          env:
+            {{- if $e.upstreamProxySecret.name }}
+            # The corporate proxy's URL, with its credentials, from a Secret.
+            - name: EXRADIUS_UPSTREAM_PROXY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $e.upstreamProxySecret.name }}
+                  key: {{ $e.upstreamProxySecret.key }}
+            {{- else if $e.upstreamProxy }}
+            - name: EXRADIUS_UPSTREAM_PROXY
+              value: {{ $e.upstreamProxy | quote }}
+            {{- end }}
+          ports:
+            - {name: forward, containerPort: 3128}
+            - {name: reverse, containerPort: 3129}
+            - {name: health, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /readyz, port: health}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 20
+          {{- with $e.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "exradius.containerSecurity" true | nindent 12 }}
+          volumeMounts:
+            - {name: api-token, mountPath: /var/run/secrets/exradius-api, readOnly: true}
+            {{- if $e.caBundle.configMap }}
+            - {name: ca, mountPath: /etc/exradius/ca, readOnly: true}
+            {{- end }}
+      volumes:
+        # Its identity for the api: a token for the audience exradius-api, rotated by the
+        # kubelet. The api checks it with a TokenReview.
+        - name: api-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: exradius-api
+                  expirationSeconds: 3600
+                  path: token
+        {{- if $e.caBundle.configMap }}
+        - name: ca
+          configMap:
+            name: {{ $e.caBundle.configMap }}
+        {{- end }}
+---
+# What run and build pods point HTTP_PROXY (3128) and their routes (3129) at.
+apiVersion: v1
+kind: Service
+metadata:
+  name: exradius-egress
+  labels:
+    {{- include "exradius.componentLabels" (list . "egress") | nindent 4 }}
+spec:
+  selector:
+    {{- include "exradius.selector" (list . "egress") | nindent 4 }}
+  ports:
+    - {name: forward, port: 3128, targetPort: forward}
+    - {name: reverse, port: 3129, targetPort: reverse}
+---
+# Every proxy pod by address: the runner asks each one whether it sees the agent phase.
+apiVersion: v1
+kind: Service
+metadata:
+  name: exradius-egress-pods
+  labels:
+    {{- include "exradius.componentLabels" (list . "egress") | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    {{- include "exradius.selector" (list . "egress") | nindent 4 }}
+  ports:
+    - {name: reverse, port: 3129, targetPort: reverse}

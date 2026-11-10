@@ -60,6 +60,8 @@ docker_build('exradius-frontend', 'frontend', ignore=['node_modules', 'dist', 'c
 docker_build('exradius-operator', '.', dockerfile='deploy/operator.Dockerfile', only=['operator'],
              ignore=['operator/bin', 'operator/testbin'])
 
+docker_build('exradius-egress', '.', dockerfile='deploy/egress.Dockerfile', only=['egress'], ignore=['egress/bin'])
+
 # Not run by any Deployment: the worker names them in run pods, so Tilt writes the pushed
 # references into its environment (EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE,
 # EXRADIUS_PROJECT_DEFAULT_IMAGE).
@@ -121,6 +123,16 @@ k8s_resource(
         'exradius-operator:rolebinding:exradius',
         'exradius-operator:rolebinding:exradius-runs',
         'exradius-operator:rolebinding:exradius-builds',
+        'exradius-egress:serviceaccount',
+        'exradius-egress:role:exradius-runs',
+        'exradius-egress:role:exradius-builds',
+        'exradius-egress:rolebinding:exradius-runs',
+        'exradius-egress:rolebinding:exradius-builds',
+        'exradius-exradius-api-auth:clusterrolebinding',
+        'exradius-run:networkpolicy:exradius-runs',
+        'exradius-build:networkpolicy:exradius-builds',
+        'exradius-api:networkpolicy',
+        'exradius-egress:networkpolicy',
     ],
     labels=['stack'],
 )
@@ -134,5 +146,6 @@ STACK = ['setup', 'exradius-postgres', 'exradius-rabbitmq', 'exradius-seaweedfs'
 k8s_resource('exradius-api', resource_deps=STACK, labels=['exradius'], port_forwards=['8100:8000'])
 k8s_resource('exradius-worker', resource_deps=STACK, labels=['exradius'])
 k8s_resource('exradius-operator', resource_deps=['setup'], labels=['exradius'])
+k8s_resource('exradius-egress', resource_deps=['setup'], labels=['exradius'])
 k8s_resource('exradius-frontend', resource_deps=['exradius-api'], labels=['exradius'],
              port_forwards=['3100:8080'])

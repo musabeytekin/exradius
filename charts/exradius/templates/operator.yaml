@@ -52,6 +52,10 @@ spec:
             - --node-selector={{ $runs.nodeSelector | default dict | toJson }}
             - --tolerations={{ $runs.tolerations | default list | toJson }}
             - --image-pull-secrets={{ join "," $runs.imagePullSecrets }}
+            - --egress-proxy={{ include "exradius.egressProxy" . }}
+            - --egress-url={{ include "exradius.egressUrl" . }}
+            - --egress-peers={{ include "exradius.serviceHost" (list . "exradius-egress-pods") }}
+            - --build-egress={{ .Values.builds.egress }}
             - --builds-namespace={{ .Values.namespaces.builds }}
             - --builder-image={{ .Values.builds.builderImage }}
             - --build-service-account=exradius-build

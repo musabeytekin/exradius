@@ -45,6 +45,15 @@ app.kubernetes.io/component: {{ index . 1 }}
 http://{{ include "exradius.serviceHost" (list . "exradius-api-internal") }}:8001
 {{- end -}}
 
+{{/* The egress proxy's forward and reverse addresses, as run and build pods reach them. */}}
+{{- define "exradius.egressProxy" -}}
+http://{{ include "exradius.serviceHost" (list . "exradius-egress") }}:3128
+{{- end -}}
+
+{{- define "exradius.egressUrl" -}}
+http://{{ include "exradius.serviceHost" (list . "exradius-egress") }}:3129
+{{- end -}}
+
 {{/* Pod and container security contexts for Pod Security "restricted": (list uid gid) */}}
 {{- define "exradius.podSecurity" -}}
 runAsNonRoot: true
@@ -156,6 +165,8 @@ http://{{ include "exradius.serviceHost" (list . .Values.objectStore.inCluster.n
   value: {{ .Values.broker.publicPort | quote }}
 - name: EXRADIUS_CACHE_DIR
   value: /var/cache/exradius
+- name: EXRADIUS_EGRESS_URL
+  value: {{ include "exradius.egressUrl" . | quote }}
 - name: HOME
   value: /tmp
 {{- end -}}
@@ -188,4 +199,28 @@ root:x:0:
 {{ if ne $gid 0 -}}
 runner:x:{{ $gid }}:
 {{ end -}}
+{{- end -}}
+
+{{/* NetworkPolicy peers (templates/networkpolicies.yaml): the cluster DNS, and a component of
+this release by its selector: (list . "egress") */}}
+{{- define "exradius.dnsPeer" -}}
+- to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Values.networkPolicy.dns.namespace }}
+      podSelector:
+        matchLabels:
+          {{- toYaml .Values.networkPolicy.dns.podLabels | nindent 10 }}
+  ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+{{- end -}}
+{{- define "exradius.peer" -}}
+{{- $root := index . 0 -}}
+- namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ $root.Release.Namespace }}
+  podSelector:
+    matchLabels:
+      {{- include "exradius.selector" (list $root (index . 1)) | nindent 6 }}
 {{- end -}}

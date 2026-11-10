@@ -159,12 +159,9 @@ async def test_prepare_of_a_verify_run_fetches_no_attachments(tmp_path, monkeypa
     assert (tmp_path / "work" / ".exradius" / "attachments").is_dir()
 
 
-def clone_env(remote, folder="app", branch="", index="0", auth=None):
-    env = {"EXRADIUS_CLONE_FOLDER": folder, "EXRADIUS_CLONE_URL": str(remote), "EXRADIUS_CLONE_BRANCH": branch,
-           "EXRADIUS_CLONE_INDEX": index}
-    if auth:
-        env["EXRADIUS_GIT_AUTH"] = auth
-    return env
+def clone_env(remote, folder="app", branch="", index="0"):
+    return {"EXRADIUS_CLONE_FOLDER": folder, "EXRADIUS_CLONE_URL": str(remote), "EXRADIUS_CLONE_BRANCH": branch,
+            "EXRADIUS_CLONE_INDEX": index}
 
 
 def test_clone_step(tmp_path, remote_repo, capsys):
@@ -193,11 +190,45 @@ def test_clone_step_without_a_branch_and_a_half_done_attempt(tmp_path, remote_re
 def test_clone_step_failure_is_redacted(tmp_path, capsys):
     work, state = tmp_path / "work", tmp_path / "state"
     work.mkdir()
-    code = workspace.clone(work, state, clone_env(tmp_path / "missing.git", auth="s3cret-token"))
+    code = workspace.clone(work, state, clone_env("https://user:s3cret-token@127.0.0.1:9/missing.git"))
     assert code == 1
     out = capsys.readouterr().out
     assert "failed" in out and "s3cret-token" not in out
     assert not workspace.marker(state, "clone-0").exists()
+
+
+def test_clone_and_mirror_go_through_the_proxy_route(tmp_path, remote_repo):
+    """No credential in the clone container: the mirror's fetch is rewritten to the egress
+    proxy's git route (a stand-in that adds the credential), and both the mirror and the
+    clone keep the plain URL as origin (docs/kubernetes.md §7.5)."""
+    import shutil
+    import subprocess
+
+    from tests.test_git_identity import GitHttpServer, RouteProxy
+
+    root = tmp_path / "served"
+    root.mkdir()
+    shutil.copytree(remote_repo, root / "app.git")
+    server = GitHttpServer(root, "x-access-token", "repo-token")
+    proxy = RouteProxy("x-access-token:repo-token")
+    try:
+        url = f"{server.url}/app.git"
+        work, state, mirrors = tmp_path / "work", tmp_path / "state", tmp_path / "mirrors"
+        work.mkdir()
+        env = {**clone_env(url, branch="feature"), "EXRADIUS_MIRROR_DIR": str(mirrors)}
+        assert workspace.clone(work, state, env, proxy.url) == 0
+        assert (work / "app" / "feature.txt").exists()
+        assert proxy.requests and all(" /git/127.0.0.1:" in r for r in proxy.requests)
+        for repo in (mirrors / "app.git", work / "app"):
+            origin = subprocess.run(["git", "config", "remote.origin.url"], cwd=repo, capture_output=True, text=True)
+            assert origin.stdout.strip() == url
+        # Without the route there is no credential: the server refuses.
+        work2, state2 = tmp_path / "work2", tmp_path / "state2"
+        work2.mkdir()
+        assert workspace.clone(work2, state2, clone_env(url)) == 1
+    finally:
+        proxy.close()
+        server.close()
 
 
 async def test_files_sidecar_writes_answer_attachments(tmp_path, monkeypatch):

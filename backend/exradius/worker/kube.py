@@ -287,5 +287,15 @@ class KubeCluster:
             raise self._error(response)
         return response.json()
 
+    async def review_token(self, token: str, audiences: list[str]) -> dict[str, Any]:
+        """A TokenReview's status: who ``token`` belongs to, for ``audiences``. The api uses
+        it to authenticate the egress proxy (its RBAC: ``system:auth-delegator``)."""
+        body = {"apiVersion": "authentication.k8s.io/v1", "kind": "TokenReview",
+                "spec": {"token": token, "audiences": audiences}}
+        response = await self._request("POST", "/apis/authentication.k8s.io/v1/tokenreviews", body=body)
+        if response.status_code >= 300:
+            raise self._error(response)
+        return response.json().get("status") or {}
+
     async def aclose(self) -> None:
         await self._client.aclose()

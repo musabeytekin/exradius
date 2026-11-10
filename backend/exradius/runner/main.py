@@ -30,7 +30,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from exradius.runner import delivery, gitconfig, workspace
+from exradius.runner import delivery, egress, gitconfig, workspace
 from exradius.runner.client import HttpProbeApi, HttpRunApi, HttpVerifyApi, RunApi, RunEnded
 from exradius.runner.environment import RunnerEnvironment, isolate
 from exradius.runner.prompt import build_resume_message, build_system_prompt, build_task_message
@@ -167,7 +167,10 @@ class Session:
 
 async def execute(api: RunApi, run_id: str, working_dir: Path, state_dir: Path,
                   environment: RunnerEnvironment | None = None) -> OutcomeReport:
-    """The session to its outcome (without the delivery check)."""
+    """The session to its outcome (without the delivery check), once the egress proxy sees
+    the agent phase."""
+    if environment is not None:
+        await egress.wait_for_agent_phase(environment.egress)
     return await Session(api, run_id, working_dir, state_dir, environment).drive()
 
 
@@ -257,6 +260,7 @@ async def probe(runtime_name: str, environment: RunnerEnvironment, model: str | 
     """Provider test (providers.md §2.3): a one-line session with the provider injected. With
     ``--report`` the result also goes to the internal API (a probe Run)."""
     try:
+        await egress.wait_for_agent_phase(environment.egress)
         result = await get_runtime(runtime_name, environment.runtime_dir).probe(environment.container, model)
         report = {"ok": result.ok, "detail": result.detail, "error": result.error}
     except Exception as exc:
@@ -279,6 +283,7 @@ async def verify(verification_id: str, environment: RunnerEnvironment) -> int:
 
     api = HttpVerifyApi(os.environ["EXRADIUS_API_URL"], verification_id, environment.run_token or "")
     try:
+        await egress.wait_for_agent_phase(environment.egress)
         spec = await api.get_spec()
         for connection in spec.connections:
             result = await list_tools.report(connection.model_dump(), dict(environment.container))
@@ -320,7 +325,8 @@ def run() -> None:
     if mode == "--clone":
         work = Path(os.environ.get("EXRADIUS_WORK_DIR", "/work"))
         state = Path(os.environ.get("EXRADIUS_STATE_DIR", "/exradius/state"))
-        raise SystemExit(workspace.clone(work, state, dict(environment.container)))
+        raise SystemExit(workspace.clone(work, state, dict(environment.container),
+                                         environment.egress.get("EXRADIUS_EGRESS_URL")))
     if mode == "--files" and len(args) > 1:
         directory = Path(os.environ.get("EXRADIUS_ATTACHMENTS_DIR", "/exradius/attachments"))
         raise SystemExit(asyncio.run(workspace.files(args[1], api_url, token, directory)))

@@ -1,7 +1,8 @@
 {{- /* ServiceAccounts and RBAC (docs/kubernetes.md §3). The worker asks for Runs and Builds
 and writes their Secrets but cannot create pods or read Secrets; the operator creates pods
 and PVCs in the runs namespace and pods in the builds namespace and has no Secret rights;
-the api and the frontend have no rights. */ -}}
+the api may only review tokens (the egress proxy's); the frontend has no rights. The egress
+proxy's are in egress.yaml. */ -}}
 {{- $runs := .Values.namespaces.runs -}}
 {{- $builds := .Values.namespaces.builds -}}
 apiVersion: v1
@@ -11,6 +12,22 @@ metadata:
   labels:
     {{- include "exradius.componentLabels" (list . "api") | nindent 4 }}
 automountServiceAccountToken: false
+---
+# TokenReviews and SubjectAccessReviews only (the built-in system:auth-delegator role).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-exradius-api-auth
+  labels:
+    {{- include "exradius.componentLabels" (list . "api") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: exradius-api
+    namespace: {{ .Release.Namespace }}
 ---
 apiVersion: v1
 kind: ServiceAccount

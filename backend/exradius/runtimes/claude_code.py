@@ -90,6 +90,14 @@ def settings_argument() -> str:
     return json.dumps(SETTINGS, separators=(",", ":"))
 
 
+PLACEHOLDER = "placeholder"
+"""The provider variable's value in a pod: the egress proxy sends the real credential."""
+
+SESSION_VARIABLES = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+"""Claude Code's telemetry, error reporting and update checks go to Anthropic's hosts
+directly, not through ``ANTHROPIC_BASE_URL``; the agent phase would refuse each one (and
+the task page list it), so a session makes none."""
+
 OAUTH_NOTICE = (
     "Anthropic restricts subscription tokens to personal use of Claude Code; products built "
     "on the Agent SDK should use an API key."
@@ -121,16 +129,32 @@ class ClaudeCodeRuntime:
         )
     )
     credential_variables = frozenset(
-        {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
+        {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"}
     )
+    upstream = "https://api.anthropic.com"
 
     @classmethod
-    def provider_environment(cls, provider: ProviderCredential) -> dict[str, str]:
+    def provider_environment(cls, kind: str, auth_method: str, model_url: str) -> dict[str, str]:
+        """The workstation's provider variables: Claude Code talks to the egress proxy's
+        model route (``model_url``) with a placeholder, which the proxy replaces with the
+        credential (docs/kubernetes.md §10). No secret."""
+        match (kind, auth_method):
+            case ("anthropic", "api_key"):
+                return {"ANTHROPIC_BASE_URL": model_url, "ANTHROPIC_API_KEY": PLACEHOLDER}
+            case ("anthropic", "oauth_token"):
+                return {"ANTHROPIC_BASE_URL": model_url, "CLAUDE_CODE_OAUTH_TOKEN": PLACEHOLDER}
+        raise ValueError(f"Claude Code cannot use a {kind}/{auth_method} provider")
+
+    @classmethod
+    def provider_route(cls, provider: ProviderCredential) -> tuple[str, dict[str, str]]:
+        """Where the proxy's model route goes, and the header it sets there: the key as
+        ``x-api-key``, a subscription token as a bearer token (what Claude Code sends
+        itself with each)."""
         match (provider.kind, provider.auth_method):
             case ("anthropic", "api_key"):
-                return {"ANTHROPIC_API_KEY": provider.credential}
+                return cls.upstream, {"x-api-key": provider.credential}
             case ("anthropic", "oauth_token"):
-                return {"CLAUDE_CODE_OAUTH_TOKEN": provider.credential}
+                return cls.upstream, {"Authorization": f"Bearer {provider.credential}"}
         raise ValueError(f"Claude Code cannot use a {provider.kind}/{provider.auth_method} provider")
 
     def __init__(self, runtime_dir: Path | None = None):
@@ -139,8 +163,9 @@ class ClaudeCodeRuntime:
     @staticmethod
     def session_environment(env: dict[str, str], config_dir: Path | str) -> dict[str, str]:
         """What the CLI, and so the agent's shell, gets on top of the runner's cleaned
-        process environment: the container's environment plus ``CLAUDE_CONFIG_DIR``."""
-        return {**env, "CLAUDE_CONFIG_DIR": str(config_dir)}
+        process environment: the container's environment plus ``CLAUDE_CONFIG_DIR`` and
+        ``SESSION_VARIABLES``."""
+        return {**env, **SESSION_VARIABLES, "CLAUDE_CONFIG_DIR": str(config_dir)}
 
     async def probe(self, env: dict[str, str], model: str | None = None) -> ProbeResult:
         """"Reply with OK" in a session without tools, with ``env`` (the container's

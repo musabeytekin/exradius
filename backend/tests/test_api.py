@@ -364,7 +364,10 @@ def test_internal_spec_resolves_connections_and_secrets(client, admin, sync_db, 
     assert spec["agent_prompt"] == "You fix bugs." and spec["context"] == {"k": "v"}
     assert spec["environment_text"].startswith("# Your environment\n\nYou run unattended in a Linux container built from the image exradius-project-default")
     by_name = {c["name"]: c for c in spec["connections"]}
-    assert by_name["docs"]["headers"] == {"Authorization": "Bearer docs-key"}
+    # An HTTP connection with a secret header goes to the egress proxy's route without it;
+    # the proxy adds it (docs/kubernetes.md §10).
+    assert by_name["docs"]["url"] == "http://exradius-egress.exradius.svc.cluster.local:3129/mcp/docs"
+    assert by_name["docs"]["headers"] == {} and "docs-key" not in json.dumps(spec)
     assert by_name["sentry"] == {"name": "sentry", "transport": "stdio", "command": "npx",
                                  "args": ["-y", "sentry-mcp", "--read-only"], "url": None,
                                  "env": {"SENTRY_TOKEN": "sentry"}, "headers": {}}

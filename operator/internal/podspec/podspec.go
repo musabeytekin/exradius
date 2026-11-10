@@ -3,15 +3,21 @@
 // operator's configuration. The security context is written here and nothing in a Run
 // can change it (§7.8).
 //
+// Every container of a run pod reaches the network only through the egress proxy
+// (docs/kubernetes.md §11): the operator writes the proxy variables, JAVA_TOOL_OPTIONS for
+// Java's own HTTP, and the runner's route to the proxy into each, and NetworkPolicy (the
+// chart) refuses everything else.
+//
 // The setup skill's local check (scripts/check.sh in github.com/musabeytekin/exradius-skill,
 // docs/setup-and-verify.md §2.4) mirrors this pod with the Docker CLI: the shared network
-// namespace, the services' security and readiness, the run user's conditions. Changing one
-// means changing the other.
+// namespace, the services' security and readiness, the run user's conditions, the proxy
+// variables. Changing one means changing the other.
 package podspec
 
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -89,6 +95,7 @@ type Config struct {
 	ServiceMemoryRequest resource.Quantity
 	ServiceCPURequest    resource.Quantity
 	ProjectVolume        ProjectVolumeConfig
+	Egress               EgressConfig
 	RuntimeClassName     string
 	UserNamespaces       bool
 	NodeSelector         map[string]string
@@ -102,6 +109,21 @@ type ProjectVolumeConfig struct {
 	AccessMode   corev1.PersistentVolumeAccessMode
 	StorageClass string
 	Size         resource.Quantity
+}
+
+// EgressConfig is the egress proxy as pods reach it (docs/kubernetes.md §11).
+type EgressConfig struct {
+	// Proxy is the forward proxy (http://host:3128): HTTP_PROXY and HTTPS_PROXY. Empty: no
+	// proxy variables (a cluster without the proxy; tests).
+	Proxy string
+	// URL is the injecting reverse proxy (http://host:3129): the runner's clones go to its
+	// git route, and the runner asks it for the pod's phase.
+	URL string
+	// Peers resolves to every proxy pod (a headless Service): the runner asks each one.
+	Peers string
+	// NoProxy are further hosts reached directly; localhost, the services and the api's and
+	// the proxy's own hosts always are.
+	NoProxy []string
 }
 
 // Builder makes the objects of a Run. Pods is the only backend; an agent-sandbox backend
@@ -493,6 +515,108 @@ func mergeEnv(lists ...[]corev1.EnvVar) []corev1.EnvVar {
 	return out
 }
 
+func hostOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+func portOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if u.Port() != "" {
+		return u.Port()
+	}
+	if u.Scheme == "https" {
+		return "443"
+	}
+	return "80"
+}
+
+// noProxy are the hosts every container reaches without the proxy: the pod itself, its
+// services (on localhost by name), the api's internal port and the proxy's routes.
+func (b Pods) noProxy(run *v1.Run) []string {
+	hosts := []string{"localhost", "127.0.0.1", "::1"}
+	for _, svc := range run.Spec.Services {
+		hosts = append(hosts, svc.Name)
+	}
+	for _, h := range append([]string{hostOf(b.Config.APIURL), hostOf(b.Config.Egress.URL)}, b.Config.Egress.NoProxy...) {
+		if h != "" && !contains(hosts, h) {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
+}
+
+func contains(list []string, item string) bool {
+	for _, x := range list {
+		if x == item {
+			return true
+		}
+	}
+	return false
+}
+
+// proxyEnv points a container's HTTP clients at the forward proxy (upper and lower case:
+// tools read either). Yarn 2 and later read only their own variables (found with Outline:
+// its install timed out on the direct connection NetworkPolicy drops).
+func (b Pods) proxyEnv(run *v1.Run) []corev1.EnvVar {
+	proxy := b.Config.Egress.Proxy
+	if proxy == "" {
+		return nil
+	}
+	none := strings.Join(b.noProxy(run), ",")
+	return []corev1.EnvVar{
+		{Name: "HTTP_PROXY", Value: proxy}, {Name: "HTTPS_PROXY", Value: proxy},
+		{Name: "http_proxy", Value: proxy}, {Name: "https_proxy", Value: proxy},
+		{Name: "NO_PROXY", Value: none}, {Name: "no_proxy", Value: none},
+		{Name: "YARN_HTTP_PROXY", Value: proxy}, {Name: "YARN_HTTPS_PROXY", Value: proxy},
+	}
+}
+
+// javaEnv is JAVA_TOOL_OPTIONS with the proxy as Java's own HTTP reads it, after any
+// options the project set itself. Maven 3.9's resolver reads only settings.xml unless
+// told to use these system properties too (found with bank: "Network is unreachable").
+func (b Pods) javaEnv(run *v1.Run) []corev1.EnvVar {
+	proxy := b.Config.Egress.Proxy
+	if proxy == "" {
+		return nil
+	}
+	host, port := hostOf(proxy), portOf(proxy)
+	var hosts []string
+	for _, h := range b.noProxy(run) {
+		if !strings.Contains(h, ":") { // Java's list has no IPv6 literals
+			hosts = append(hosts, h)
+		}
+	}
+	options := fmt.Sprintf("-Dhttp.proxyHost=%s -Dhttp.proxyPort=%s -Dhttps.proxyHost=%s -Dhttps.proxyPort=%s -Dhttp.nonProxyHosts=%s"+
+		" -Daether.connector.http.useSystemProperties=true", host, port, host, port, strings.Join(hosts, "|"))
+	for _, v := range run.Spec.Workstation.Env {
+		if v.Name == "JAVA_TOOL_OPTIONS" && v.SecretKey == "" && v.Value != "" {
+			options = v.Value + " " + options
+		}
+	}
+	return []corev1.EnvVar{{Name: "JAVA_TOOL_OPTIONS", Value: options}}
+}
+
+// runnerEgressEnv tells the runner where the proxy's routes are (its clones, its wait for
+// the agent phase); the runner keeps them out of the agent's environment.
+func (b Pods) runnerEgressEnv() []corev1.EnvVar {
+	e := b.Config.Egress
+	if e.URL == "" {
+		return nil
+	}
+	env := []corev1.EnvVar{{Name: "EXRADIUS_EGRESS_URL", Value: e.URL}}
+	if e.Peers != "" {
+		env = append(env, corev1.EnvVar{Name: "EXRADIUS_EGRESS_PEERS", Value: e.Peers})
+	}
+	return env
+}
+
 // cacheMounts mount each workstation.cache directory at its path: caches/<name> of the
 // project volume, or of the workspace without one (an empty directory per run).
 func (b Pods) cacheMounts(run *v1.Run) []corev1.VolumeMount {
@@ -542,7 +666,7 @@ func (b Pods) prepare(run *v1.Run) corev1.Container {
 		Image:           run.Spec.Workstation.Image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command:         []string{Runner, "--prepare", string(run.Spec.Purpose), run.Spec.ID},
-		Env:             env,
+		Env:             mergeEnv(env, b.proxyEnv(run)),
 		VolumeMounts:    mounts,
 		SecurityContext: b.securityContext(),
 	}
@@ -556,9 +680,7 @@ func (b Pods) clone(run *v1.Run, n int) corev1.Container {
 		{Name: "EXRADIUS_CLONE_BRANCH", Value: repo.Branch},
 		{Name: "EXRADIUS_CLONE_INDEX", Value: strconv.Itoa(n)},
 	}
-	if repo.CredentialKey != "" {
-		env = append(env, secretEnv(run, "EXRADIUS_GIT_AUTH", repo.CredentialKey))
-	}
+	// No credential: the fetch goes to the proxy's git route, which adds it (§7.5).
 	mounts := append(append(workspaceMounts(false), runtimeMount()), identityMounts()...)
 	if b.usesProjectVolume(run) {
 		// The mirrors are refreshed here, under a file lock next to each (§7.5).
@@ -571,7 +693,7 @@ func (b Pods) clone(run *v1.Run, n int) corev1.Container {
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command:         []string{Runner, "--clone"},
 		WorkingDir:      WorkDir,
-		Env:             mergeEnv(b.baseEnv(run), pathEnv(WorkDir), env),
+		Env:             mergeEnv(b.baseEnv(run), pathEnv(WorkDir), env, b.proxyEnv(run), b.runnerEgressEnv()),
 		VolumeMounts:    mounts,
 		SecurityContext: b.securityContext(),
 	}
@@ -597,7 +719,7 @@ func (b Pods) service(run *v1.Run, svc v1.ServiceSpec) corev1.Container {
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		// A config's command is Docker's CMD: the image's ENTRYPOINT is kept.
 		Args:            svc.Command,
-		Env:             specEnv(run, svc.Env),
+		Env:             mergeEnv(specEnv(run, svc.Env), b.proxyEnv(run)),
 		RestartPolicy:   ptr.To(corev1.ContainerRestartPolicyAlways),
 		StartupProbe:    startupProbe(svc),
 		Resources:       resources,
@@ -627,7 +749,8 @@ func (b Pods) setup(run *v1.Run, n int) corev1.Container {
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command:         []string{"/bin/sh", "-c", run.Spec.Workstation.Setup[n]},
 		WorkingDir:      WorkDir,
-		Env:             mergeEnv(specEnv(run, run.Spec.Workstation.Env), pathEnv(WorkDir), specEnv(run, run.Spec.Git.SetupEnv)),
+		Env: mergeEnv(specEnv(run, run.Spec.Workstation.Env), pathEnv(WorkDir), specEnv(run, run.Spec.Git.SetupEnv),
+			b.proxyEnv(run), b.javaEnv(run)),
 		Resources:       b.workstationResources(run),
 		VolumeMounts:    append(append(workspaceMounts(true), identityMounts()...), b.cacheMounts(run)...),
 		SecurityContext: b.securityContext(),
@@ -649,7 +772,7 @@ func (b Pods) files(run *v1.Run) corev1.Container {
 		Env: mergeEnv(b.baseEnv(run), []corev1.EnvVar{
 			{Name: "HOME", Value: "/tmp"},
 			{Name: "EXRADIUS_ATTACHMENTS_DIR", Value: FilesMountDir},
-		}),
+		}, b.proxyEnv(run)),
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: volWorkspace, MountPath: FilesMountDir, SubPath: attachmentsPath},
 			runtimeMount(),
@@ -686,6 +809,9 @@ func (b Pods) workstation(run *v1.Run) corev1.Container {
 			pathEnv(WorkDir),
 			specEnv(run, run.Spec.Git.Env),
 			specEnv(run, run.Spec.Runtime.Env),
+			b.proxyEnv(run),
+			b.javaEnv(run),
+			b.runnerEgressEnv(),
 			b.baseEnv(run),
 		),
 		Resources:       b.workstationResources(run),
@@ -705,6 +831,8 @@ func (b Pods) probeWorkstation(run *v1.Run) corev1.Container {
 			specEnv(run, run.Spec.Workstation.Env),
 			pathEnv(HomeDir),
 			specEnv(run, run.Spec.Runtime.Env),
+			b.proxyEnv(run),
+			b.runnerEgressEnv(),
 			b.baseEnv(run),
 		),
 		Resources: b.workstationResources(run),

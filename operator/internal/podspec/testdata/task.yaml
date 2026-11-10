@@ -68,22 +68,46 @@ spec:
           name: run-3f2c
     - name: HOME
       value: /home/runner
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: JAVA_TOOL_OPTIONS
+      value: -Xmx2g -Dhttp.proxyHost=exradius-egress.exradius -Dhttp.proxyPort=3128
+        -Dhttps.proxyHost=exradius-egress.exradius -Dhttps.proxyPort=3128 -Dhttp.nonProxyHosts=localhost|127.0.0.1|postgres|cache|mail|exradius-api-internal.exradius|exradius-egress.exradius
+        -Daether.connector.http.useSystemProperties=true
     - name: EXRADIUS_STATE_DIR
       value: /exradius/state
     - name: EXRADIUS_WORK_DIR
       value: /work
     - name: GIT_AUTHOR_NAME
       value: Developer
-    - name: EXRADIUS_GIT_CREDENTIAL_0
-      valueFrom:
-        secretKeyRef:
-          key: push.0
-          name: run-3f2c
+    - name: GIT_CONFIG_COUNT
+      value: "1"
+    - name: GIT_CONFIG_KEY_0
+      value: url.http://exradius-egress.exradius:3129/git/github.com/acme/saleor.git.insteadOf
+    - name: GIT_CONFIG_VALUE_0
+      value: https://github.com/acme/saleor.git
+    - name: ANTHROPIC_BASE_URL
+      value: http://exradius-egress.exradius:3129/anthropic
     - name: ANTHROPIC_API_KEY
-      valueFrom:
-        secretKeyRef:
-          key: provider.ANTHROPIC_API_KEY
-          name: run-3f2c
+      value: placeholder
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: EXRADIUS_EGRESS_URL
+      value: http://exradius-egress.exradius:3129
+    - name: EXRADIUS_EGRESS_PEERS
+      value: exradius-egress-pods.exradius
     - name: EXRADIUS_API_URL
       value: http://exradius-api-internal.exradius:8001
     - name: EXRADIUS_RUN_TOKEN
@@ -177,6 +201,22 @@ spec:
       value: '[{"path":"/home/runner/.cache/uv","name":"0-cache_uv"},{"path":"/opt/pnpm-store","name":"1-opt_pnpm-store"}]'
     - name: EXRADIUS_PROJECT_DIR
       value: /exradius/project
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: prepare
@@ -227,13 +267,28 @@ spec:
       value: main
     - name: EXRADIUS_CLONE_INDEX
       value: "0"
-    - name: EXRADIUS_GIT_AUTH
-      valueFrom:
-        secretKeyRef:
-          key: repo.0
-          name: run-3f2c
     - name: EXRADIUS_MIRROR_DIR
       value: /exradius/mirrors
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: EXRADIUS_EGRESS_URL
+      value: http://exradius-egress.exradius:3129
+    - name: EXRADIUS_EGRESS_PEERS
+      value: exradius-egress-pods.exradius
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: clone-0
@@ -305,6 +360,26 @@ spec:
       value: "1"
     - name: EXRADIUS_MIRROR_DIR
       value: /exradius/mirrors
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: EXRADIUS_EGRESS_URL
+      value: http://exradius-egress.exradius:3129
+    - name: EXRADIUS_EGRESS_PEERS
+      value: exradius-egress-pods.exradius
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: clone-1
@@ -354,6 +429,22 @@ spec:
         secretKeyRef:
           key: service.postgres.POSTGRES_PASSWORD
           name: run-3f2c
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
     image: postgres:16
     imagePullPolicy: IfNotPresent
     name: service-postgres
@@ -395,6 +486,23 @@ spec:
     - valkey-server
     - --save
     - ""
+    env:
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
     image: valkey/valkey:8.1-alpine
     imagePullPolicy: IfNotPresent
     name: service-cache
@@ -425,7 +533,24 @@ spec:
       tcpSocket:
         port: 6379
       timeoutSeconds: 1
-  - image: axllent/mailpit
+  - env:
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    image: axllent/mailpit
     imagePullPolicy: IfNotPresent
     name: service-mail
     resources:
@@ -462,6 +587,12 @@ spec:
           name: run-3f2c
     - name: HOME
       value: /home/runner
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: JAVA_TOOL_OPTIONS
+      value: -Xmx2g -Dhttp.proxyHost=exradius-egress.exradius -Dhttp.proxyPort=3128
+        -Dhttps.proxyHost=exradius-egress.exradius -Dhttps.proxyPort=3128 -Dhttp.nonProxyHosts=localhost|127.0.0.1|postgres|cache|mail|exradius-api-internal.exradius|exradius-egress.exradius
+        -Daether.connector.http.useSystemProperties=true
     - name: EXRADIUS_STATE_DIR
       value: /exradius/state
     - name: EXRADIUS_WORK_DIR
@@ -472,6 +603,20 @@ spec:
       value: safe.directory
     - name: GIT_CONFIG_VALUE_0
       value: '*'
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: setup-0
@@ -536,6 +681,12 @@ spec:
           name: run-3f2c
     - name: HOME
       value: /home/runner
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: JAVA_TOOL_OPTIONS
+      value: -Xmx2g -Dhttp.proxyHost=exradius-egress.exradius -Dhttp.proxyPort=3128
+        -Dhttps.proxyHost=exradius-egress.exradius -Dhttps.proxyPort=3128 -Dhttp.nonProxyHosts=localhost|127.0.0.1|postgres|cache|mail|exradius-api-internal.exradius|exradius-egress.exradius
+        -Daether.connector.http.useSystemProperties=true
     - name: EXRADIUS_STATE_DIR
       value: /exradius/state
     - name: EXRADIUS_WORK_DIR
@@ -546,6 +697,20 @@ spec:
       value: safe.directory
     - name: GIT_CONFIG_VALUE_0
       value: '*'
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: setup-1
@@ -616,6 +781,22 @@ spec:
       value: /tmp
     - name: EXRADIUS_ATTACHMENTS_DIR
       value: /exradius/attachments
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,postgres,cache,mail,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: files

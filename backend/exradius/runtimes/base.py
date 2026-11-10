@@ -111,7 +111,7 @@ class RuntimeCapabilities:
 
 @dataclass
 class ProviderCredential:
-    """A provider with its credential decrypted, at container start only."""
+    """A provider with its credential decrypted, for the egress proxy's model route only."""
 
     kind: str
     auth_method: str
@@ -143,11 +143,19 @@ class Runtime(Protocol):
     """The provider kinds and auth methods this runtime can inject."""
     credential_variables: ClassVar[frozenset[str]]
     """Every environment variable any provider mapping may set; removed from the project
-    environment so a run gets only its provider's credential."""
+    environment so a run gets only its provider's (and a project cannot point the model
+    elsewhere)."""
 
     @classmethod
-    def provider_environment(cls, provider: ProviderCredential) -> dict[str, str]:
-        """The container environment for ``provider`` (providers.md §2.2)."""
+    def provider_environment(cls, kind: str, auth_method: str, model_url: str) -> dict[str, str]:
+        """The workstation's provider variables (providers.md §2.2): the egress proxy's
+        model route ``model_url`` and a placeholder credential. No secret."""
+        ...
+
+    @classmethod
+    def provider_route(cls, provider: ProviderCredential) -> tuple[str, dict[str, str]]:
+        """The model route's upstream base URL and the headers the egress proxy sets on
+        it, with the credential (docs/kubernetes.md §11)."""
         ...
 
     def __init__(self, runtime_dir: Path | None = None) -> None:

@@ -269,8 +269,8 @@ def test_run_dispatches_the_modes(monkeypatch):
         seen.append(("files", run_id, str(directory)))
         return 0
 
-    def clone(work, state, environ):
-        seen.append(("clone", str(work), str(state)))
+    def clone(work, state, environ, egress_url=None):
+        seen.append(("clone", str(work), str(state), egress_url))
         return 0
 
     async def verify(verification_id, environment):
@@ -283,16 +283,18 @@ def test_run_dispatches_the_modes(monkeypatch):
     monkeypatch.setattr(runner_main, "verify", verify)
     monkeypatch.setenv("EXRADIUS_API_URL", "http://api")
     monkeypatch.setenv("EXRADIUS_RUN_TOKEN", "tok")
+    monkeypatch.setenv("EXRADIUS_EGRESS_URL", "http://egress:3129")
     for argv in (["--prepare", "task", "r-1"], ["--files", "r-1"], ["--clone"], ["--verify", "v-1"]):
         monkeypatch.setattr("sys.argv", ["exradius-runner", *argv])
         monkeypatch.setenv("EXRADIUS_RUN_TOKEN", "tok")  # isolate() removes it each time
+        monkeypatch.setenv("EXRADIUS_EGRESS_URL", "http://egress:3129")  # and this
         with pytest.raises(SystemExit) as exit_info:
             runner_main.run()
         assert exit_info.value.code == 0
     assert seen == [
         ("prepare", "task", "r-1", "http://api", "tok", "/exradius/workspace"),
         ("files", "r-1", "/exradius/attachments"),
-        ("clone", "/work", "/exradius/state"),
+        ("clone", "/work", "/exradius/state", "http://egress:3129"),
         ("verify", "v-1"),
     ]
     monkeypatch.setattr("sys.argv", ["exradius-runner", "--nonsense"])

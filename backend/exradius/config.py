@@ -100,6 +100,19 @@ class Settings(BaseSettings):
     """Registries reached over plain HTTP, comma-separated (the kind registry); the worker
     reads services' image configs there (docs/kubernetes.md §7.4)."""
 
+    # The egress proxy (docs/kubernetes.md §11)
+    egress_url: str = "http://exradius-egress.exradius.svc.cluster.local:3129"
+    """The proxy's injecting reverse proxy, as run pods reach it: the worker points
+    ``ANTHROPIC_BASE_URL`` and each repository's git route there, the api each HTTP
+    connection with secret headers."""
+    egress_allow: str = ""
+    """Hosts every run may reach in the agent phase, comma-separated (values
+    ``egress.allow``), on top of each config's ``network.allow``."""
+    egress_service_account: str = "system:serviceaccount:exradius:exradius-egress"
+    """The proxy's identity: ``/internal/egress/*`` accepts only its ServiceAccount token."""
+    egress_audience: str = "exradius-api"
+    """The audience that token is issued for, checked with a TokenReview."""
+
     @field_validator(
         "s3_endpoint_url", "s3_access_key", "s3_secret_key", "broker_username", "broker_password", "kube_api_url",
         mode="before",
@@ -129,6 +142,10 @@ class Settings(BaseSettings):
             host = f"[{host}]"
         netloc = f"{user}:{quote(password, safe='')}@{host}" + (f":{parts.port}" if parts.port else "")
         return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+    @property
+    def egress_allow_hosts(self) -> list[str]:
+        return [host.strip() for host in self.egress_allow.split(",") if host.strip()]
 
     @property
     def insecure_registry_hosts(self) -> list[str]:

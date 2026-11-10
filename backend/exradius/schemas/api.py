@@ -445,6 +445,30 @@ class TaskDetailOut(TaskSummaryOut):
     events: list[EventOut]
 
 
+class NetworkHostOut(BaseModel):
+    """One host a run's pod asked the egress proxy for."""
+
+    host: str
+    ports: list[int] = Field(default_factory=list)
+    phases: list[str] = Field(default_factory=list)
+    """``setup`` and/or ``agent``."""
+    routes: list[str] = Field(default_factory=list)
+    """``connect`` (a tunnel), ``http``, ``model``, ``git``, ``mcp``."""
+    requests: int = 0
+    bytes: int = 0
+    last_at: datetime | None = None
+    reason: str | None = None
+    """Why the latest refusal was refused (refused hosts only)."""
+
+
+class NetworkOut(BaseModel):
+    """``GET /api/tasks/{task_id}/network``: hosts reached and refused."""
+
+    reached: list[NetworkHostOut] = Field(default_factory=list)
+    refused: list[NetworkHostOut] = Field(default_factory=list)
+    requests: int = 0
+
+
 class TranscriptChunkOut(_Out):
     seq: int
     payload: dict[str, Any]

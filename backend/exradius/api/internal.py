@@ -5,7 +5,12 @@ when it creates the Run, keeps hashed on the run and revokes at finalize: a canc
 runner can still send its delivery check until then. Verify Runs use
 ``/internal/verifications/{id}/*`` and probe Runs ``/internal/probes/{id}/*``, each with its
 own token. Build pods fetch their context from ``/internal/builds/{id}/context`` with
-their Build's token (docs/kubernetes.md §12).
+their Build's token (docs/kubernetes.md §12). The egress proxy's routes are in
+``exradius.api.egress``.
+
+No secret a pod does not need leaves here: an HTTP connection whose headers hold a secret
+is given as the egress proxy's ``/mcp/<name>`` route without those headers, and the proxy
+adds them (docs/kubernetes.md §10).
 
 The runner never changes a run's state. What it reports is stored; ``/reported`` also
 nudges the worker with a ``run_reported`` control message, and the worker's sweep picks up
@@ -38,7 +43,8 @@ from exradius.models import (
     TranscriptChunk,
 )
 from exradius.project_state import cached, store_values
-from exradius.resolve import MissingSecret, agent_connection_specs, connection_spec
+from exradius.network import route_connection
+from exradius.resolve import MissingSecret, connection_spec
 from exradius.schemas import internal as i
 from exradius.schemas.project_config import ProjectConfig
 from exradius.states import State as RunState
@@ -99,6 +105,16 @@ async def delivered_answers(session, run: Run) -> list[i.DeliveredAnswer]:
     ]
 
 
+def _pod_connections(config: ProjectConfig, names, secrets, state) -> list[dict]:
+    """The connections as a pod gets them, secrets substituted except in the headers of an
+    HTTP connection, which goes through the egress proxy's route."""
+    out = []
+    for name in names:
+        definition = config.connection_definition(name)
+        out.append(route_connection(connection_spec(definition, secrets), definition, state.settings.egress_url))
+    return out
+
+
 @router.get("/spec", response_model=i.RunSpecResponse)
 async def run_spec(run: RunDep, session: DB, state: State):
     """Built from the config the run read in ``preparing`` (``runs.config``), with secrets
@@ -110,7 +126,7 @@ async def run_spec(run: RunDep, session: DB, state: State):
     config = ProjectConfig.model_validate(run.config, strict=False)
     secrets = await store_values(session, state.box, config.secret_store)
     try:
-        connections = agent_connection_specs(config, task.agent, secrets)
+        connections = _pod_connections(config, config.agents[task.agent].connections, secrets, state)
     except MissingSecret as exc:
         raise HTTPException(422, str(exc)) from exc
     agent = config.agents[task.agent]
@@ -120,7 +136,8 @@ async def run_spec(run: RunDep, session: DB, state: State):
         runtime=agent.runtime,
         mode="resume" if run.resume_request_ids else "start",
         agent_prompt=agent.role,
-        environment_text=config_environment_text(config, state.settings.project_default_image),
+        environment_text=config_environment_text(config, state.settings.project_default_image, agent=task.agent,
+                                                 install_allow=state.settings.egress_allow_hosts),
         model=agent.model,
         instructions=task.instructions,
         context=task.context,
@@ -291,7 +308,7 @@ async def verify_spec(verification: VerificationDep, session: DB, state: State):
     secrets = await store_values(session, state.box, config.secret_store)
     used = [name for name in config.connections if any(name in a.connections for a in config.agents.values())]
     try:
-        specs = [connection_spec(config.connection_definition(name), secrets) for name in used]
+        specs = _pod_connections(config, used, secrets, state)
     except MissingSecret as exc:
         raise HTTPException(422, str(exc)) from exc
     return i.VerifySpec(connections=[i.ConnectionSpecModel.model_validate(c) for c in specs])

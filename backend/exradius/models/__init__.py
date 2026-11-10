@@ -273,6 +273,10 @@ class Run(Base):
     stays ``preparing``."""
     routing: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
     """How the agent was picked (docs/agent-routing.md §8)."""
+    provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("providers.id", ondelete="SET NULL"), nullable=True)
+    """The provider resolved when the Run was created: the egress proxy's model route uses
+    its credential (docs/kubernetes.md §10)."""
 
     task: Mapped[Task] = relationship(lazy="joined", innerjoin=True)
 
@@ -317,6 +321,39 @@ class TranscriptChunk(Base):
     run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
     seq: Mapped[int] = mapped_column(Integer)
     payload: Mapped[dict[str, Any]] = mapped_column()
+
+
+class EgressRecord(Base):
+    """One request of a run, verification or provider probe through the egress proxy
+    (docs/kubernetes.md §11), as the proxy reported it in a batch."""
+
+    __tablename__ = "egress_records"
+    __table_args__ = (Index("ix_egress_records_object_id_at", "object_id", "at"),)
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True, autoincrement=True
+    )
+    kind: Mapped[str] = mapped_column(String(10))
+    """``task``, ``verify`` or ``probe``: what ``object_id`` is the id of."""
+    object_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    """The run, the verification or the provider test."""
+    at: Mapped[datetime] = mapped_column(Timestamp)
+    phase: Mapped[str] = mapped_column(String(10))
+    """``setup`` or ``agent``."""
+    route: Mapped[str] = mapped_column(String(10))
+    """``connect``, ``http``, ``model``, ``git`` or ``mcp``."""
+    method: Mapped[str | None] = mapped_column(String(16))
+    host: Mapped[str] = mapped_column(String(255))
+    port: Mapped[int] = mapped_column(Integer)
+    path: Mapped[str | None] = mapped_column(Text)
+    """Of a plain HTTP request or a route, without the query."""
+    allowed: Mapped[bool] = mapped_column(Boolean)
+    reason: Mapped[str | None] = mapped_column(Text)
+    """Why it was refused, or why an allowed one failed."""
+    status: Mapped[int | None] = mapped_column(Integer)
+    bytes_sent: Mapped[int] = mapped_column(BigInteger, default=0)
+    bytes_received: Mapped[int] = mapped_column(BigInteger, default=0)
+    duration_ms: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
 class Artifact(Base):
@@ -462,6 +499,7 @@ __all__ = [
     "BridgeStatus",
     "ConnectionTools",
     "DirectoryState",
+    "EgressRecord",
     "Event",
     "GitCredential",
     "ImageBuild",

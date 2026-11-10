@@ -1,7 +1,7 @@
 """Agent identity (docs/agent-identity.md): the git variables a Run's workstation gets
 (``worker/git_identity.py``), the git config and hooks the runner and the bundle write
-(``runner/gitconfig.py``), real commits with the identity and trailers, and pushes through
-the credential helper."""
+(``runner/gitconfig.py``), real commits with the identity and trailers, and pushes that go
+to the egress proxy's git route (a stand-in here; the proxy itself is tested in egress/)."""
 
 from __future__ import annotations
 
@@ -41,9 +41,12 @@ def container_env(home: Path, extra: dict[str, str]) -> dict[str, str]:
             **extra}
 
 
-def resolve(entries: list[dict[str, str]], secret: dict[str, str]) -> dict[str, str]:
-    """Env entries as the kubelet resolves them (``secretKey`` from the per-run Secret)."""
-    return {e["name"]: e["value"] if "value" in e else secret[e["secretKey"]] for e in entries}
+def resolve(entries: list[dict[str, str]]) -> dict[str, str]:
+    """Env entries as the kubelet resolves them: the git ones are all plain values."""
+    return {e["name"]: e["value"] for e in entries}
+
+
+EGRESS = "http://exradius-egress.exradius:3129"
 
 
 # Contents ---------------------------------------------------------------------------------------
@@ -52,39 +55,35 @@ def resolve(entries: list[dict[str, str]], secret: dict[str, str]) -> dict[str, 
 def test_workstation_git_environment():
     repos = [
         RepoSpec("api", "https://git.example/acme/api.git", "main", "ghp_token", push_allowed=True),
-        RepoSpec("docs", "https://git.example/acme/docs.git", "main", "deploy:s3cret", push_allowed=True),
+        RepoSpec("docs", "https://deploy@git.example:8443/acme/docs/", "main", "deploy:s3cret", push_allowed=True),
         RepoSpec("readonly", "https://git.example/acme/ro.git", "main", "ghp_other", push_allowed=False),
         RepoSpec("ssh", "git@git.example:acme/ssh.git", "main", "key", push_allowed=True),
     ]
-    entries, secret = workstation_git(IDENTITY, repos)
-    # Only push-allowed http(s) remotes with a secret; the token part, under push.<N>.
-    assert secret == {"push.0": "ghp_token", "push.1": "s3cret"}
-    assert [e for e in entries if "secretKey" in e] == [
-        {"name": "EXRADIUS_GIT_CREDENTIAL_0", "secretKey": "push.0"},
-        {"name": "EXRADIUS_GIT_CREDENTIAL_1", "secretKey": "push.1"},
-    ]
-    assert "ghp_token" not in json.dumps(entries) and "s3cret" not in json.dumps(entries)  # the spec is secret-free
-    env = resolve(entries, secret)
+    entries = workstation_git(IDENTITY, repos, EGRESS)
+    # No credential at all: the egress proxy adds it on each repository's git route.
+    assert all("value" in e for e in entries)
+    assert not {"ghp_token", "s3cret", "ghp_other", "key"} & {v for e in entries for v in e["value"].split(":")}
+    env = resolve(entries)
     assert env == {
         "GIT_AUTHOR_NAME": 'Bug "Fixer" Bot', "GIT_AUTHOR_EMAIL": "bug-fixer@agents.example",
         "GIT_COMMITTER_NAME": 'Bug "Fixer" Bot', "GIT_COMMITTER_EMAIL": "bug-fixer@agents.example",
         "GIT_CONFIG_GLOBAL": "/exradius/state/git/config",
         "EXRADIUS_AGENT": "bug-fixer", "EXRADIUS_TASK_ID": "T-42",
-        "EXRADIUS_GIT_CREDENTIAL_0": "ghp_token", "EXRADIUS_GIT_CREDENTIAL_1": "s3cret",
-        # The hooks path and the helpers at the command-line level, where no file overrides them.
-        "GIT_CONFIG_COUNT": "7",
+        # The hooks path and the proxy routes at the command-line level, where no file overrides them.
+        "GIT_CONFIG_COUNT": "5",
         "GIT_CONFIG_KEY_0": "safe.directory", "GIT_CONFIG_VALUE_0": "*",
         "GIT_CONFIG_KEY_1": "core.hooksPath", "GIT_CONFIG_VALUE_1": "/opt/exradius/runtime/git-hooks",
-        "GIT_CONFIG_KEY_2": "credential.https://git.example.useHttpPath", "GIT_CONFIG_VALUE_2": "true",
-        "GIT_CONFIG_KEY_3": "credential.https://git.example/acme/api.git.helper", "GIT_CONFIG_VALUE_3": "",
-        "GIT_CONFIG_KEY_4": "credential.https://git.example/acme/api.git.helper",
-        "GIT_CONFIG_VALUE_4": '!f() { test "$1" = get || exit 0; echo "username=x-access-token"; '
-                              'echo "password=$EXRADIUS_GIT_CREDENTIAL_0"; }; f',
-        "GIT_CONFIG_KEY_5": "credential.https://git.example/acme/docs.git.helper", "GIT_CONFIG_VALUE_5": "",
-        "GIT_CONFIG_KEY_6": "credential.https://git.example/acme/docs.git.helper",
-        "GIT_CONFIG_VALUE_6": '!f() { test "$1" = get || exit 0; echo "username=deploy"; '
-                              'echo "password=$EXRADIUS_GIT_CREDENTIAL_1"; }; f',
+        "GIT_CONFIG_KEY_2": f"url.{EGRESS}/git/git.example/acme/api.git.insteadOf",
+        "GIT_CONFIG_VALUE_2": "https://git.example/acme/api.git",
+        "GIT_CONFIG_KEY_3": f"url.{EGRESS}/git/git.example:8443/acme/docs.insteadOf",
+        "GIT_CONFIG_VALUE_3": "https://deploy@git.example:8443/acme/docs/",
+        # push: false is fetched through the proxy too, which refuses its pushes.
+        "GIT_CONFIG_KEY_4": f"url.{EGRESS}/git/git.example/acme/ro.git.insteadOf",
+        "GIT_CONFIG_VALUE_4": "https://git.example/acme/ro.git",
+        # An ssh remote cannot go through the proxy: no route.
     }
+    assert workstation_git(IDENTITY, repos, None)[-1] == {"name": "GIT_CONFIG_VALUE_1",
+                                                           "value": "/opt/exradius/runtime/git-hooks"}
 
 
 def test_setup_containers_get_safe_directory_only():
@@ -140,7 +139,7 @@ class Pod:
     """A clone and the state and bundle directories, as the pod mounts them, with the
     workstation's git variables pointed at them."""
 
-    def __init__(self, root: Path, remote: Path, repos: list[RepoSpec] = ()):
+    def __init__(self, root: Path, remote: Path, repos: list[RepoSpec] = (), egress: str | None = None):
         self.work = root / "work"
         self.state = root / "state"
         self.hooks = root / "runtime" / "git-hooks"
@@ -149,8 +148,7 @@ class Pod:
         git("clone", "-q", str(remote), str(self.app))
         gitconfig.write_hooks(self.hooks)
         gitconfig.write_git_config(self.state, IDENTITY.name, IDENTITY.email)
-        entries, secret = workstation_git(IDENTITY, list(repos))
-        env = resolve(entries, secret)
+        env = resolve(workstation_git(IDENTITY, list(repos), egress))
         env = {k: v.replace(git_identity.HOOKS_PATH, str(self.hooks)).replace(
             git_identity.GLOBAL_CONFIG, str(self.state / "git" / "config")) for k, v in env.items()}
         self.env = container_env(root / "home", env)
@@ -313,30 +311,79 @@ def _commit(app: Path, env: dict[str, str]) -> None:
     run_git("commit", "-m", "Agent change", cwd=app, env=env)
 
 
-@pytest.mark.parametrize("push_allowed", [True, False])
-def test_push_through_the_credential_helper(http_remote, remote_repo, tmp_path, push_allowed):
+class RouteProxy:
+    """A stand-in for the egress proxy's git route: ``/git/<host>/<path>`` forwarded to
+    ``http://<host>/<path>`` with the repository's credential added."""
+
+    def __init__(self, credential: str):
+        import http.client
+
+        self.requests: list[str] = []
+        proxy_self = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _forward(self):
+                proxy_self.requests.append(f"{self.command} {self.path} auth={self.headers.get('Authorization')}")
+                host, _, rest = self.path.removeprefix("/git/").partition("/")
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "authorization")}
+                headers["Authorization"] = "Basic " + base64.b64encode(credential.encode()).decode()
+                conn = http.client.HTTPConnection(host, timeout=30)
+                conn.request(self.command, "/" + rest, body=body, headers=headers)
+                response = conn.getresponse()
+                payload = response.read()
+                self.send_response(response.status)
+                for name, value in response.getheaders():
+                    if name.lower() not in ("transfer-encoding", "connection", "content-length"):
+                        self.send_header(name, value)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = do_POST = _forward
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_port}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+
+
+def test_push_goes_to_the_proxy_route(http_remote, remote_repo, tmp_path):
+    """The workstation's git config sends a push of the plain origin URL to the proxy's
+    git route; the pod has no credential, and the push still lands."""
     server, bare = http_remote
     url = f"{server.url}/app.git"
-    repo = RepoSpec("app", url, "main", "deploy:push-token", push_allowed=push_allowed)
-    pod = Pod(tmp_path / "pod", remote_repo, [repo])
-    env, app = pod.env, pod.app
-    run_git("remote", "set-url", "origin", url, cwd=app, env={"PATH": os.environ["PATH"]})  # as the clone step does
-    run_git("checkout", "-b", "agent/fix", cwd=app, env=env)
-    _commit(app, env)
+    proxy = RouteProxy("deploy:push-token")
+    try:
+        repo = RepoSpec("app", url, "main", "deploy:push-token", push_allowed=True)
+        pod = Pod(tmp_path / "pod", remote_repo, [repo], egress=proxy.url)
+        env, app = pod.env, pod.app
+        run_git("remote", "set-url", "origin", url, cwd=app, env={"PATH": os.environ["PATH"]})  # as the clone step does
+        run_git("checkout", "-b", "agent/fix", cwd=app, env=env)
+        _commit(app, env)
+        assert "push-token" not in json.dumps(env)
 
-    push = run_git("push", cwd=app, env=env, check=False)  # push.autoSetupRemote: no -u needed
-    if push_allowed:
+        push = run_git("push", cwd=app, env=env, check=False)  # push.autoSetupRemote: no -u needed
         assert push.returncode == 0, push.stderr
         log = run_git("log", "-1", "--format=%an %s", "agent/fix", cwd=bare, env=env).stdout.strip()
         assert log == 'Bug "Fixer" Bot Agent change'
+        host = server.url.removeprefix("http://")
+        assert proxy.requests and all(r.startswith(("GET /git/" + host + "/app.git/", "POST /git/" + host + "/app.git/"))
+                                      and r.endswith("auth=None") for r in proxy.requests)
         assert server.auth_attempts[-1] == "Basic " + base64.b64encode(b"deploy:push-token").decode()
-    else:
-        assert push.returncode != 0
-        assert "Authentication failed" in push.stderr or "could not read Username" in push.stderr
-        assert run_git("branch", "--list", "agent/fix", cwd=bare, env=env).stdout.strip() == ""
-    # Nothing about the credential is written into the clone.
-    clone_config = (app / ".git" / "config").read_text()
-    assert "push-token" not in clone_config and "credential" not in clone_config and "extraHeader" not in clone_config
+        # Nothing about the credential or the route is written into the clone.
+        clone_config = (app / ".git" / "config").read_text()
+        assert "push-token" not in clone_config and "credential" not in clone_config and proxy.url not in clone_config
+        # Without the route (no proxy) git has no credential at all.
+        bare_env = {k: v for k, v in env.items() if not k.startswith("GIT_CONFIG_")}
+        assert run_git("push", "origin", "agent/fix:other", cwd=app, env=bare_env, check=False).returncode != 0
+    finally:
+        proxy.close()
 
 
 # Through the run manager --------------------------------------------------------------------------
@@ -358,7 +405,9 @@ async def test_every_session_of_a_run_has_the_identity(manager, sessions, store,
 
     def check(run, env):
         seen.append({k: env.get(k) for k in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_EMAIL", "EXRADIUS_AGENT",
-                                             "EXRADIUS_TASK_ID", "EXRADIUS_GIT_CREDENTIAL_0", "GIT_CONFIG_GLOBAL")})
+                                             "EXRADIUS_TASK_ID", "GIT_CONFIG_GLOBAL")}
+                    | {"route": any(v.startswith(f"url.{manager.settings.egress_url}/git/git.example/acme/app.git")
+                                    for v in env.values()), "token": "ghp_push" in json.dumps(env)})
 
     run_id = await submit_task(accept, published)
     cluster.behaviours.append(runner(sessions, status="waiting_for_input", question="Which region?", check=check))
@@ -372,6 +421,6 @@ async def test_every_session_of_a_run_has_the_identity(manager, sessions, store,
 
     assert states(published)[-1] == "completed"
     expected = {"GIT_AUTHOR_NAME": "Bug Fixer Bot", "GIT_COMMITTER_EMAIL": "bug-fixer@agents.example",
-                "EXRADIUS_AGENT": "bug-fixer", "EXRADIUS_TASK_ID": "T-1", "EXRADIUS_GIT_CREDENTIAL_0": "ghp_push",
-                "GIT_CONFIG_GLOBAL": "/exradius/state/git/config"}
+                "EXRADIUS_AGENT": "bug-fixer", "EXRADIUS_TASK_ID": "T-1",
+                "GIT_CONFIG_GLOBAL": "/exradius/state/git/config", "route": True, "token": False}
     assert seen == [expected, expected]  # the first session and the resumed one, in the same pod

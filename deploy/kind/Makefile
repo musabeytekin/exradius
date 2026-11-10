@@ -30,10 +30,11 @@ images:
 	docker build -f $(ROOT)/deploy/backend.Dockerfile -t $(REGISTRY)/exradius-backend:$(TAG) $(ROOT)
 	docker build -t $(REGISTRY)/exradius-frontend:$(TAG) $(ROOT)/frontend
 	docker build -f $(ROOT)/deploy/operator.Dockerfile -t $(REGISTRY)/exradius-operator:$(TAG) $(ROOT)
+	docker build -f $(ROOT)/deploy/egress.Dockerfile -t $(REGISTRY)/exradius-egress:$(TAG) $(ROOT)
 	docker build -f $(ROOT)/deploy/runtime-claude-code.Dockerfile --build-arg EXRADIUS_VERSION=$(VERSION) \
 	  -t $(REGISTRY)/exradius-runtime-claude-code:$(TAG) $(ROOT)
 	docker build -f $(ROOT)/deploy/project-default.Dockerfile -t $(REGISTRY)/exradius-project-default:$(TAG) $(ROOT)/deploy
-	for image in backend frontend operator runtime-claude-code project-default; do \
+	for image in backend frontend operator egress runtime-claude-code project-default; do \
 	  docker push -q $(REGISTRY)/exradius-$$image:$(TAG) || exit 1; \
 	done
 

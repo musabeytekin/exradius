@@ -302,7 +302,9 @@ class RunManager:
             if provider is None:
                 raise PreparationError(provider_problem(agent.provider))
             secrets = await store_values(session, self.box, config.secret_store)
-            provider_env = runtime_environment(agent.runtime, self.box, provider)
+            # The pod gets a placeholder and the egress proxy's model route; the proxy reads
+            # the credential of this provider (runs.provider_id) from the api.
+            provider_env = runtime_environment(agent.runtime, provider, self.settings.egress_url)
             identity_name, email = config.identity(task.agent)
             objects = run_objects.task_run(
                 run_id=run.id, namespace=self.namespace, task_id=task.id, project=task.project.slug,
@@ -311,12 +313,14 @@ class RunManager:
                 workstation_image=images.workstation, provider_env=provider_env,
                 credential_variables=runtime_class(agent.runtime).credential_variables,
                 identity=git_identity.Identity(name=identity_name, email=email, agent=task.agent, task_id=task.id),
-                token=token, service_images=images.services, healthchecks=healthchecks,
+                token=token, egress_url=self.settings.egress_url, service_images=images.services,
+                healthchecks=healthchecks,
             )
             # Recorded before the Run exists: its runner authenticates with this token, and
             # recovery tells "disappeared" from "never created" by the name.
             row.token_hash = hash_token(token)
             row.run_object = name
+            row.provider_id = provider.id
             await session.commit()
         await self.create(objects)
         log.info("run %s: created Run %s", run.id, name)

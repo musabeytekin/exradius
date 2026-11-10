@@ -46,6 +46,11 @@ runs:
   # One node: ReadWriteOnce is shared by every run of a project.
   projectVolume: {size: 20Gi}
 
+egress:
+  # Build pods push to the kind registry through the proxy; it is on kind's Docker network.
+  allowPrivate: [kind-registry:5000]
+  logLevel: debug
+
 builds:
   # The kind registry (deploy/kind/dev-up.sh), over HTTP; the node's containerd pulls from it
   # through its hosts.toml.

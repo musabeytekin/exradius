@@ -182,6 +182,13 @@ class ConnectionDef(_Model):
     """Accepted for ``mcpServers`` compatibility and ignored."""
 
 
+class NetworkDef(_Model):
+    allow: list[NonEmpty] = Field(default_factory=list)
+    """Hosts the agent may reach (``registry.npmjs.org``; ``*.pythonhosted.org`` for every
+    name below it), on top of its model, repositories and connections and the install's
+    ``egress.allow``. Setup reaches any host (docs/kubernetes.md §11)."""
+
+
 class IdentityDef(_Model):
     name: IdentityName | None = None
     email: IdentityEmail | None = None
@@ -210,6 +217,7 @@ class ProjectConfig(_Model):
     services: dict[str, ServiceDef] = Field(default_factory=dict)
     env: EnvMap = Field(default_factory=dict)
     notes: str = ""
+    network: NetworkDef = Field(default_factory=NetworkDef)
     connections: dict[str, ConnectionDef] = Field(default_factory=dict)
     agents: dict[str, AgentDef] = Field(min_length=1)
 
@@ -478,6 +486,33 @@ def cache_problem(entry: str) -> str | None:
     return None
 
 
+DNS_LABEL = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+IPV4 = re.compile(r"^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$")
+
+
+def host_problem(entry: str) -> str | None:
+    """Why a ``network.allow`` entry is not a host name (``pypi.org``, ``*.pythonhosted.org``,
+    an IPv4 address), or ``None``."""
+    host = entry.strip().lower().removesuffix(".")
+    if "://" in host or "/" in host:
+        return "write a host name, not a URL (pypi.org, not https://pypi.org/simple)"
+    if ":" in host:
+        return "write the host without a port: every port of an allowed host is allowed"
+    if host in ("*", "*.") or host.startswith("*.") and "*" in host[2:]:
+        return "* stands for the subdomains of a name: *.example.com, never every host"
+    if "*" in host and not host.startswith("*."):
+        return "* is allowed only as a leading *. (*.example.com)"
+    name = host.removeprefix("*.")
+    if name == "localhost" or name.startswith("127."):
+        return "the run's own services are on localhost and need no entry"
+    if IPV4.match(name):
+        return "*. does not apply to an address" if host.startswith("*.") else None
+    labels = name.split(".")
+    if len(name) > 253 or not all(DNS_LABEL.match(label) for label in labels):
+        return f"{entry!r} is not a host name"
+    return None
+
+
 def _uses_launcher(command: str | None) -> str | None:
     return command if command in catalog.LAUNCHERS else None
 
@@ -561,6 +596,18 @@ def _check(config: ProjectConfig, config_dir: str, lookup: Lookup | None, errors
             launcher = _uses_launcher(conn.command)
         if launcher and default_workstation:
             warnings.append(f"{where}: needs {launcher}, which the default workstation image does not have")
+
+    hosts: set[str] = set()
+    for index, entry in enumerate(config.network.allow):
+        where = f"network.allow[{index}]"
+        problem = host_problem(entry)
+        if problem:
+            errors.append(f"{where}: {problem}")
+            continue
+        key = entry.strip().lower().removesuffix(".")
+        if key in hosts:
+            errors.append(f"{where}: {entry!r} is listed twice")
+        hosts.add(key)
 
     for slug, agent in config.agents.items():
         where = f"agents.{slug}"

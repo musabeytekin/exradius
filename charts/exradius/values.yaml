@@ -14,6 +14,7 @@ images:
   backend: exradius-backend
   frontend: exradius-frontend
   operator: exradius-operator
+  egress: exradius-egress
 
 runtime:
   claudeCode:
@@ -110,6 +111,45 @@ operator:
   leaderElect: true
   resources: {}
 
+# The egress proxy (docs/kubernetes.md §11): every request of run and build pods goes
+# through it. Setup (clones, services, setup commands) and builds reach any public host;
+# the agent reaches its model, its repositories, its connections and the hosts below plus
+# each config's network.allow. Credentials stay in the proxy.
+egress:
+  replicas: 1
+  # Hosts every run may reach in the agent phase (pypi.org; *.example.com for subdomains).
+  allow: []
+  # Private and cluster-internal destinations the proxy may reach: CIDRs, or host[:port].
+  # Everything private (10/8, 172.16/12, 192.168/16, loopback, link-local, the cloud's
+  # metadata address) is refused otherwise, in every phase. An internal package mirror, or
+  # the kind registry for builds, goes here.
+  allowPrivate: []
+  # A corporate proxy every outbound connection goes through, http://host:port, and the
+  # hosts reached without it. With credentials, name a Secret whose key holds the URL.
+  upstreamProxy: ""
+  upstreamProxySecret: {name: "", key: url}
+  upstreamNoProxy: []
+  # A ConfigMap with the CA of an intercepting upstream proxy, for the proxy's own TLS.
+  caBundle: {configMap: "", key: ca.crt}
+  # debug logs every request; info only refusals and errors (every request is recorded
+  # in egress_records either way).
+  logLevel: info
+  resources: {}
+
+networkPolicy:
+  # Needs a network plugin that enforces NetworkPolicy.
+  enabled: true
+  # The cluster DNS, the one destination outside Exradius a run pod reaches directly.
+  dns:
+    namespace: kube-system
+    podLabels: {k8s-app: kube-dns}
+  # Further peers that may reach the api's port 8000 (an ingress controller), as
+  # NetworkPolicy "from" entries.
+  apiFrom: []
+  # With builds.egress: direct, the cluster's own CIDRs (pods, services, nodes) that
+  # build pods may not reach.
+  clusterCIDRs: []
+
 namespaces:
   # Create the runs and builds namespaces with their Pod Security labels. The release
   # namespace itself is created by the installer, labelled for Pod Security "restricted".
@@ -151,6 +191,11 @@ builds:
   # The build container's resources.
   resources:
     requests: {cpu: 500m, memory: 1Gi}
+  # proxy: build pods reach registries and the internet through the egress proxy (buildkitd
+  # and every RUN step; chained to egress.upstreamProxy); a registry on a private address
+  # needs an egress.allowPrivate entry. direct: they reach them themselves, and
+  # networkPolicy.clusterCIDRs keeps them off the cluster's own addresses.
+  egress: proxy
 
 crds:
   # The Run and Build CRDs, kept on uninstall (helm.sh/resource-policy: keep) and upgraded

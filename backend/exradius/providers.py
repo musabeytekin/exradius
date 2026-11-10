@@ -104,9 +104,22 @@ def credential(box: SecretBox, provider: Provider) -> ProviderCredential:
     )
 
 
-def runtime_environment(runtime: str, box: SecretBox, provider: Provider) -> dict[str, str]:
-    """The container variables for ``provider`` under ``runtime`` (decrypts now)."""
-    return runtime_class(runtime).provider_environment(credential(box, provider))
+MODEL_ROUTE = "/anthropic"
+"""The egress proxy's model route (egress/internal/proxy/reverse.go)."""
+
+
+def runtime_environment(runtime: str, provider: Provider, egress_url: str) -> dict[str, str]:
+    """The workstation's variables for ``provider`` under ``runtime``: the egress proxy's
+    model route and a placeholder. Nothing is decrypted."""
+    return runtime_class(runtime).provider_environment(
+        provider.kind, provider.auth_method, egress_url.rstrip("/") + MODEL_ROUTE)
+
+
+def model_route(runtime: str, box: SecretBox, provider: Provider) -> dict[str, Any]:
+    """The egress proxy's model route for a run: ``{url, headers}`` with the credential
+    (decrypts now; for the proxy only)."""
+    url, headers = runtime_class(runtime).provider_route(credential(box, provider))
+    return {"url": url, "headers": headers}
 
 
 def strip_credentials(runtime: str, env: dict[str, str]) -> dict[str, str]:

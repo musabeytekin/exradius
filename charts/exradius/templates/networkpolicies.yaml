@@ -1,0 +1,142 @@
+{{- /* NetworkPolicies (docs/kubernetes.md §11): a run pod reaches DNS, the egress proxy and the
+api's internal port, nothing else, so it cannot reach the Kubernetes API, the stack's
+Postgres or RabbitMQ, another run or the internet except through the proxy. Build pods
+likewise (or the internet directly with builds.egress: direct). The api's internal port
+takes run, build and egress pods only; the proxy takes run and build pods only. The
+cluster's network plugin must enforce NetworkPolicy (kind's kindnet and k3s's own
+controller do; Docker Desktop's cluster does not). */ -}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $np := .Values.networkPolicy -}}
+{{- $runs := .Values.namespaces.runs -}}
+{{- $builds := .Values.namespaces.builds -}}
+{{- $release := .Release.Namespace -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exradius-run
+  namespace: {{ $runs }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "run") | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - {key: exradius.dev/run, operator: Exists}
+  policyTypes: [Ingress, Egress]
+  # No ingress: no other pod, and no other run, reaches a run's services.
+  ingress: []
+  egress:
+    {{- include "exradius.dnsPeer" . | nindent 4 }}
+    - to:
+        {{- include "exradius.peer" (list . "egress") | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: 3128}
+        - {protocol: TCP, port: 3129}
+    - to:
+        {{- include "exradius.peer" (list . "api") | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: 8001}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exradius-build
+  namespace: {{ $builds }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "build") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      exradius.dev/purpose: build
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    {{- include "exradius.dnsPeer" . | nindent 4 }}
+    - to:
+        {{- include "exradius.peer" (list . "api") | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: 8001}
+    {{- if eq .Values.builds.egress "proxy" }}
+    - to:
+        {{- include "exradius.peer" (list . "egress") | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: 3128}
+    {{- else }}
+    # builds.egress: direct: anywhere but the cluster's own addresses.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            {{- with $np.clusterCIDRs }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exradius-api
+  labels:
+    {{- include "exradius.componentLabels" (list . "api") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "exradius.selector" (list . "api") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # The internal port: run pods, build pods and the egress proxy.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $runs }}
+          podSelector:
+            matchExpressions:
+              - {key: exradius.dev/run, operator: Exists}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $builds }}
+          podSelector:
+            matchLabels:
+              exradius.dev/purpose: build
+        {{- include "exradius.peer" (list . "egress") | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: 8001}
+    # The admin and integration API: the panel, and what values add (an ingress controller).
+    - from:
+        {{- include "exradius.peer" (list . "frontend") | nindent 8 }}
+        {{- with $np.apiFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: 8000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: exradius-egress
+  labels:
+    {{- include "exradius.componentLabels" (list . "egress") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "exradius.selector" (list . "egress") | nindent 6 }}
+  # Ingress from run and build pods only; egress anywhere (the proxy itself refuses
+  # private and cluster-internal addresses).
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $runs }}
+          podSelector:
+            matchExpressions:
+              - {key: exradius.dev/run, operator: Exists}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $builds }}
+          podSelector:
+            matchLabels:
+              exradius.dev/purpose: build
+      ports:
+        - {protocol: TCP, port: 3128}
+        - {protocol: TCP, port: 3129}
+{{- end }}

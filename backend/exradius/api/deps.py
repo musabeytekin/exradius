@@ -26,6 +26,7 @@ class AppState:
     broker: Any  # BrokerPublisher
     rereads: Any = None  # hooks.Rereads, set at startup
     router: Any = None  # routing.Router; None: one for settings.openai_base_url
+    egress_auth: Any = None  # egress.EgressAuth; None: one with the in-cluster TokenReview
 
 
 def app_state(request: Request) -> AppState:

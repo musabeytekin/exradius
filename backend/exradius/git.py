@@ -1,6 +1,11 @@
 """Git command helpers shared by the api and worker (config-repository mirrors) and by the
 runner in a run pod (clones, docs/kubernetes.md §7.5).
 
+In a run pod no git command holds a credential: a repository's URL is rewritten to the
+egress proxy's git route (``url.<route>.insteadOf``), and the proxy adds the credential
+(docs/kubernetes.md §11). The api and the worker read config repositories with their host
+credential as an ``http.extraHeader`` for one command.
+
 Everything here is synchronous; async callers use ``asyncio.to_thread``.
 """
 
@@ -12,10 +17,11 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 class GitError(Exception):
@@ -32,7 +38,7 @@ class RepoSpec:
     auth: str | None = None
     """Secret value for HTTPS auth: ``user:password`` or a bare token."""
     push_allowed: bool = False
-    """Runs get a credential helper for this remote (docs/agent-identity.md §4)."""
+    """The egress proxy lets runs push to this remote (docs/agent-identity.md §4)."""
 
 
 def _git_env() -> dict[str, str]:
@@ -44,12 +50,36 @@ def basic_credentials(auth: str) -> str:
     return auth if ":" in auth else f"x-access-token:{auth}"
 
 
+def basic_header(auth: str) -> str:
+    """The HTTP Basic ``Authorization`` value of a credential."""
+    return "Basic " + base64.b64encode(basic_credentials(auth).encode()).decode()
+
+
 def auth_args(auth: str | None) -> list[str]:
     """``-c http.extraHeader=...`` for one command: the credential never reaches a config file."""
     if not auth:
         return []
-    header = "Authorization: Basic " + base64.b64encode(basic_credentials(auth).encode()).decode()
-    return ["-c", f"http.extraHeader={header}"]
+    return ["-c", f"http.extraHeader=Authorization: {basic_header(auth)}"]
+
+
+def proxy_route(egress_url: str, url: str) -> str | None:
+    """A repository's git route on the egress proxy, ``<egress>/git/<host[:port]><path>``,
+    as the proxy matches it (``egress/internal/proxy/reverse.go``); ``None`` for remotes
+    that are not http(s) (``git@host:path``, ``ssh://``), which the proxy cannot carry."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    host = parts.netloc.rpartition("@")[2]
+    return f"{egress_url.rstrip('/')}/git/{host}{parts.path.rstrip('/')}"
+
+
+def insteadof(egress_url: str | None, url: str) -> list[str]:
+    """The command-line config that sends ``url`` to its proxy route, as ``key=value``."""
+    route = proxy_route(egress_url, url) if egress_url else None
+    return [f"url.{route}.insteadOf={url}"] if route else []
 
 
 _URL_USERINFO = re.compile(r"(\w+://)[^/@\s]+@")
@@ -65,8 +95,11 @@ def redact(text: str, auth: str | None = None) -> str:
     return _URL_USERINFO.sub(r"\1***@", text)
 
 
-def git(*args: str, cwd: Path | None = None, auth: str | None = None, timeout: float | None = None) -> str:
-    cmd = ["git", *auth_args(auth), *args]
+def git(*args: str, cwd: Path | None = None, auth: str | None = None, timeout: float | None = None,
+        config: Sequence[str] = ()) -> str:
+    """Run git; ``config`` entries (``key=value``) are ``-c`` options of this command only."""
+    options = [item for entry in config for item in ("-c", entry)]
+    cmd = ["git", *auth_args(auth), *options, *args]
     try:
         result = subprocess.run(cmd, cwd=cwd, env=_git_env(), capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
@@ -83,9 +116,11 @@ class RemoteRefs:
     default_branch: str | None
 
 
-def ls_remote(url: str, auth: str | None = None, timeout: float = 30, cwd: Path | None = None) -> RemoteRefs:
+def ls_remote(url: str, auth: str | None = None, timeout: float = 30, cwd: Path | None = None,
+              config: Sequence[str] = ()) -> RemoteRefs:
     """Branches and default branch (HEAD) of a remote, without cloning it."""
-    output = git("ls-remote", "--symref", url, "HEAD", "refs/heads/*", auth=auth, timeout=timeout, cwd=cwd)
+    output = git("ls-remote", "--symref", url, "HEAD", "refs/heads/*", auth=auth, timeout=timeout, cwd=cwd,
+                 config=config)
     branches, default = [], None
     for line in output.splitlines():
         if line.startswith("ref: ") and line.endswith("\tHEAD"):
@@ -109,25 +144,27 @@ def _locked(path: Path) -> Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def sync_mirror(mirror: Path, url: str, auth: str | None, timeout: float | None = None) -> Path:
-    """Create or fetch a bare mirror of ``url``, serialised by a file lock next to it."""
+def sync_mirror(mirror: Path, url: str, auth: str | None, timeout: float | None = None,
+                config: Sequence[str] = ()) -> Path:
+    """Create or fetch a bare mirror of ``url``, serialised by a file lock next to it. The
+    mirror's ``origin`` is the plain URL; ``config`` (a proxy route) applies to each command."""
     with _locked(mirror):
         if (mirror / "HEAD").exists():
             git("remote", "set-url", "origin", url, cwd=mirror)
-            git("fetch", "--prune", "--force", "origin", cwd=mirror, auth=auth, timeout=timeout)
+            git("fetch", "--prune", "--force", "origin", cwd=mirror, auth=auth, timeout=timeout, config=config)
         else:
             if mirror.exists():
                 shutil.rmtree(mirror)
-            git("clone", "--mirror", url, str(mirror), auth=auth, timeout=timeout)
-        _follow_remote_head(mirror, auth, timeout)
+            git("clone", "--mirror", url, str(mirror), auth=auth, timeout=timeout, config=config)
+        _follow_remote_head(mirror, auth, timeout, config)
     return mirror
 
 
-def _follow_remote_head(mirror: Path, auth: str | None, timeout: float | None) -> None:
+def _follow_remote_head(mirror: Path, auth: str | None, timeout: float | None, config: Sequence[str] = ()) -> None:
     """Point the mirror's HEAD at the remote's current default branch (a fetch leaves it
     where the first clone put it); repositories without a branch check it out."""
     try:
-        refs = ls_remote("origin", auth, timeout or 30, cwd=mirror)
+        refs = ls_remote("origin", auth, timeout or 30, cwd=mirror, config=config)
     except GitError:
         return
     if refs.default_branch and refs.default_branch in refs.branches:
@@ -143,8 +180,10 @@ def clone_from_mirror(mirror: Path, dest: Path, url: str, branch: str | None) ->
     git("remote", "set-url", "origin", url, cwd=dest)
 
 
-def clone(url: str, dest: Path, branch: str | None, auth: str | None, timeout: float | None = None) -> None:
+def clone(url: str, dest: Path, branch: str | None, auth: str | None, timeout: float | None = None,
+          config: Sequence[str] = ()) -> None:
     """Clone ``url`` into ``dest`` (the remote's default branch without ``branch``). The
-    credential is used for this command only; ``origin`` keeps the plain URL."""
-    git("clone", *(["--branch", branch] if branch else []), url, str(dest), auth=auth, timeout=timeout)
+    credential and ``config`` are used for this command only; ``origin`` keeps the plain URL."""
+    git("clone", *(["--branch", branch] if branch else []), url, str(dest), auth=auth, timeout=timeout,
+        config=config)
     git("remote", "set-url", "origin", url, cwd=dest)

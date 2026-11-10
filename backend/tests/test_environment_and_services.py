@@ -57,7 +57,7 @@ Each folder in the working directory is a git clone of one repository:
 - platform-config: branch main, origin https://github.com/acme/platform-config.git, pushing NOT allowed
 - legacy: branch develop, origin git@github.com:acme/legacy.git, pushing NOT allowed
 
-Not available: a Docker daemon, Kubernetes, sudo, installing packages. Outbound network access is available.
+Not available: a Docker daemon, Kubernetes, sudo, installing packages. Outbound network access is limited to the repositories above.
 
 Services running for this task, reachable by host name from this container:
 - postgres (postgres:16) on port 5432, POSTGRES_USER=app, POSTGRES_DB=app, POSTGRES_PASSWORD=$DB_PASSWORD
@@ -109,11 +109,47 @@ def test_environment_text_without_services_notes_or_repositories():
         "# Your environment\n\n"
         "You run unattended in a Linux container built from the image python:3.14.\n"
         "The working directory contains no repositories.\n\n"
-        f"{NOT_AVAILABLE}\n\n"
+        f"{NOT_AVAILABLE} There is no outbound network access.\n\n"
         "The working directory is deleted when the task ends. Only what you push, attach to the result,\n"
         "or write in the result survives."
     )
     assert "Services running" not in text and "Notes from" not in text
+
+
+def test_the_network_line_names_what_the_proxy_allows():
+    """The agent phase's hosts (exradius.network), the same list the egress proxy enforces."""
+    hosts = ["registry.npmjs.org", "*.pythonhosted.org"]
+    text = build_environment_text(image="the image i", repositories=REPOS[:1], services=[], notes="", hosts=hosts)
+    assert (f"{NOT_AVAILABLE} Outbound network access is limited to the repositories above and to: "
+            "registry.npmjs.org, *.pythonhosted.org.") in text
+    text = build_environment_text(image="the image i", repositories=[], services=[], notes="", hosts=hosts)
+    assert "Outbound network access is limited to: registry.npmjs.org, *.pythonhosted.org." in text
+
+
+def test_config_network_line_from_allow_catalog_and_connections():
+    config = parse_config("""\
+version: 1
+project: {slug: shop}
+secret_store: shop
+network:
+  allow: [registry.npmjs.org, '*.pythonhosted.org']
+connections:
+  gitlab: {catalog: gitlab, config: {token: '${secret:GL}', api_url: 'https://gitlab.acme.dev/api/v4'}}
+  status: {url: 'https://status.example/mcp'}
+  tracker: {url: 'https://mcp.tracker.example/mcp', headers: {Authorization: 'Bearer ${secret:T}'}}
+  docs: {command: npx, args: [-y, docs-mcp]}
+agents:
+  dev: {connections: [gitlab, status, tracker]}
+  scout: {connections: [docs]}
+""").config
+    text = config_environment_text(config, "default", agent="dev", install_allow=["artifacts.acme.dev"])
+    # Install first, then the file, then the agent's connections: gitlab's launcher and API
+    # URL, the plain HTTP connection's host. The tracker goes through the proxy's route.
+    assert ("Outbound network access is limited to: artifacts.acme.dev, registry.npmjs.org, *.pythonhosted.org, "
+            "gitlab.acme.dev, status.example.") in text
+    assert "mcp.tracker.example" not in text
+    scout = config_environment_text(config, "default", agent="scout")
+    assert "limited to: registry.npmjs.org, *.pythonhosted.org." in scout  # registry.npmjs.org listed once
 
 
 @pytest.mark.parametrize(

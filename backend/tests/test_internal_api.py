@@ -200,7 +200,8 @@ def test_verify_spec_and_tool_reports(client, admin, sync_db, tmp_path):
     spec = client.get(f"{base}/spec", headers=auth).json()
     by_name = {c["name"]: c for c in spec["connections"]}
     assert list(by_name) == ["docs", "sentry"]  # used by an agent, in file order
-    assert by_name["docs"]["headers"] == {"Authorization": "Bearer docs-key"}  # substituted for the pod
+    # Through the egress proxy's route, which adds the secret header.
+    assert by_name["docs"]["url"].endswith(":3129/mcp/docs") and by_name["docs"]["headers"] == {}
     assert by_name["sentry"]["env"] == {"SENTRY_TOKEN": "sentry"}
 
     tools = [{"name": "search", "description": "Search."}]

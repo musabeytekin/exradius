@@ -104,7 +104,8 @@ async def test_agent_environment_is_the_container_environment(fake_bundle, monke
     def without_sdk(env):
         return {key: value for key, value in env.items() if key not in SDK_OWN}
 
-    assert without_sdk(agent_env) == without_sdk({**container, "CLAUDE_CONFIG_DIR": str(tmp_path / "claude")})
+    assert without_sdk(agent_env) == without_sdk({**container, "CLAUDE_CONFIG_DIR": str(tmp_path / "claude"),
+                                                  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"})
     # The project's interpreter settings and the provider credential reach the agent ...
     for key in ("PYTHONPATH", "NODE_OPTIONS", "VIRTUAL_ENV", "ANTHROPIC_API_KEY", "LOG_LEVEL"):
         assert agent_env[key] == PROJECT_ENV[key]

@@ -12,6 +12,11 @@ goes: an environment variable, a header (with a format such as ``Bearer {}``) or
 argument. ``expand`` turns a catalog connection into the ``mcpServers``-style definition a
 custom connection writes by hand; secret references stay as written until the worker
 resolves them (``exradius.resolve``).
+
+``hosts`` are what the connection reaches besides its own URL: the package registry its
+launcher downloads it from and the service's API. The agent phase may reach them
+(docs/kubernetes.md §11, ``exradius.network``), as it may the host of a config key marked
+``host`` (GitLab's API URL, the Jira URL).
 """
 
 from __future__ import annotations
@@ -34,6 +39,8 @@ class ConfigKey:
     """How the value is written into the target, ``{}`` being the value."""
     default: str | None = None
     """Used when an optional key is not given."""
+    host: bool = False
+    """The value is a URL whose host the connection reaches."""
 
 
 @dataclass(frozen=True)
@@ -49,10 +56,17 @@ class CatalogEntry:
     requires: str | None = None
     """A launcher the default workstation image lacks (``npx``, ``uvx``)."""
     docs: str | None = None
+    hosts: tuple[str, ...] = ()
+    """Hosts the connection reaches besides its URL (see the module's docstring)."""
 
     def config_key(self, key: str) -> ConfigKey | None:
         return next((k for k in self.config if k.key == key), None)
 
+
+NPM = ("registry.npmjs.org",)
+"""Where ``npx -y`` downloads a server when the session starts."""
+PYPI = ("pypi.org", "files.pythonhosted.org")
+"""Where ``uvx`` downloads one."""
 
 CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
@@ -74,9 +88,10 @@ CATALOG: tuple[CatalogEntry, ...] = (
         config=(
             ConfigKey("token", "GitLab personal access token", "env", "GITLAB_PERSONAL_ACCESS_TOKEN"),
             ConfigKey("api_url", "GitLab API URL", "env", "GITLAB_API_URL", required=False,
-                      default="https://gitlab.com/api/v4"),
+                      default="https://gitlab.com/api/v4", host=True),
         ),
         requires="npx",
+        hosts=NPM,
     ),
     CatalogEntry(
         key="postgres",
@@ -87,6 +102,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         args=("postgres-mcp", "--access-mode=restricted"),
         config=(ConfigKey("url", "Database connection string", "env", "DATABASE_URI"),),
         requires="uvx",
+        hosts=PYPI,
     ),
     CatalogEntry(
         key="slack",
@@ -100,6 +116,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
             ConfigKey("team_id", "Slack team id", "env", "SLACK_TEAM_ID"),
         ),
         requires="npx",
+        hosts=(*NPM, "slack.com"),
     ),
     CatalogEntry(
         key="sentry",
@@ -110,6 +127,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         args=("-y", "@sentry/mcp-server"),
         config=(ConfigKey("token", "Sentry access token", "env", "SENTRY_ACCESS_TOKEN"),),
         requires="npx",
+        hosts=(*NPM, "sentry.io", "*.sentry.io"),
     ),
     CatalogEntry(
         key="linear",
@@ -127,11 +145,12 @@ CATALOG: tuple[CatalogEntry, ...] = (
         command="uvx",
         args=("mcp-atlassian",),
         config=(
-            ConfigKey("url", "Jira URL", "env", "JIRA_URL"),
+            ConfigKey("url", "Jira URL", "env", "JIRA_URL", host=True),
             ConfigKey("username", "Jira username", "env", "JIRA_USERNAME"),
             ConfigKey("api_token", "Jira API token", "env", "JIRA_API_TOKEN"),
         ),
         requires="uvx",
+        hosts=PYPI,
     ),
     CatalogEntry(
         key="fetch",
@@ -141,6 +160,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         command="uvx",
         args=("mcp-server-fetch",),
         requires="uvx",
+        hosts=PYPI,
     ),
     CatalogEntry(
         key="playwright",
@@ -150,6 +170,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         command="npx",
         args=("-y", "@playwright/mcp@latest", "--headless"),
         requires="npx",
+        hosts=(*NPM, "cdn.playwright.dev", "playwright.download.prss.microsoft.com"),
     ),
     CatalogEntry(
         key="filesystem",
@@ -160,6 +181,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         args=("-y", "@modelcontextprotocol/server-filesystem"),
         config=(ConfigKey("path", "Directory", "arg", required=False, default="/work"),),
         requires="npx",
+        hosts=NPM,
     ),
 )
 
@@ -220,6 +242,7 @@ def describe(item: CatalogEntry) -> dict[str, Any]:
         "url": item.url,
         "requires": item.requires,
         "docs": item.docs,
+        "hosts": list(item.hosts),
         "config": [
             {
                 "key": k.key,
@@ -229,6 +252,7 @@ def describe(item: CatalogEntry) -> dict[str, Any]:
                 "name": k.name or None,
                 "format": k.format,
                 "default": k.default,
+                "host": k.host,
             }
             for k in item.config
         ],

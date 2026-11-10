@@ -22,6 +22,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from exradius import messaging
 from exradius.api import (
     config_routes,
+    egress,
     hooks,
     integration_routes,
     internal,
@@ -227,6 +228,7 @@ def create_app(
     app.include_router(internal.verifications)
     app.include_router(internal.probes)
     app.include_router(internal.builds)
+    app.include_router(egress.router)
     return app
 
 

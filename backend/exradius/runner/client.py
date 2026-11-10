@@ -48,10 +48,12 @@ class RunApi(Protocol):
 
 class _Http:
     def __init__(self, base_url: str, prefix: str, token: str, timeout: float = 60.0):
+        # Straight to the internal port: never through the pod's proxy variables.
         self._client = httpx.AsyncClient(
             base_url=f"{base_url.rstrip('/')}{prefix}",
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout,
+            trust_env=False,
         )
 
     async def aclose(self) -> None:

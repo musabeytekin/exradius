@@ -5,9 +5,11 @@ the spec names it by key. The operator turns the spec into the pod; it never see
 ``exradius.yaml``. Pure functions; the tests check them without a cluster.
 
 Secret keys: ``token`` (the run token), ``env.<NAME>`` (project variables that hold a
-secret), ``service.<service>.<NAME>`` (a service's variables that hold one),
-``provider.<NAME>`` (the provider's variables), ``repo.<n>`` (a repository's credential,
-for its clone), ``push.<n>`` (the token part, for the push credential helper).
+secret), ``service.<service>.<NAME>`` (a service's variables that hold one). No provider
+credential and no repository credential: the egress proxy adds those (docs/kubernetes.md
+§10, §11). The workstation's provider variables are a placeholder and
+``ANTHROPIC_BASE_URL`` pointing at the proxy's model route; its git config sends each
+repository to the proxy's git route.
 """
 
 from __future__ import annotations
@@ -159,24 +161,21 @@ def _services(config: ProjectConfig, secrets: StoreValues, data: dict[str, str],
     return services
 
 
-def _repositories(config: ProjectConfig, secrets: StoreValues, data: dict[str, str]) -> list[dict[str, Any]]:
+def _repositories(config: ProjectConfig) -> list[dict[str, Any]]:
+    """The repositories, without credentials: clones go through the egress proxy."""
     repos = []
-    for index, repo in enumerate(repo_specs(config, secrets)):
-        entry: dict[str, Any] = {"folder": repo.name, "url": repo.url, "push": repo.push_allowed}
+    for repo in config.repositories:
+        entry: dict[str, Any] = {"folder": repo.name, "url": repo.url, "push": repo.push}
         if repo.branch:
             entry["branch"] = repo.branch
-        if repo.auth:
-            key = f"repo.{index}"
-            data[key] = repo.auth
-            entry["credentialKey"] = key
         repos.append(entry)
     return repos
 
 
-def _runtime(name: str, image: str, provider_env: dict[str, str], data: dict[str, str]) -> dict[str, Any]:
-    env = _Env(data)
-    return {"name": name, "image": image,
-            "env": [env.add(k, v, prefix="provider", secret=True) for k, v in provider_env.items()]}
+def _runtime(name: str, image: str, provider_env: dict[str, str]) -> dict[str, Any]:
+    """The runtime and its provider variables, which hold no secret (a placeholder and the
+    proxy's model route)."""
+    return {"name": name, "image": image, "env": [{"name": k, "value": v} for k, v in provider_env.items()]}
 
 
 def task_run(
@@ -194,27 +193,28 @@ def task_run(
     credential_variables: frozenset[str],
     identity: git_identity.Identity,
     token: str,
+    egress_url: str | None = None,
     service_images: dict[str, str] | None = None,
     healthchecks: dict[str, list[str] | None] | None = None,
 ) -> RunObjects:
     """The Run of a task: clones, services, setup, the files sidecar and the agent's runner.
+    ``provider_env`` is the runtime's proxied provider environment (no secret);
     ``service_images`` names built service images; ``healthchecks`` the ``HEALTHCHECK`` of
     each service image whose ``ready`` is not set."""
     name = run_name("task", run_id)
     data: dict[str, str] = {"token": token}
-    git_env, push_tokens = git_identity.workstation_git(identity, repo_specs(config, secrets))
-    data.update(push_tokens)
+    git_env = git_identity.workstation_git(identity, repo_specs(config, None), egress_url)
     spec = {
         "purpose": "task",
         "id": str(run_id),
         "project": project,
         "taskId": task_id,
         "secretName": name,
-        "runtime": _runtime(runtime, runtime_image, provider_env, data),
+        "runtime": _runtime(runtime, runtime_image, provider_env),
         # Only the provider's variables reach the workstation: a project's own are dropped.
         "workstation": _workstation(config, workstation_image,
                                     project_env(config, secrets, data, drop=credential_variables)),
-        "repositories": _repositories(config, secrets, data),
+        "repositories": _repositories(config),
         "services": _services(config, secrets, data, service_images or {}, healthchecks or {}),
         "git": {"setupEnv": git_identity.setup_git(), "env": git_env},
         "cancel": False,
@@ -248,9 +248,9 @@ def verify_run(
         "id": str(verification_id),
         "project": project,
         "secretName": name,
-        "runtime": _runtime(runtime, runtime_image, {}, data),
+        "runtime": _runtime(runtime, runtime_image, {}),
         "workstation": _workstation(config, workstation_image, project_env(config, secrets, data)),
-        "repositories": _repositories(config, secrets, data),
+        "repositories": _repositories(config),
         "services": _services(config, secrets, data, service_images or {}, healthchecks or {}),
         "git": {"setupEnv": git_identity.setup_git(), "env": git_identity.setup_git()},
         "cancel": False,
@@ -273,14 +273,15 @@ def probe_run(
     token: str,
 ) -> RunObjects:
     """The Run of an ``oauth_token`` provider test: the default project image and the
-    bundle, no workspace, a one-line session (docs/kubernetes.md §13)."""
+    bundle, no workspace, a one-line session through the egress proxy's model route
+    (docs/kubernetes.md §13); ``provider_env`` is the proxied environment."""
     name = run_name("probe", test_id)
     data: dict[str, str] = {"token": token}
     spec: dict[str, Any] = {
         "purpose": "probe",
         "id": str(test_id),
         "secretName": name,
-        "runtime": _runtime(runtime, runtime_image, provider_env, data),
+        "runtime": _runtime(runtime, runtime_image, provider_env),
         "workstation": {"image": image, "setup": [], "env": []},
         "repositories": [],
         "git": {"setupEnv": [], "env": []},

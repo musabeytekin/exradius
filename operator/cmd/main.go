@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -36,7 +37,8 @@ func main() {
 		buildsNamespace, builderImage, buildServiceAccount     string
 		buildkitdConfig, buildResources                        string
 		serviceMemory, serviceCPU, projectAccess, projectClass string
-		projectSize                                            string
+		projectSize, egressProxy, egressURL, egressPeers       string
+		noProxy, buildEgress                                   string
 		runUID, runGID                                         int64
 		userNamespaces, leaderElect, projectVolume             bool
 		workers                                                int
@@ -68,6 +70,11 @@ func main() {
 	flag.StringVar(&buildServiceAccount, "build-service-account", "exradius-build", "ServiceAccount of build pods (its token is never mounted)")
 	flag.StringVar(&buildkitdConfig, "buildkitd-configmap", "", "ConfigMap with buildkitd.toml for build pods; empty: none")
 	flag.StringVar(&buildResources, "build-resources", "{}", "resources of the build container, as JSON")
+	flag.StringVar(&egressProxy, "egress-proxy", "", "the egress proxy's forward address (http://host:3128), set as HTTP(S)_PROXY in run pods; empty: none")
+	flag.StringVar(&egressURL, "egress-url", "", "the egress proxy's reverse address (http://host:3129): the runner's git route and phase check")
+	flag.StringVar(&egressPeers, "egress-peers", "", "a host name resolving to every egress proxy pod (a headless Service)")
+	flag.StringVar(&noProxy, "no-proxy", "", "comma-separated hosts run pods reach without the proxy, besides localhost, the services and the api")
+	flag.StringVar(&buildEgress, "build-egress", "proxy", "how build pods reach the network: proxy (through --egress-proxy) or direct")
 	flag.BoolVar(&leaderElect, "leader-elect", true, "hold a Lease so only one replica reconciles")
 	flag.StringVar(&leaderID, "leader-election-id", "exradius-operator", "name of the leader election Lease")
 	flag.StringVar(&leaderNamespace, "leader-election-namespace", "exradius", "namespace of the leader election Lease")
@@ -86,6 +93,7 @@ func main() {
 		ProjectVolume: podspec.ProjectVolumeConfig{
 			Enabled: projectVolume, AccessMode: corev1.PersistentVolumeAccessMode(projectAccess), StorageClass: projectClass,
 		},
+		Egress: podspec.EgressConfig{Proxy: egressProxy, URL: egressURL, Peers: egressPeers, NoProxy: splitList(noProxy)},
 	}
 	if mode := config.ProjectVolume.AccessMode; mode != corev1.ReadWriteOnce && mode != corev1.ReadWriteMany {
 		fail(logger, fmt.Errorf("--project-volume-access-mode: %q is not ReadWriteOnce or ReadWriteMany", mode))
@@ -115,11 +123,7 @@ func main() {
 	if err = json.Unmarshal([]byte(orDefault(tolerations, "[]")), &config.Tolerations); err != nil {
 		fail(logger, fmt.Errorf("--tolerations: %w", err))
 	}
-	for _, name := range strings.Split(pullSecrets, ",") {
-		if name = strings.TrimSpace(name); name != "" {
-			config.ImagePullSecrets = append(config.ImagePullSecrets, name)
-		}
-	}
+	config.ImagePullSecrets = splitList(pullSecrets)
 
 	if builderImage == "" {
 		fail(logger, fmt.Errorf("--builder-image is required"))
@@ -127,6 +131,16 @@ func main() {
 	builds := podspec.BuildConfig{
 		APIURL: apiURL, Image: builderImage, ServiceAccount: buildServiceAccount,
 		BuildkitdConfigMap: buildkitdConfig, NodeSelector: config.NodeSelector, Tolerations: config.Tolerations,
+	}
+	switch buildEgress {
+	case "proxy":
+		builds.Proxy = egressProxy
+		if host := hostOf(apiURL); host != "" {
+			builds.NoProxy = []string{host}
+		}
+	case "direct":
+	default:
+		fail(logger, fmt.Errorf("--build-egress: %q is not proxy or direct", buildEgress))
 	}
 	if err = json.Unmarshal([]byte(orDefault(buildResources, "{}")), &builds.Resources); err != nil {
 		fail(logger, fmt.Errorf("--build-resources: %w", err))
@@ -211,4 +225,22 @@ func utilRuntime(err error) {
 func fail(logger interface{ Error(error, string, ...any) }, err error) {
 	logger.Error(err, "cannot start")
 	os.Exit(1)
+}
+
+func splitList(list string) []string {
+	var out []string
+	for _, item := range strings.Split(list, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func hostOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }

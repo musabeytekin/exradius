@@ -73,37 +73,39 @@ def test_verify_run():
     assert spec["runtime"] == {"name": "claude_code", "image": "bundle:1", "env": []}
     assert spec["workstation"] == {"image": "node:22", "setup": ["npm ci"], "memory": "512Mi", "env": [
         {"name": "PLAIN", "value": "1"}, {"name": "API_URL", "secretKey": "env.API_URL"}]}
-    assert spec["repositories"] == [{"folder": "web", "url": "https://git.example/acme/web.git", "push": False,
-                                     "credentialKey": "repo.0"}]
+    # No repository credential: the clones go through the egress proxy's git route.
+    assert spec["repositories"] == [{"folder": "web", "url": "https://git.example/acme/web.git", "push": False}]
     assert spec["git"]["env"] == spec["git"]["setupEnv"]  # no agent identity in a verify pod
-    assert objects.secret == {"token": "tok", "env.API_URL": "https://user:hunter2@api.example", "repo.0": "user:pw"}
+    assert objects.secret == {"token": "tok", "env.API_URL": "https://user:hunter2@api.example"}
     assert "hunter2" not in json.dumps(run) and "user:pw" not in json.dumps(run)
 
 
 def test_probe_run():
     tid = uuid.uuid4()
+    proxied = {"ANTHROPIC_BASE_URL": "http://egress:3129/anthropic", "CLAUDE_CODE_OAUTH_TOKEN": "placeholder"}
     objects = run_objects.probe_run(test_id=tid, namespace="exradius-runs", runtime="claude_code",
                                     runtime_image="bundle:1", image="default:1",
-                                    provider_env={"CLAUDE_CODE_OAUTH_TOKEN": "oat"}, model=None, token="tok")
+                                    provider_env=proxied, model=None, token="tok")
     spec = objects.run["spec"]
     assert objects.name == f"probe-{tid}" and "project" not in spec and "model" not in spec
     assert objects.run["metadata"]["labels"] == {"exradius.dev/run": objects.name, "exradius.dev/purpose": "probe"}
-    assert spec["runtime"]["env"] == [{"name": "CLAUDE_CODE_OAUTH_TOKEN", "secretKey": "provider.CLAUDE_CODE_OAUTH_TOKEN"}]
+    # The proxied variables are literal values: no provider credential in the Secret.
+    assert spec["runtime"]["env"] == [{"name": "ANTHROPIC_BASE_URL", "value": "http://egress:3129/anthropic"},
+                                      {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": "placeholder"}]
     assert spec["workstation"] == {"image": "default:1", "setup": [], "env": []}
-    assert objects.secret == {"token": "tok", "provider.CLAUDE_CODE_OAUTH_TOKEN": "oat"}
+    assert objects.secret == {"token": "tok"}
 
 
 def test_secret_body_is_owned_by_the_run_and_base64():
     objects = run_objects.probe_run(test_id=uuid.uuid4(), namespace="ns", runtime="claude_code", runtime_image="b",
-                                    image="i", provider_env={"ANTHROPIC_API_KEY": "sk-ü"}, model="m", token="tok")
+                                    image="i", provider_env={}, model="m", token="tök")
     created = {"metadata": {"name": objects.name, "uid": "uid-1"}}
     body = objects.secret_body(created, "ns")
     assert body["metadata"]["ownerReferences"] == [
         {"apiVersion": "exradius.dev/v1alpha1", "kind": "Run", "name": objects.name, "uid": "uid-1"}]
     assert body["metadata"]["namespace"] == "ns" and body["type"] == "Opaque"
     assert body["metadata"]["labels"]["exradius.dev/purpose"] == "probe"
-    assert {k: base64.b64decode(v).decode() for k, v in body["data"].items()} == {
-        "token": "tok", "provider.ANTHROPIC_API_KEY": "sk-ü"}
+    assert {k: base64.b64decode(v).decode() for k, v in body["data"].items()} == {"token": "tök"}
 
 
 def test_project_env_drops_provider_variables_and_git_config():

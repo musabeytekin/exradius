@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -132,3 +133,56 @@ class ProbeReport(BaseModel):
     ok: bool
     detail: str | None = None
     error: str | None = None
+
+
+# -- the egress proxy (docs/kubernetes.md §11) -------------------------------------------------
+
+
+class EgressRoute(BaseModel):
+    """An upstream base URL and the headers the proxy sets on it."""
+
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class EgressRepository(BaseModel):
+    url: str
+    push: bool
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class EgressConnection(BaseModel):
+    name: str
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class EgressPolicy(BaseModel):
+    """What a run may reach in the agent phase, and its routes' credentials."""
+
+    run: str
+    allow: list[str] = Field(default_factory=list)
+    model: EgressRoute | None = None
+    repositories: list[EgressRepository] = Field(default_factory=list)
+    connections: list[EgressConnection] = Field(default_factory=list)
+
+
+class EgressRecordIn(BaseModel):
+    run: str
+    phase: str
+    route: str
+    method: str | None = None
+    host: str
+    port: int = 0
+    path: str | None = None
+    allowed: bool
+    reason: str | None = None
+    status: int | None = None
+    bytes_sent: int = 0
+    bytes_received: int = 0
+    duration_ms: int = 0
+    at: datetime
+
+
+class EgressBatch(BaseModel):
+    records: list[EgressRecordIn] = Field(default_factory=list, max_length=5000)

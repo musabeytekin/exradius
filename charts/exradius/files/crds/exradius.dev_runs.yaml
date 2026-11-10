@@ -140,14 +140,13 @@ spec:
                       description: Branch to check out; empty is the remote's default
                         branch.
                       type: string
-                    credentialKey:
-                      description: CredentialKey names the Secret key with the clone
-                        credential; empty is anonymous.
-                      type: string
                     folder:
                       minLength: 1
                       type: string
                     push:
+                      description: |-
+                        Push is informative: the egress proxy, which holds the credential, refuses a push to
+                        a repository without it (docs/kubernetes.md §11).
                       type: boolean
                     url:
                       minLength: 1
@@ -161,8 +160,9 @@ spec:
                 description: RuntimeSpec is the agent runtime and its bundle image.
                 properties:
                   env:
-                    description: Env reaches the workstation container only (provider
-                      variables).
+                    description: |-
+                      Env reaches the workstation container only: the provider's variables, a placeholder
+                      and the egress proxy's model route, never a credential.
                     items:
                       description: 'EnvVar is one environment variable: a literal
                         value, or a key of the Run''s Secret.'

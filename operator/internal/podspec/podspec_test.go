@@ -33,6 +33,11 @@ func config() Config {
 		ProjectVolume: ProjectVolumeConfig{
 			Enabled: true, AccessMode: corev1.ReadWriteOnce, Size: resource.MustParse("100Gi"),
 		},
+		Egress: EgressConfig{
+			Proxy: "http://exradius-egress.exradius:3128",
+			URL:   "http://exradius-egress.exradius:3129",
+			Peers: "exradius-egress-pods.exradius",
+		},
 	}
 }
 
@@ -57,16 +62,21 @@ func taskRun() *v1.Run {
 	run.Spec.Project = "saleor"
 	run.Spec.TaskID = "SAL-101"
 	run.Spec.PodGeneration = 1
-	run.Spec.Runtime.Env = []v1.EnvVar{{Name: "ANTHROPIC_API_KEY", SecretKey: "provider.ANTHROPIC_API_KEY"}}
+	run.Spec.Runtime.Env = []v1.EnvVar{
+		{Name: "ANTHROPIC_BASE_URL", Value: "http://exradius-egress.exradius:3129/anthropic"},
+		{Name: "ANTHROPIC_API_KEY", Value: "placeholder"},
+	}
 	run.Spec.Workstation.Setup = []string{"uv sync", "make migrate"}
 	run.Spec.Workstation.Memory = &memory
 	run.Spec.Workstation.Env = []v1.EnvVar{
 		{Name: "DJANGO_SETTINGS_MODULE", Value: "saleor.settings"},
 		{Name: "DATABASE_URL", SecretKey: "env.DATABASE_URL"},
-		{Name: "HOME", Value: "/root"}, // replaced by the operator's HOME
+		{Name: "HOME", Value: "/root"},                   // replaced by the operator's HOME
+		{Name: "HTTPS_PROXY", Value: "http://evil:3128"}, // replaced by the operator's proxy
+		{Name: "JAVA_TOOL_OPTIONS", Value: "-Xmx2g"},     // kept, before the proxy's options
 	}
 	run.Spec.Repositories = []v1.RepositorySpec{
-		{Folder: "saleor", URL: "https://github.com/acme/saleor.git", Branch: "main", Push: true, CredentialKey: "repo.0"},
+		{Folder: "saleor", URL: "https://github.com/acme/saleor.git", Branch: "main", Push: true},
 		{Folder: "Dashboard.UI", URL: "https://github.com/acme/dashboard.git"},
 	}
 	run.Spec.Workstation.Caches = []v1.CacheSpec{
@@ -91,7 +101,9 @@ func taskRun() *v1.Run {
 		SetupEnv: []v1.EnvVar{{Name: "GIT_CONFIG_COUNT", Value: "1"}, {Name: "GIT_CONFIG_KEY_0", Value: "safe.directory"}, {Name: "GIT_CONFIG_VALUE_0", Value: "*"}},
 		Env: []v1.EnvVar{
 			{Name: "GIT_AUTHOR_NAME", Value: "Developer"},
-			{Name: "EXRADIUS_GIT_CREDENTIAL_0", SecretKey: "push.0"},
+			{Name: "GIT_CONFIG_COUNT", Value: "1"},
+			{Name: "GIT_CONFIG_KEY_0", Value: "url.http://exradius-egress.exradius:3129/git/github.com/acme/saleor.git.insteadOf"},
+			{Name: "GIT_CONFIG_VALUE_0", Value: "https://github.com/acme/saleor.git"},
 		},
 	}
 	return run
@@ -340,6 +352,8 @@ func buildConfig() BuildConfig {
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
 		},
+		Proxy:   "http://exradius-egress.exradius:3128",
+		NoProxy: []string{"exradius-api-internal.exradius"},
 	}
 }
 
@@ -402,5 +416,84 @@ func TestBuildPodSecurity(t *testing.T) {
 	}
 	if pod.OwnerReferences[0].Kind != "Build" || !*pod.OwnerReferences[0].Controller {
 		t.Fatal("the pod is controlled by its Build")
+	}
+}
+
+// No run container holds a provider or repository credential: only the run token, the
+// project's secret variables and the services' (docs/kubernetes.md §10).
+func TestNoCredentialInRunPods(t *testing.T) {
+	b := Pods{Config: config()}
+	for _, run := range []*v1.Run{taskRun(), baseRun(v1.PurposeProbe, "probe-1", "1")} {
+		pod := b.Pod(run)
+		for _, c := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
+			for _, e := range c.Env {
+				if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+					continue
+				}
+				key := e.ValueFrom.SecretKeyRef.Key
+				if key != TokenKey && !strings.HasPrefix(key, "env.") && !strings.HasPrefix(key, "service.") {
+					t.Errorf("%s: %s reads Secret key %s", c.Name, e.Name, key)
+				}
+			}
+		}
+	}
+}
+
+// Every container goes through the proxy, reaches its services and the api directly, and
+// the runner's containers know the proxy's routes.
+func TestProxyVariables(t *testing.T) {
+	pod := Pods{Config: config()}.Pod(taskRun())
+	for _, c := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
+		env := map[string]string{}
+		for _, e := range c.Env {
+			env[e.Name] = e.Value
+		}
+		if env["HTTPS_PROXY"] != "http://exradius-egress.exradius:3128" || env["https_proxy"] != env["HTTPS_PROXY"] ||
+			env["YARN_HTTPS_PROXY"] != env["HTTPS_PROXY"] {
+			t.Errorf("%s: HTTPS_PROXY %q", c.Name, env["HTTPS_PROXY"])
+		}
+		for _, host := range []string{"localhost", "127.0.0.1", "postgres", "cache", "exradius-api-internal.exradius", "exradius-egress.exradius"} {
+			if !strings.Contains(","+env["NO_PROXY"]+",", ","+host+",") {
+				t.Errorf("%s: NO_PROXY %q lacks %s", c.Name, env["NO_PROXY"], host)
+			}
+		}
+		runner := len(c.Command) > 0 && c.Command[0] == Runner && c.Name != ContainerPrepare && c.Name != ContainerFiles
+		if runner != (env["EXRADIUS_EGRESS_URL"] != "") {
+			t.Errorf("%s: EXRADIUS_EGRESS_URL %q", c.Name, env["EXRADIUS_EGRESS_URL"])
+		}
+		java := c.Name == ContainerWorkstation || strings.HasPrefix(c.Name, "setup-")
+		if java != strings.Contains(env["JAVA_TOOL_OPTIONS"], "-Dhttps.proxyHost=exradius-egress.exradius") {
+			t.Errorf("%s: JAVA_TOOL_OPTIONS %q", c.Name, env["JAVA_TOOL_OPTIONS"])
+		}
+	}
+}
+
+// Through the proxy: buildkitd's pulls and pushes by its environment, RUN steps by
+// BuildKit's predefined proxy arguments; the context fetch goes to the api directly.
+func TestBuildPodThroughTheProxy(t *testing.T) {
+	pod := buildConfig().BuildPod(build())
+	args := strings.Join(pod.Spec.Containers[0].Command, " ")
+	for _, want := range []string{"--opt build-arg:HTTPS_PROXY=http://exradius-egress.exradius:3128",
+		"--opt build-arg:no_proxy=localhost,127.0.0.1,::1,exradius-api-internal.exradius"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("build args lack %q: %s", want, args)
+		}
+	}
+	env := map[string]string{}
+	for _, e := range pod.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["HTTPS_PROXY"] != "http://exradius-egress.exradius:3128" || env["NO_PROXY"] == "" {
+		t.Errorf("build env %v", env)
+	}
+	for _, e := range pod.Spec.InitContainers[0].Env {
+		if strings.HasSuffix(strings.ToUpper(e.Name), "_PROXY") {
+			t.Errorf("the context fetch has %s", e.Name)
+		}
+	}
+	direct := buildConfig()
+	direct.Proxy = ""
+	if strings.Contains(strings.Join(direct.BuildPod(build()).Spec.Containers[0].Command, " "), "build-arg") {
+		t.Error("a direct build got proxy arguments")
 	}
 }

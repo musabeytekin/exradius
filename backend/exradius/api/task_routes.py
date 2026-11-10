@@ -13,11 +13,11 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from exradius import downloads, messaging
 from exradius.api.deps import DB, Admin, State, get_or_404, require_admin
-from exradius.models import Artifact, Event, InfoRequest, Project, Run, Task, TranscriptChunk
+from exradius.models import Artifact, EgressRecord, Event, InfoRequest, Project, Run, Task, TranscriptChunk
 from exradius.schemas import api as s
 from exradius.schemas.messages import AnswerMessage, TaskMessage
 from exradius.states import is_terminal
@@ -128,6 +128,43 @@ async def get_transcript(
         .limit(limit)
     )
     return (await session.scalars(stmt)).all()
+
+
+@router.get("/tasks/{task_id}/network", response_model=s.NetworkOut)
+async def task_network(task_id: str, session: DB, _: Admin):
+    """The hosts the task's run reached and was refused, from the egress proxy's records
+    (docs/kubernetes.md §11), one entry per host."""
+    await get_or_404(session, Task, task_id)
+    run = await _run_for(session, task_id)
+    if run is None:
+        return s.NetworkOut()
+    r = EgressRecord
+    rows = (await session.execute(
+        select(r.host, r.allowed, r.phase, r.route, r.port, r.reason, func.count(), func.max(r.at),
+               func.sum(r.bytes_sent + r.bytes_received))
+        .where(r.kind == "task", r.object_id == run.id)
+        .group_by(r.host, r.allowed, r.phase, r.route, r.port, r.reason)
+    )).all()
+    hosts: dict[tuple[str, bool], s.NetworkHostOut] = {}
+    for host, allowed, phase, route, port, reason, count, last, size in rows:
+        entry = hosts.setdefault((host, allowed), s.NetworkHostOut(host=host, last_at=last))
+        for values, value in ((entry.phases, phase), (entry.routes, route), (entry.ports, port)):
+            if value not in values:
+                values.append(value)
+        entry.requests += count
+        entry.bytes += int(size or 0)
+        if last and (entry.last_at is None or last > entry.last_at):
+            entry.last_at = last
+            if not allowed:
+                entry.reason = reason
+        elif not allowed and entry.reason is None:
+            entry.reason = reason
+    for entry in hosts.values():
+        entry.phases.sort(key=lambda p: ("setup", "agent").index(p) if p in ("setup", "agent") else 2)
+        entry.ports.sort()
+    reached = sorted((e for (_, ok), e in hosts.items() if ok), key=lambda e: (-e.requests, e.host))
+    refused = sorted((e for (_, ok), e in hosts.items() if not ok), key=lambda e: e.host)
+    return s.NetworkOut(reached=reached, refused=refused, requests=sum(e.requests for e in hosts.values()))
 
 
 @router.post("/tasks/{task_id}/cancel", status_code=202)

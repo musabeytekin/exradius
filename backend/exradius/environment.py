@@ -2,9 +2,10 @@
 
 Built from the project's config (docs/config-repo.md §9): the workstation (its image, or the
 Dockerfile it is built from), the repositories (URLs without credentials), the fixed "not
-available" line, the services with their settings (secret values never: a secret appears
-as the variable that carries it) and the notes. It never names Exradius, and it does not
-list installed tools: the agent discovers those itself.
+available" line with the hosts the agent may reach (``exradius.network``, the list the
+egress proxy enforces), the services with their settings (secret values never: a secret
+appears as the variable that carries it) and the notes. It never names Exradius, and it
+does not list installed tools: the agent discovers those itself.
 """
 
 from __future__ import annotations
@@ -13,14 +14,23 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
+from exradius.network import allowed_hosts
 from exradius.resolve import exported_secrets
 from exradius.schemas.project_config import SECRET_REF, ProjectConfig
 
 HEADING = "# Your environment"
-NOT_AVAILABLE = (
-    "Not available: a Docker daemon, Kubernetes, sudo, installing packages. "
-    "Outbound network access is available."
-)
+NOT_AVAILABLE = "Not available: a Docker daemon, Kubernetes, sudo, installing packages."
+
+
+def network_line(hosts: list[str], repositories: bool) -> str:
+    """What the egress proxy lets the agent reach, besides its model and connections."""
+    if hosts and repositories:
+        return "Outbound network access is limited to the repositories above and to: " + ", ".join(hosts) + "."
+    if hosts:
+        return "Outbound network access is limited to: " + ", ".join(hosts) + "."
+    if repositories:
+        return "Outbound network access is limited to the repositories above."
+    return "There is no outbound network access."
 CLOSING = (
     "The working directory is deleted when the task ends. Only what you push, attach to the result,\n"
     "or write in the result survives."
@@ -85,10 +95,10 @@ def service_settings(env: dict[str, object], exported: set[str]) -> tuple[str, .
 
 
 def build_environment_text(
-    *, image: str, repositories: list[RepoFact], services: list[ServiceFact], notes: str
+    *, image: str, repositories: list[RepoFact], services: list[ServiceFact], notes: str, hosts: list[str] = ()
 ) -> str:
     """The section exactly as documented. ``image`` completes "built from ": ``the image
-    x:1`` or a Dockerfile's path."""
+    x:1`` or a Dockerfile's path; ``hosts`` are the agent phase's allowed hosts."""
     intro = f"You run unattended in a Linux container built from {image}.\n"
     parts = [HEADING]
     if repositories:
@@ -102,7 +112,7 @@ def build_environment_text(
         )
     else:
         parts.append(intro + "The working directory contains no repositories.")
-    parts.append(NOT_AVAILABLE)
+    parts.append(NOT_AVAILABLE + " " + network_line(list(hosts), bool(repositories)))
 
     if services:
         lines = ["Services running for this task, reachable by host name from this container:"]
@@ -131,8 +141,10 @@ def workstation_label(config: ProjectConfig, default_image: str) -> str:
     return f"built from {station.dockerfile}" if station.dockerfile else (station.image or default_image)
 
 
-def config_environment_text(config: ProjectConfig, default_image: str) -> str:
-    """The section for a config, as the worker gives it to the run."""
+def config_environment_text(config: ProjectConfig, default_image: str, *, agent: str | None = None,
+                            install_allow: list[str] = ()) -> str:
+    """The section for a config, as the run of ``agent`` gets it; ``install_allow`` is the
+    install's ``egress.allow``."""
     exported = set(exported_secrets(config))
     station = config.workstation
     return build_environment_text(
@@ -151,4 +163,5 @@ def config_environment_text(config: ProjectConfig, default_image: str) -> str:
             for name, service in config.services.items()
         ],
         notes=config.notes,
+        hosts=allowed_hosts(config, agent, install_allow),
     )

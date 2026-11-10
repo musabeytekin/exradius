@@ -296,7 +296,8 @@ async def resolved_agent(project_id: uuid.UUID, agent: str, session: DB, state: 
         identity=s.IdentityOut(name=identity_name, email=identity_email),
         connections=connections,
         image=workstation_label(config, default_image),
-        environment_text=config_environment_text(config, default_image),
+        environment_text=config_environment_text(config, default_image, agent=agent,
+                                                 install_allow=state.settings.egress_allow_hosts),
     )
 
 

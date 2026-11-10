@@ -36,6 +36,26 @@ spec:
         secretKeyRef:
           key: provider.CLAUDE_CODE_OAUTH_TOKEN
           name: probe-77aa
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: EXRADIUS_EGRESS_URL
+      value: http://exradius-egress.exradius:3129
+    - name: EXRADIUS_EGRESS_PEERS
+      value: exradius-egress-pods.exradius
     - name: EXRADIUS_API_URL
       value: http://exradius-api-internal.exradius:8001
     - name: EXRADIUS_RUN_TOKEN

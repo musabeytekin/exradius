@@ -111,7 +111,11 @@ async def test_completed_run(manager, sessions, store, cluster, published, setti
     assert json.loads(transcript[0])["type"] == "AssistantMessage"
 
     [env] = cluster.envs
-    assert env["ANTHROPIC_API_KEY"] == "sk-test"
+    # The model credential never reaches the pod: a placeholder, and the egress proxy's
+    # model route, which holds the provider's key (docs/kubernetes.md §10).
+    assert env["ANTHROPIC_API_KEY"] == "placeholder"
+    assert env["ANTHROPIC_BASE_URL"] == settings.egress_url + "/anthropic"
+    assert "sk-test" not in json.dumps(env)
     assert env["LOG_LEVEL"] == "debug" and env["DB_URL"] == "postgres://app:hunter2@db/app"
     assert "DB_PASSWORD" not in env and "OTHER" not in env  # used by reference only
     assert env["GIT_AUTHOR_NAME"] == "Bug Fixer Bot" and env["EXRADIUS_AGENT"] == "bug-fixer"
@@ -126,8 +130,9 @@ async def test_completed_run(manager, sessions, store, cluster, published, setti
     assert created["metadata"]["annotations"] == {"exradius.dev/task-id": "T-1"}
     spec = created["spec"]
     assert spec["workstation"]["image"] == settings.project_default_image
-    assert spec["runtime"] == {"name": "claude_code", "image": settings.runtime_image_claude_code,
-                               "env": [{"name": "ANTHROPIC_API_KEY", "secretKey": "provider.ANTHROPIC_API_KEY"}]}
+    assert spec["runtime"] == {"name": "claude_code", "image": settings.runtime_image_claude_code, "env": [
+        {"name": "ANTHROPIC_BASE_URL", "value": settings.egress_url + "/anthropic"},
+        {"name": "ANTHROPIC_API_KEY", "value": "placeholder"}]}
     # The spec is secret-free: values that hold a secret are Secret keys.
     assert spec["workstation"]["env"] == [
         {"name": "LOG_LEVEL", "value": "debug"}, {"name": "DB_URL", "secretKey": "env.DB_URL"},
@@ -139,6 +144,7 @@ async def test_completed_run(manager, sessions, store, cluster, published, setti
         assert run.state == State.COMPLETED and run.ended_at is not None
         assert run.token_hash is None  # revoked
         assert run.run_object == name
+        assert run.provider_id is not None  # the proxy's model route uses its credential
         assert run.config_commit == commit
         assert run.config["env"]["DB_URL"] == "postgres://app:${secret:DB_PASSWORD}@db/app"  # as written
         assert run.agent_snapshot == {
@@ -342,20 +348,23 @@ async def test_repositories_and_setup_go_into_the_spec(
     assert spec["workstation"]["setup"] == ["npm ci", "make check"]
     assert spec["workstation"]["memory"] == "6Gi"
     assert spec["repositories"] == [
-        {"folder": "app", "url": "https://git.example/acme/app.git", "push": True, "branch": "feature",
-         "credentialKey": "repo.0"},
+        {"folder": "app", "url": "https://git.example/acme/app.git", "push": True, "branch": "feature"},
         {"folder": "docs", "url": "https://git.example/acme/docs.git", "push": False},
     ]
     assert spec["git"]["setupEnv"] == [{"name": "GIT_CONFIG_COUNT", "value": "1"},
                                        {"name": "GIT_CONFIG_KEY_0", "value": "safe.directory"},
                                        {"name": "GIT_CONFIG_VALUE_0", "value": "*"}]
-    git_env = {e["name"]: e.get("value", e.get("secretKey")) for e in spec["git"]["env"]}
-    assert git_env["EXRADIUS_GIT_CREDENTIAL_0"] == "push.0"
+    git_env = {e["name"]: e["value"] for e in spec["git"]["env"]}
     assert git_env["GIT_CONFIG_GLOBAL"] == "/exradius/state/git/config"
     assert "core.hooksPath" in git_env.values() and "/opt/exradius/runtime/git-hooks" in git_env.values()
+    # Each repository goes to the egress proxy's git route, which holds its credential.
+    egress = manager.settings.egress_url
+    assert f"url.{egress}/git/git.example/acme/app.git.insteadOf" in git_env.values()
+    assert f"url.{egress}/git/git.example/acme/docs.git.insteadOf" in git_env.values()
     [env] = cluster.envs
-    assert env["EXRADIUS_GIT_CREDENTIAL_0"] == "ghp_token"
-    assert "ghp_token" not in json.dumps(spec)
+    assert "ghp_token" not in json.dumps(spec) and "ghp_token" not in json.dumps(env)
+    assert not any(key.startswith(("repo.", "push.", "provider.")) for secret in cluster.secret_bodies
+                   for key in secret)
 
 
 async def test_url_attachments_are_stored_before_the_run(

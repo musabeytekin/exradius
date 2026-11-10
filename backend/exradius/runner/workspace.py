@@ -127,15 +127,15 @@ async def prepare(purpose: str, object_id: str, api_url: str, token: str, root: 
     return 0
 
 
-def clone(work_dir: Path, state_dir: Path, environ: dict[str, str]) -> int:
+def clone(work_dir: Path, state_dir: Path, environ: dict[str, str], egress_url: str | None = None) -> int:
     """Clone one repository into ``/work/<folder>`` (docs/kubernetes.md §7.5): from its
     mirror on the project volume, refreshed first under a file lock (``EXRADIUS_MIRROR_DIR``),
-    or straight from the remote without one. The credential is used for these commands
-    only; ``origin`` is the remote's plain URL."""
+    or straight from the remote without one. Each fetch goes to the egress proxy's git route
+    (``egress_url``), which adds the repository's credential; ``origin`` is the plain URL."""
     folder = environ["EXRADIUS_CLONE_FOLDER"]
     url = environ["EXRADIUS_CLONE_URL"]
     branch = environ.get("EXRADIUS_CLONE_BRANCH") or None
-    auth = environ.get("EXRADIUS_GIT_AUTH") or None
+    config = git.insteadof(egress_url, url)
     mirrors = environ.get("EXRADIUS_MIRROR_DIR") or None
     step = f"clone-{environ.get('EXRADIUS_CLONE_INDEX') or folder}"
     if marker(state_dir, step).exists():
@@ -148,14 +148,14 @@ def clone(work_dir: Path, state_dir: Path, environ: dict[str, str]) -> int:
         if mirrors:
             mirror = Path(mirrors) / f"{folder}.git"
             fresh = not (mirror / "HEAD").exists()
-            git.sync_mirror(mirror, url, auth)
-            print(f"{'created' if fresh else 'fetched'} the mirror of {git.redact(url, auth)}", flush=True)
+            git.sync_mirror(mirror, url, None, config=config)
+            print(f"{'created' if fresh else 'fetched'} the mirror of {git.redact(url)}", flush=True)
             git.clone_from_mirror(mirror, dest, url, branch)
         else:
-            git.clone(url, dest, branch, auth)
+            git.clone(url, dest, branch, None, config=config)
         head = git.git("log", "-1", "--format=%h %s", cwd=dest).strip()
     except git.GitError as exc:
-        print(git.redact(str(exc), auth), flush=True)
+        print(git.redact(str(exc)), flush=True)
         return 1
     _mark(state_dir, step)
     print(f"checked out {branch or 'the default branch'} at {head}")

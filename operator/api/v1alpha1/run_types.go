@@ -62,7 +62,8 @@ type RuntimeSpec struct {
 	// Image of the runtime bundle, mounted read-only at /opt/exradius/runtime as an image volume.
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
-	// Env reaches the workstation container only (provider variables).
+	// Env reaches the workstation container only: the provider's variables, a placeholder
+	// and the egress proxy's model route, never a credential.
 	// +optional
 	Env []EnvVar `json:"env,omitempty"`
 }
@@ -144,11 +145,10 @@ type RepositorySpec struct {
 	// Branch to check out; empty is the remote's default branch.
 	// +optional
 	Branch string `json:"branch,omitempty"`
+	// Push is informative: the egress proxy, which holds the credential, refuses a push to
+	// a repository without it (docs/kubernetes.md §11).
 	// +optional
 	Push bool `json:"push,omitempty"`
-	// CredentialKey names the Secret key with the clone credential; empty is anonymous.
-	// +optional
-	CredentialKey string `json:"credentialKey,omitempty"`
 }
 
 // GitSpec is git configuration at the command-line level, computed by the worker.

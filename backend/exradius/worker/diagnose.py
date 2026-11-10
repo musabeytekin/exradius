@@ -293,8 +293,33 @@ def _build(f: Failure) -> str | None:
     return f"{sentence} {mismatch}" if mismatch else sentence
 
 
-RULES: list[Rule] = [_config, _image_pull, _unschedulable, _clone, _declared_memory, _service, _killed, _build,
-                     _setup_mismatch, _missing_tool]
+# The network: the egress proxy and NetworkPolicy (docs/kubernetes.md §11) ----------------------
+
+ALLOWLIST = re.compile(r"(\S+) is not on this task's network allowlist")
+PRIVATE = re.compile(r"(\S+) (?:resolves to|is) a private or cluster-internal address")
+NO_PROXY_USED = re.compile(
+    r"Connect(?:ion)? timed out|connect: connection timed out|ETIMEDOUT|Network is unreachable|ENETUNREACH"
+    r"|connect to \S+ port \d+ (?:after \d+ ms: )?(?:Connection timed out|Couldn't connect)", re.I)
+
+
+def _network(f: Failure) -> str | None:
+    if refused := ALLOWLIST.search(f.log):
+        host = refused.group(1)
+        where = f"{_code(f.command)}" if f.command else f"the {f.subject} step"
+        return (f"{where[0].upper()}{where[1:]} reached {_code(host)}, which the agent phase does not allow: "
+                f"add it to `network.allow` in the config if the agent needs it.")
+    if private := PRIVATE.search(f.log):
+        return (f"{_code(private.group(1))} is a private address, which the network proxy reaches only when the "
+                "install allows it (values `egress.allowPrivate`).")
+    if (f.command or f.step.startswith(("Clone ", "Build "))) and NO_PROXY_USED.search(f.log):
+        return ("A connection timed out: the run's pod reaches the network only through the proxy that "
+                "`HTTPS_PROXY`, `HTTP_PROXY` and `JAVA_TOOL_OPTIONS` name, and a tool that ignores them waits "
+                "until it gives up. Configure the tool to use them (Maven: a `<proxy>` in `settings.xml`).")
+    return None
+
+
+RULES: list[Rule] = [_config, _image_pull, _unschedulable, _clone, _declared_memory, _service, _killed, _network,
+                     _build, _setup_mismatch, _missing_tool]
 
 
 def diagnose(step: str, log: str) -> str | None:

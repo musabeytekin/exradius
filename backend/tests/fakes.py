@@ -65,6 +65,8 @@ class FakeCluster:
     def __init__(self):
         self.runs: dict[str, dict[str, Any]] = {}
         self.secrets: dict[str, dict[str, Any]] = {}
+        self.secret_bodies: list[dict[str, str]] = []
+        """The data of every Secret created, decoded: what ever reached the cluster."""
         self.deleted: list[str] = []
         self.patches: list[tuple[str, dict]] = []
         self.created: list[dict[str, Any]] = []
@@ -147,6 +149,7 @@ class FakeCluster:
 
     async def create_secret(self, body):
         self.secrets[body["metadata"]["name"]] = copy.deepcopy(body)
+        self.secret_bodies.append({k: base64.b64decode(v).decode() for k, v in (body.get("data") or {}).items()})
 
     async def delete_secret(self, name, namespace=None):
         self.secrets.pop(name, None)

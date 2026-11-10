@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from exradius.api import provider_routes
 from exradius.api.app import create_app
-from exradius.models import Provider, ProviderTest
+from exradius.models import Provider, ProviderTest, Run
 from exradius.providers import MIGRATED_NAME, bootstrap_provider, fingerprint
 from exradius.runner import main as runner_main
 from exradius.runner.environment import RunnerEnvironment
@@ -92,11 +92,24 @@ def test_runtimes_declare_their_providers(admin):
 
 
 def test_claude_code_injection_mapping():
+    """The pod gets a placeholder and the egress proxy's model route; the proxy sets the
+    credential where Claude Code sends it (docs/kubernetes.md §10)."""
     env = ClaudeCodeRuntime.provider_environment
-    assert env(ProviderCredential("anthropic", "api_key", "sk-1")) == {"ANTHROPIC_API_KEY": "sk-1"}
-    assert env(ProviderCredential("anthropic", "oauth_token", "oat-1")) == {"CLAUDE_CODE_OAUTH_TOKEN": "oat-1"}
+    route = "http://egress:3129/anthropic"
+    assert env("anthropic", "api_key", route) == {"ANTHROPIC_BASE_URL": route, "ANTHROPIC_API_KEY": "placeholder"}
+    assert env("anthropic", "oauth_token", route) == {"ANTHROPIC_BASE_URL": route,
+                                                       "CLAUDE_CODE_OAUTH_TOKEN": "placeholder"}
     with pytest.raises(ValueError):
-        env(ProviderCredential("anthropic_bedrock", "keys", "x"))
+        env("anthropic_bedrock", "keys", route)
+    upstream = ClaudeCodeRuntime.provider_route
+    assert upstream(ProviderCredential("anthropic", "api_key", "sk-1")) == (
+        "https://api.anthropic.com", {"x-api-key": "sk-1"})
+    assert upstream(ProviderCredential("anthropic", "oauth_token", "oat-1")) == (
+        "https://api.anthropic.com", {"Authorization": "Bearer oat-1"})
+    with pytest.raises(ValueError):
+        upstream(ProviderCredential("anthropic_bedrock", "keys", "x"))
+    # A project cannot point the model elsewhere either.
+    assert "ANTHROPIC_BASE_URL" in ClaudeCodeRuntime.credential_variables
 
 
 # CRUD and the model rules --------------------------------------------------------------------
@@ -269,16 +282,19 @@ def test_status_shows_the_default_provider(admin, anthropic_api):
 
 async def test_api_key_provider_is_injected(manager, sessions, store, cluster, published, configured, accept):
     # Project variables with a provider variable's name do not reach the run.
-    commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + "env:\n  ANTHROPIC_API_KEY: sk-project\n  CLAUDE_CODE_OAUTH_TOKEN: oat\n"})
+    commit_config(configured["remote"], {"exradius.yaml": BASE_CONFIG + (
+        "env:\n  ANTHROPIC_API_KEY: sk-project\n  CLAUDE_CODE_OAUTH_TOKEN: oat\n  ANTHROPIC_BASE_URL: https://evil.example\n")})
     run_id = await submit_task(accept, published)
     cluster.behaviours.append(runner(sessions))
     await execute(manager, cluster, run_id)
     [env] = cluster.envs
-    assert env["ANTHROPIC_API_KEY"] == "sk-test"
+    route = manager.settings.egress_url + "/anthropic"
+    assert env["ANTHROPIC_API_KEY"] == "placeholder" and env["ANTHROPIC_BASE_URL"] == route
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
     assert cluster.created[0]["spec"]["runtime"]["env"] == [
-        {"name": "ANTHROPIC_API_KEY", "secretKey": "provider.ANTHROPIC_API_KEY"}]
-    assert "sk-test" not in json.dumps(cluster.created[0]["spec"])
+        {"name": "ANTHROPIC_BASE_URL", "value": route}, {"name": "ANTHROPIC_API_KEY", "value": "placeholder"}]
+    assert "sk-test" not in json.dumps(cluster.created[0]["spec"]) and "sk-test" not in json.dumps(env)
+    assert "sk-test" not in json.dumps(cluster.secret_bodies)
 
 
 async def test_agents_own_oauth_provider_is_injected(manager, sessions, store, cluster, published, configured, box, accept):
@@ -291,9 +307,13 @@ async def test_agents_own_oauth_provider_is_injected(manager, sessions, store, c
     cluster.behaviours.append(runner(sessions))
     await execute(manager, cluster, run_id)
     [env] = cluster.envs
-    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oat-secret"
-    assert "ANTHROPIC_API_KEY" not in env
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "placeholder"
+    assert "ANTHROPIC_API_KEY" not in env and "oat-secret" not in json.dumps(cluster.secret_bodies)
     assert states(published)[-1] == "completed"
+    async with sessions() as session:
+        run = await session.get(Run, run_id)
+        provider = await session.get(Provider, run.provider_id)
+    assert provider.slug == "sub"  # whose credential the proxy's model route uses
 
 
 async def test_intake_rejects_without_providers(sessions, store, configured, accept):
@@ -361,9 +381,10 @@ async def test_provider_test_passes_and_records_last_test(tester, sessions, clus
     assert (spec["purpose"], spec["id"], spec["model"]) == ("probe", str(test_id), "claude-haiku-5-5")
     assert spec["workstation"] == {"image": settings.project_default_image, "setup": [], "env": []}
     assert spec["repositories"] == [] and spec["runtime"]["image"] == settings.runtime_image_claude_code
-    assert spec["runtime"]["env"] == [{"name": "CLAUDE_CODE_OAUTH_TOKEN", "secretKey": "provider.CLAUDE_CODE_OAUTH_TOKEN"}]
-    assert "oat-secret" not in json.dumps(spec)
-    assert cluster.envs[0]["CLAUDE_CODE_OAUTH_TOKEN"] == "oat-secret"
+    assert spec["runtime"]["env"] == [{"name": "ANTHROPIC_BASE_URL", "value": settings.egress_url + "/anthropic"},
+                                      {"name": "CLAUDE_CODE_OAUTH_TOKEN", "value": "placeholder"}]
+    assert "oat-secret" not in json.dumps(spec) and "oat-secret" not in json.dumps(cluster.secret_bodies)
+    assert cluster.envs[0]["CLAUDE_CODE_OAUTH_TOKEN"] == "placeholder"
     assert cluster.deleted == [name]
 
     async with sessions() as session:

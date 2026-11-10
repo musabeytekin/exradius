@@ -1,6 +1,8 @@
 package podspec
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -51,6 +53,24 @@ type BuildConfig struct {
 	NodeSelector       map[string]string
 	Tolerations        []corev1.Toleration
 	ImagePullSecrets   []string
+	// Proxy is the egress proxy's forward address when builds reach the network through it
+	// (values builds.egress: proxy): buildkitd's pulls and pushes and every RUN step use it.
+	// Empty: builds reach the network directly.
+	Proxy string
+	// NoProxy are the hosts a build reaches directly (the api's internal host).
+	NoProxy []string
+}
+
+// proxyVars are the proxy variables of a build, upper and lower case.
+func (c BuildConfig) proxyVars() [][2]string {
+	if c.Proxy == "" {
+		return nil
+	}
+	none := strings.Join(append([]string{"localhost", "127.0.0.1", "::1"}, c.NoProxy...), ",")
+	return [][2]string{
+		{"HTTP_PROXY", c.Proxy}, {"HTTPS_PROXY", c.Proxy}, {"NO_PROXY", none},
+		{"http_proxy", c.Proxy}, {"https_proxy", c.Proxy}, {"no_proxy", none},
+	}
 }
 
 // contextScript fetches and unpacks the context. The token stays in the environment, out
@@ -69,8 +89,10 @@ const buildScript = `buildctl-daemonless.sh "$@" && cat ` + buildMetadata + ` > 
 // BuildPodName is the pod of a Build: the Build's own name (one pod per Build).
 func BuildPodName(build *v1.Build) string { return build.Name }
 
-// BuildArgs are buildctl's arguments for a Build.
-func BuildArgs(build *v1.Build) []string {
+// BuildArgs are buildctl's arguments for a Build. With the proxy, RUN steps get its
+// variables as BuildKit's predefined proxy build arguments, which stay out of the image and
+// its cache keys.
+func (c BuildConfig) BuildArgs(build *v1.Build) []string {
 	args := []string{
 		"build", "--progress", "plain", "--frontend", "dockerfile.v0",
 		"--local", "context=" + BuildContext, "--local", "dockerfile=" + BuildContext,
@@ -82,6 +104,9 @@ func BuildArgs(build *v1.Build) []string {
 			"--export-cache", "type=registry,ref="+build.Spec.Cache+",mode=max",
 			"--import-cache", "type=registry,ref="+build.Spec.Cache,
 		)
+	}
+	for _, kv := range c.proxyVars() {
+		args = append(args, "--opt", "build-arg:"+kv[0]+"="+kv[1])
 	}
 	return append(args, "--metadata-file", buildMetadata)
 }
@@ -165,7 +190,22 @@ func (c BuildConfig) contextContainer(build *v1.Build) corev1.Container {
 	}
 }
 
+func (c BuildConfig) proxyEnv() []corev1.EnvVar {
+	var env []corev1.EnvVar
+	for _, kv := range c.proxyVars() {
+		env = append(env, corev1.EnvVar{Name: kv[0], Value: kv[1]})
+	}
+	return env
+}
+
 func (c BuildConfig) buildContainer(build *v1.Build) corev1.Container {
+	env := []corev1.EnvVar{
+		// One build per pod: RUN steps need no sandbox from the builder.
+		{Name: "BUILDKITD_FLAGS", Value: ""},
+		// The image's TMPDIR is under the read-only home.
+		{Name: "TMPDIR", Value: "/tmp"},
+		{Name: "DOCKER_CONFIG", Value: "/tmp/docker"},
+	}
 	flags := "--oci-worker-no-process-sandbox"
 	mounts := []corev1.VolumeMount{
 		{Name: volBuildWorkspace, MountPath: BuildWorkspace, ReadOnly: true},
@@ -177,20 +217,15 @@ func (c BuildConfig) buildContainer(build *v1.Build) corev1.Container {
 		flags += " --config " + buildkitConfig + "/buildkitd.toml"
 		mounts = append(mounts, corev1.VolumeMount{Name: volBuildkitConfig, MountPath: buildkitConfig, ReadOnly: true})
 	}
+	env[0].Value = flags
 	return corev1.Container{
 		Name:            ContainerBuild,
 		Image:           c.Image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		Command:         append([]string{"sh", "-c", buildScript, "buildctl"}, BuildArgs(build)...),
-		Env: []corev1.EnvVar{
-			// One build per pod: RUN steps need no sandbox from the builder.
-			{Name: "BUILDKITD_FLAGS", Value: flags},
-			// The image's TMPDIR is under the read-only home.
-			{Name: "TMPDIR", Value: "/tmp"},
-			{Name: "DOCKER_CONFIG", Value: "/tmp/docker"},
-		},
-		Resources:    c.Resources,
-		VolumeMounts: mounts,
+		Command:         append([]string{"sh", "-c", buildScript, "buildctl"}, c.BuildArgs(build)...),
+		Env:             append(env, c.proxyEnv()...),
+		Resources:       c.Resources,
+		VolumeMounts:    mounts,
 		// Rootless BuildKit creates a user namespace (rootlesskit), which seccomp
 		// RuntimeDefault refuses, and maps its subordinate ids with the setuid newuidmap
 		// (no allowPrivilegeEscalation: false). The runtime's default capabilities stay:

@@ -50,6 +50,30 @@ spec:
       value: /exradius/state
     - name: EXRADIUS_WORK_DIR
       value: /work
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: JAVA_TOOL_OPTIONS
+      value: -Dhttp.proxyHost=exradius-egress.exradius -Dhttp.proxyPort=3128 -Dhttps.proxyHost=exradius-egress.exradius
+        -Dhttps.proxyPort=3128 -Dhttp.nonProxyHosts=localhost|127.0.0.1|exradius-api-internal.exradius|exradius-egress.exradius
+        -Daether.connector.http.useSystemProperties=true
+    - name: EXRADIUS_EGRESS_URL
+      value: http://exradius-egress.exradius:3129
+    - name: EXRADIUS_EGRESS_PEERS
+      value: exradius-egress-pods.exradius
     - name: EXRADIUS_API_URL
       value: http://exradius-api-internal.exradius:8001
     - name: EXRADIUS_RUN_TOKEN
@@ -127,6 +151,22 @@ spec:
       value: 9a1b
     - name: EXRADIUS_PROJECT_DIR
       value: /exradius/project
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: prepare
@@ -179,6 +219,26 @@ spec:
       value: "0"
     - name: EXRADIUS_MIRROR_DIR
       value: /exradius/mirrors
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: EXRADIUS_EGRESS_URL
+      value: http://exradius-egress.exradius:3129
+    - name: EXRADIUS_EGRESS_PEERS
+      value: exradius-egress-pods.exradius
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: clone-0
@@ -231,6 +291,26 @@ spec:
       value: /exradius/state
     - name: EXRADIUS_WORK_DIR
       value: /work
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius,exradius-egress.exradius
+    - name: YARN_HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: YARN_HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: JAVA_TOOL_OPTIONS
+      value: -Dhttp.proxyHost=exradius-egress.exradius -Dhttp.proxyPort=3128 -Dhttps.proxyHost=exradius-egress.exradius
+        -Dhttps.proxyPort=3128 -Dhttp.nonProxyHosts=localhost|127.0.0.1|exradius-api-internal.exradius|exradius-egress.exradius
+        -Daether.connector.http.useSystemProperties=true
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: setup-0

@@ -18,7 +18,9 @@ spec:
         {{- include "exradius.componentLabels" (list . "api") | nindent 8 }}
     spec:
       serviceAccountName: exradius-api
-      automountServiceAccountToken: false
+      # Its token asks the Kubernetes API who called /internal/egress (a TokenReview); it
+      # has no other right.
+      automountServiceAccountToken: true
       enableServiceLinks: false
       securityContext:
         {{- include "exradius.podSecurity" (list 1000 1000) | nindent 8 }}
@@ -53,6 +55,12 @@ spec:
               value: "8000"
             - name: EXRADIUS_INTERNAL_PORT
               value: "8001"
+            - name: EXRADIUS_RUNS_NAMESPACE
+              value: {{ .Values.namespaces.runs | quote }}
+            - name: EXRADIUS_EGRESS_ALLOW
+              value: {{ join "," .Values.egress.allow | quote }}
+            - name: EXRADIUS_EGRESS_SERVICE_ACCOUNT
+              value: system:serviceaccount:{{ .Release.Namespace }}:exradius-egress
           ports:
             - {name: http, containerPort: 8000}
             - {name: internal, containerPort: 8001}
@@ -88,7 +96,7 @@ spec:
   ports:
     - {name: http, port: 8000, targetPort: http}
 ---
-# The only port of the stack that run pods reach (NetworkPolicy from phase 4).
+# The only port of the stack that run and build pods reach (templates/networkpolicies.yaml).
 apiVersion: v1
 kind: Service
 metadata:

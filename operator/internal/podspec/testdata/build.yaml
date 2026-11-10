@@ -38,6 +38,18 @@ spec:
     - type=registry,ref=kind-registry:5000/exradius/saleor/workstation:buildcache,mode=max
     - --import-cache
     - type=registry,ref=kind-registry:5000/exradius/saleor/workstation:buildcache
+    - --opt
+    - build-arg:HTTP_PROXY=http://exradius-egress.exradius:3128
+    - --opt
+    - build-arg:HTTPS_PROXY=http://exradius-egress.exradius:3128
+    - --opt
+    - build-arg:NO_PROXY=localhost,127.0.0.1,::1,exradius-api-internal.exradius
+    - --opt
+    - build-arg:http_proxy=http://exradius-egress.exradius:3128
+    - --opt
+    - build-arg:https_proxy=http://exradius-egress.exradius:3128
+    - --opt
+    - build-arg:no_proxy=localhost,127.0.0.1,::1,exradius-api-internal.exradius
     - --metadata-file
     - /tmp/metadata.json
     env:
@@ -47,6 +59,18 @@ spec:
       value: /tmp
     - name: DOCKER_CONFIG
       value: /tmp/docker
+    - name: HTTP_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: HTTPS_PROXY
+      value: http://exradius-egress.exradius:3128
+    - name: NO_PROXY
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius
+    - name: http_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: https_proxy
+      value: http://exradius-egress.exradius:3128
+    - name: no_proxy
+      value: localhost,127.0.0.1,::1,exradius-api-internal.exradius
     image: moby/buildkit:v0.34.1-rootless
     imagePullPolicy: IfNotPresent
     name: build
