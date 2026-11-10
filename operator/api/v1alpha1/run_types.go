@@ -40,6 +40,7 @@ const (
 	ReasonOOMKilled       = "OOMKilled"
 	ReasonError           = "Error"
 	ReasonServiceFailed   = "ServiceFailed"
+	ReasonSandboxFailed   = "SandboxFailed"
 )
 
 // EnvVar is one environment variable: a literal value, or a key of the Run's Secret.

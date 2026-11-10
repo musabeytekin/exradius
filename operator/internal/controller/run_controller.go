@@ -29,6 +29,17 @@ import (
 // GracePeriod is how long a cancelled run's containers get after SIGTERM (§8.4).
 const GracePeriod int64 = 30
 
+// SandboxGrace is how long a scheduled pod may start no container before the operator
+// reads its FailedCreatePodSandBox events: a node whose runtime cannot run the pod
+// (runs.runtimeClassName, runs.userNamespaces) reports only there, and the run would wait
+// forever. SandboxPoll is how often it looks again meanwhile.
+const (
+	SandboxGrace = 60 * time.Second
+	SandboxPoll  = 15 * time.Second
+	// SandboxFailures is how many failed attempts make the failure the run's.
+	SandboxFailures = 3
+)
+
 // LogReader reads the end of a container's log, or of its previous instance's.
 type LogReader interface {
 	Tail(ctx context.Context, namespace, pod, container string, previous bool) (string, error)
@@ -60,6 +71,8 @@ type RunReconciler struct {
 	Logs      LogReader
 	Recorder  events.EventRecorder
 	Now       func() time.Time
+	// SandboxGrace replaces the package's SandboxGrace when set (tests).
+	SandboxGrace time.Duration
 }
 
 // +kubebuilder:rbac:groups=exradius.dev,resources=runs,verbs=get;list;watch
@@ -67,6 +80,7 @@ type RunReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=events,verbs=list
 
 // Reconcile implements reconcile.Reconciler.
 func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -115,6 +129,9 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	obs := status.Observe(run, pod, r.now())
+	if !obs.Fail && !obs.Status.Phase.Final() && scheduledPod(pod) && !started(pod) {
+		r.checkSandbox(ctx, pod, &obs)
+	}
 	reads := make([]logRead, 0, len(obs.Ended)+len(obs.Previous))
 	for _, container := range obs.Ended {
 		reads = append(reads, logRead{container, false})
@@ -146,6 +163,85 @@ func (r *RunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		r.event(run, e.Type, e.Reason, "Observe", e.Note)
 	}
 	return ctrl.Result{RequeueAfter: obs.RequeueAfter}, r.setStatus(ctx, run, obs.Status)
+}
+
+func scheduledPod(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodScheduled {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return pod.Spec.NodeName != ""
+}
+
+// started reports whether any container of the pod has started: then its sandbox exists.
+func started(pod *corev1.Pod) bool {
+	for _, cs := range append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...) {
+		if cs.State.Running != nil || cs.State.Terminated != nil || cs.LastTerminationState.Terminated != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// checkSandbox fails the Run when the node keeps failing to create the pod's sandbox: a
+// RuntimeClass the node has no runtime for, or gVisor asked for a user namespace. The
+// kubelet says so only in Events; the pod itself stays Pending with nothing started.
+func (r *RunReconciler) checkSandbox(ctx context.Context, pod *corev1.Pod, obs *status.Observation) {
+	grace := SandboxGrace
+	if r.SandboxGrace > 0 {
+		grace = r.SandboxGrace
+	}
+	poll := min(SandboxPoll, grace)
+	if age := r.now().Sub(pod.CreationTimestamp.Time); age < grace {
+		poll = min(poll, grace-age)
+	} else if message, err := r.sandboxFailure(ctx, pod); err != nil {
+		log.FromContext(ctx).V(1).Info("cannot read the pod's events", "pod", pod.Name, "error", err.Error())
+	} else if message != "" {
+		obs.Fail = true
+		st := &obs.Status
+		st.Phase, st.Reason = v1.PhaseFailed, v1.ReasonSandboxFailed
+		where := ""
+		if pod.Spec.NodeName != "" {
+			where = " on " + pod.Spec.NodeName
+		}
+		st.Message = fmt.Sprintf("the run's pod could not be started%s: %s", where, message)
+		obs.Events = append(obs.Events, status.Event{Type: corev1.EventTypeWarning, Reason: v1.ReasonSandboxFailed, Note: st.Message})
+		return
+	}
+	if obs.RequeueAfter == 0 || poll < obs.RequeueAfter {
+		obs.RequeueAfter = poll
+	}
+}
+
+// sandboxFailure is the kubelet's latest FailedCreatePodSandBox message for the pod once it
+// has failed SandboxFailures times, or "".
+func (r *RunReconciler) sandboxFailure(ctx context.Context, pod *corev1.Pod) (string, error) {
+	list := &corev1.EventList{}
+	if err := r.APIReader.List(ctx, list, client.InNamespace(pod.Namespace),
+		client.MatchingFields{"involvedObject.name": pod.Name, "reason": "FailedCreatePodSandBox"}); err != nil {
+		return "", err
+	}
+	var count int32
+	var message string
+	var last time.Time
+	for _, e := range list.Items {
+		if e.InvolvedObject.UID != "" && e.InvolvedObject.UID != pod.UID {
+			continue
+		}
+		count += max(e.Count, 1)
+		at := e.LastTimestamp.Time
+		if at.IsZero() {
+			at = e.EventTime.Time
+		}
+		if message == "" || at.After(last) {
+			last, message = at, e.Message
+		}
+	}
+	if count < SandboxFailures {
+		return "", nil
+	}
+	return strings.TrimPrefix(message, "(combined from similar events): "), nil
 }
 
 // startGeneration creates the workspace (once) and the pod of spec.podGeneration, after

@@ -196,6 +196,11 @@ rules:
   - apiGroups: ["", events.k8s.io]
     resources: [events]
     verbs: [create, patch]
+  # The kubelet reports a pod sandbox it cannot create only as Events (a RuntimeClass the
+  # node cannot run): the operator reads them to fail the Run.
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

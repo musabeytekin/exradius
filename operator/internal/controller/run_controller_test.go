@@ -85,8 +85,9 @@ func TestMain(m *testing.M) {
 			CPURequest:    resource.MustParse("500m"),
 			ProjectVolume: podspec.ProjectVolumeConfig{Enabled: true, AccessMode: corev1.ReadWriteOnce, Size: resource.MustParse("5Gi")},
 		}},
-		Logs:     fakeLogs{},
-		Recorder: mgr.GetEventRecorder("exradius-operator"),
+		Logs:         fakeLogs{},
+		Recorder:     mgr.GetEventRecorder("exradius-operator"),
+		SandboxGrace: time.Second,
 	}
 	if err := reconciler.SetupWithManager(mgr, 4); err != nil {
 		panic(err)
@@ -431,6 +432,33 @@ func TestImagePullFailureFailsTheRun(t *testing.T) {
 		pod, err := getPod(ns, "run-g7-0")
 		return apierrors.IsNotFound(err) || (err == nil && pod.DeletionTimestamp != nil)
 	})
+}
+
+// A node that cannot create the pod's sandbox (gVisor and a user namespace, a RuntimeClass
+// without its runtime) says so only in Events; the Run fails with the kubelet's message
+// instead of waiting forever.
+func TestSandboxThatCannotStartFailsTheRun(t *testing.T) {
+	ns := namespace(t)
+	must(t, k8s.Create(testCtx, newRun(ns, "s1")))
+	pod := waitPod(t, ns, "run-s1-0")
+	must(t, k8s.Create(testCtx, &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{Name: "run-s1-0.sandbox", Namespace: ns},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", Namespace: ns, Name: pod.Name, UID: pod.UID},
+		Reason:         "FailedCreatePodSandBox", Type: corev1.EventTypeWarning, Count: 7,
+		Message: "(combined from similar events): Failed to create pod sandbox: rpc error: code = Unknown desc = " +
+			"failed to start sandbox: cannot create gofer process: gofer: error setting namespace of type user",
+		LastTimestamp: metav1.Now(),
+	}))
+	setPodStatus(t, ns, "run-s1-0", func(s *corev1.PodStatus) {
+		s.Phase = corev1.PodPending
+		scheduled(s)
+		s.InitContainerStatuses = []corev1.ContainerStatus{held("prepare", "PodInitializing", "")}
+	})
+	run := waitPhase(t, ns, "run-s1", v1.PhaseFailed)
+	if run.Status.Reason != v1.ReasonSandboxFailed ||
+		!strings.HasPrefix(run.Status.Message, "the run's pod could not be started on node-1: Failed to create pod sandbox") {
+		t.Fatalf("reason %q message %q", run.Status.Reason, run.Status.Message)
+	}
 }
 
 func TestProbeHasNoWorkspace(t *testing.T) {

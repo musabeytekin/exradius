@@ -149,6 +149,26 @@ def _unschedulable(f: Failure) -> str | None:
     return "No node can take the run's pod: check the install's `runs.nodeSelector` and `runs.tolerations`."
 
 
+SANDBOX = re.compile(r"the run's pod could not be started(?: on \S+)?: (.*)", re.S)
+
+
+def _sandbox(f: Failure) -> str | None:
+    """The node's runtime could not create the pod (the operator reads the kubelet's
+    FailedCreatePodSandBox events): the install's runs.runtimeClassName or userNamespaces."""
+    if not (match := SANDBOX.search(f.log)):
+        return None
+    detail = match.group(1)
+    if "namespace of type user" in detail or "pinned-namespaces/user" in detail:
+        return ("The node's sandbox runtime (gVisor) cannot run a pod with user namespaces: turn off one of the "
+                "install's `runs.userNamespaces` and `runs.runtimeClassName`.")
+    if runtime := re.search(r'no runtime for "([^"]+)" is configured', detail):
+        return (f"The node has no container runtime {_code(runtime.group(1))} for the install's "
+                "`runs.runtimeClassName`: install it on every node that takes runs (gVisor: `make -C deploy/kind "
+                "dev-gvisor` locally), or give the RuntimeClass a node selector.")
+    return ("The node's container runtime could not start the run's pod: check the install's "
+            "`runs.runtimeClassName` and `runs.userNamespaces` against what the nodes support.")
+
+
 # Services ------------------------------------------------------------------------------------
 
 SERVICE = re.compile(r"^service (\S+) \(([^)]*)\) (.*)$", re.M)
@@ -344,7 +364,7 @@ def _network(f: Failure) -> str | None:
     return None
 
 
-RULES: list[Rule] = [_config, _image_pull, _unschedulable, _clone, _declared_memory, _service, _killed, _network,
+RULES: list[Rule] = [_config, _image_pull, _unschedulable, _sandbox, _clone, _declared_memory, _service, _killed, _network,
                      _builder, _build, _setup_mismatch, _missing_tool]
 
 

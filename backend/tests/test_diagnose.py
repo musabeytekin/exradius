@@ -125,6 +125,21 @@ def test_buildkit_failure_names_the_instruction_and_the_error():
     assert "was killed (exit 137)" in diagnose("Build workstation", killed)
 
 
+def test_a_pod_the_nodes_runtime_cannot_start():
+    """The operator's message from the kubelet's FailedCreatePodSandBox events (found on kind
+    with gVisor and user namespaces together)."""
+    gvisor = ("the run's pod could not be started on exradius-control-plane: Failed to create pod sandbox: rpc error: "
+              "code = Unknown desc = failed to start sandbox \"7bc9\": failed to create containerd task: failed to "
+              "create shim task: OCI runtime create failed: creating container: cannot create gofer process: gofer: "
+              "error setting namespace of type user and path \"/run/containerd/.../pinned-namespaces/user\": "
+              "invalid argument")
+    assert "turn off one of the install's `runs.userNamespaces` and `runs.runtimeClassName`" in diagnose(
+        "Prepare workspace", gvisor)
+    missing = ("the run's pod could not be started on node-2: Failed to create pod sandbox: rpc error: code = Unknown "
+               'desc = failed to get sandbox runtime: no runtime for "runsc" is configured')
+    assert diagnose("Prepare workspace", missing).startswith("The node has no container runtime `runsc`")
+
+
 def test_build_pod_profiles_that_do_not_fit_the_node():
     """The install's build-pod profiles (values builds.seccompProfile, builds.appArmorProfile),
     as each failure appeared on kind and k3s."""
