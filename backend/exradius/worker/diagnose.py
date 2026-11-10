@@ -274,6 +274,32 @@ BUILDKIT_PREFIX = re.compile(r"^#\d+ (?:\d+\.\d+ )?")
 """BuildKit's plain progress: ``#10 0.046 <output>`` (step number and seconds)."""
 
 
+BUILDER = [
+    (re.compile(r"cannot load seccomp profile|seccomp profile .*(?:not found|no such file)", re.I),
+     "The build pod's seccomp profile is not on the node: copy `deploy/seccomp/buildkit.json` to the "
+     "kubelet's seccomp directory under the name in values `builds.seccompProfile` on every node that runs "
+     "builds, or leave that value empty."),
+    (re.compile(r"apparmor.*(?:not loaded|not found|cannot enforce)|profile .* is not loaded", re.I),
+     "The build pod's AppArmor profile is not loaded on the node: load `deploy/apparmor/exradius-buildkit` "
+     "(`apparmor_parser -r`) on every node that runs builds, or leave values `builds.appArmorProfile` empty."),
+    (re.compile(r"rootlesskit.*failed to share mount point.*permission denied", re.I),
+     "Rootless BuildKit could not mount inside its own user namespace: the node's default AppArmor profile "
+     "forbids it. Load `deploy/apparmor/exradius-buildkit` on the nodes and set values "
+     "`builds.appArmorProfile`, or leave `builds.seccompProfile` empty (the builds namespace is then "
+     "privileged)."),
+    (re.compile(r"rootlesskit.*failed to start the child: fork/exec /proc/self/exe: operation not permitted", re.I),
+     "Rootless BuildKit could not create its user namespace: the build pod's seccomp profile refuses it. "
+     "Values `builds.seccompProfile` must name `deploy/seccomp/buildkit.json` as installed on the nodes."),
+]
+"""How the install's build-pod profiles fail (docs/kubernetes.md §12): the admin's to fix."""
+
+
+def _builder(f: Failure) -> str | None:
+    if not f.step.startswith(BUILD):
+        return None
+    return next((sentence for pattern, sentence in BUILDER if pattern.search(f.log)), None)
+
+
 def _build(f: Failure) -> str | None:
     if not f.step.startswith(BUILD):
         return None
@@ -319,7 +345,7 @@ def _network(f: Failure) -> str | None:
 
 
 RULES: list[Rule] = [_config, _image_pull, _unschedulable, _clone, _declared_memory, _service, _killed, _network,
-                     _build, _setup_mismatch, _missing_tool]
+                     _builder, _build, _setup_mismatch, _missing_tool]
 
 
 def diagnose(step: str, log: str) -> str | None:

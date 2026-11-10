@@ -204,6 +204,11 @@ builds:
   # /var/lib/kubelet/seccomp/exradius/ on every node that runs builds): RuntimeDefault plus
   # those calls, and exradius-builds at "baseline" (docs/kubernetes.md §12).
   seccompProfile: ""
+  # With seccompProfile, on nodes with AppArmor (Ubuntu, GKE's COS, AKS): a Localhost
+  # AppArmor profile that allows mounting in the build's own user namespace, which the
+  # runtime's default profile denies (deploy/apparmor/exradius-buildkit, loaded on every
+  # node that runs builds). Empty: the runtime's default AppArmor profile.
+  appArmorProfile: ""
 
 crds:
   # The Run and Build CRDs, kept on uninstall (helm.sh/resource-policy: keep) and upgraded

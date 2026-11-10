@@ -1,0 +1,54 @@
+# AppArmor profile of Exradius build pods (docs/kubernetes.md §12), for nodes with AppArmor
+# (Ubuntu, GKE's COS, AKS): values builds.appArmorProfile: exradius-buildkit, together with
+# builds.seccompProfile. Load it on every node that runs builds:
+#
+#   sudo cp exradius-buildkit /etc/apparmor.d/exradius-buildkit
+#   sudo apparmor_parser -r -W /etc/apparmor.d/exradius-buildkit
+#
+# It is containerd's default container profile (cri-containerd.apparmor.d, containerd
+# v2.3) with one change: rootless BuildKit may create a user namespace and mount inside it
+# (userns, mount, pivot_root), which the default profile denies with a silent `deny mount`.
+# The process still has no capability on the node, so those mounts reach only its own
+# namespaces; the build pod's seccomp profile (deploy/seccomp/buildkit.json) allows the
+# same calls and nothing else beyond the runtime's default. Needs AppArmor 4 (`userns`).
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile exradius-buildkit flags=(attach_disconnected,mediate_deleted) {
+  include <abstractions/base>
+
+  network,
+  capability,
+  file,
+  umount,
+  userns,
+  mount,
+  pivot_root,
+  # Host (privileged) processes, runc and crun may send signals to container processes.
+  signal (receive) peer=unconfined,
+  signal (receive) peer=runc,
+  signal (receive) peer=crun,
+  # Container processes may send signals amongst themselves.
+  signal (send,receive) peer=exradius-buildkit,
+
+  deny @{PROC}/* w,   # deny write for all files directly in /proc (not in a subdir)
+  # deny write to files not in /proc/<number>/** or /proc/sys/**
+  deny @{PROC}/{[^1-9/],[^1-9/][^0-9/],[^1-9s/][^0-9y/][^0-9s/],[^1-9/][^0-9/][^0-9/][^0-9/]*}/** w,
+  deny @{PROC}/sys/[^k]** w,  # deny /proc/sys except /proc/sys/k* (effectively /proc/sys/kernel)
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,  # deny everything except shm* in /proc/sys/kernel/
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+
+  # Processes within the container may trace each other, as other LSMs and Yama allow.
+  ptrace (trace,tracedby,read,readby) peer=exradius-buildkit,
+}

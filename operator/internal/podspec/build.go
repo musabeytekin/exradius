@@ -64,6 +64,11 @@ type BuildConfig struct {
 	// node). With it the build pod fits Pod Security baseline; empty: seccomp and AppArmor
 	// Unconfined, which needs privileged (docs/kubernetes.md §12).
 	SeccompProfile string
+	// AppArmorProfile is a Localhost AppArmor profile for the build container with
+	// SeccompProfile, on nodes with AppArmor (deploy/apparmor/exradius-buildkit, loaded on
+	// every node): the runtime's default profile denies mount, which rootlesskit needs.
+	// Empty: the runtime's default (nodes without AppArmor).
+	AppArmorProfile string
 }
 
 // proxyVars are the proxy variables of a build, upper and lower case.
@@ -239,8 +244,8 @@ func (c BuildConfig) buildContainer(build *v1.Build) corev1.Container {
 // inside it, which seccomp RuntimeDefault refuses, and maps its subordinate ids with the
 // setuid newuidmap (no allowPrivilegeEscalation: false). The runtime's default
 // capabilities stay: they bound what root has inside that namespace, which RUN steps need
-// (chown). The Localhost profile is RuntimeDefault plus exactly those calls; without it
-// both seccomp and AppArmor are off.
+// (chown). The Localhost profiles are the runtime's defaults plus exactly that; without
+// them both seccomp and AppArmor are off.
 func (c BuildConfig) buildSecurityContext() *corev1.SecurityContext {
 	sc := &corev1.SecurityContext{
 		ReadOnlyRootFilesystem: ptr.To(true),
@@ -248,6 +253,9 @@ func (c BuildConfig) buildSecurityContext() *corev1.SecurityContext {
 	}
 	if c.SeccompProfile != "" {
 		sc.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To(c.SeccompProfile)}
+		if c.AppArmorProfile != "" {
+			sc.AppArmorProfile = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeLocalhost, LocalhostProfile: ptr.To(c.AppArmorProfile)}
+		}
 		return sc
 	}
 	sc.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}

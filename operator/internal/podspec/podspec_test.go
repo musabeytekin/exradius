@@ -435,6 +435,11 @@ func TestBuildPodWithSeccompProfile(t *testing.T) {
 	if pod.Spec.HostNetwork || pod.Spec.HostPID || pod.Spec.HostIPC {
 		t.Fatal("host namespaces")
 	}
+	c.AppArmorProfile = "exradius-buildkit"
+	sc = c.BuildPod(build()).Spec.Containers[0].SecurityContext
+	if sc.AppArmorProfile == nil || sc.AppArmorProfile.Type != corev1.AppArmorProfileTypeLocalhost || *sc.AppArmorProfile.LocalhostProfile != "exradius-buildkit" {
+		t.Fatalf("apparmor %+v", sc.AppArmorProfile)
+	}
 	for _, v := range pod.Spec.Volumes {
 		if v.HostPath != nil {
 			t.Fatalf("host path %s", v.Name)

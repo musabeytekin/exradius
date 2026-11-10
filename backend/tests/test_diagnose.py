@@ -125,6 +125,21 @@ def test_buildkit_failure_names_the_instruction_and_the_error():
     assert "was killed (exit 137)" in diagnose("Build workstation", killed)
 
 
+def test_build_pod_profiles_that_do_not_fit_the_node():
+    """The install's build-pod profiles (values builds.seccompProfile, builds.appArmorProfile),
+    as each failure appeared on kind and k3s."""
+    apparmor = ("building workstation from workstation.Dockerfile failed:\nthe build exited with 1\n"
+                "[rootlesskit:child ] error: failed to share mount point: /: permission denied\n"
+                "[rootlesskit:parent] error: child exited: exit status 1")
+    assert "`builds.appArmorProfile`" in diagnose("Build workstation", apparmor)
+    seccomp = "[rootlesskit:parent] error: failed to start the child: fork/exec /proc/self/exe: operation not permitted"
+    assert "`builds.seccompProfile`" in diagnose("Build service db", seccomp)
+    missing = ('build could not be created for 2m0s: failed to create containerd container: cannot load seccomp '
+               'profile "/var/lib/kubelet/seccomp/exradius/buildkit.json": open /var/lib/kubelet/seccomp/exradius/'
+               'buildkit.json: no such file or directory')
+    assert diagnose("Build workstation", missing).startswith("The build pod's seccomp profile is not on the node")
+
+
 def test_dockerfile_copy_failure():
     log = """building service api from api.Dockerfile failed:
 Step 4/5 : COPY requirements.txt /srv/
