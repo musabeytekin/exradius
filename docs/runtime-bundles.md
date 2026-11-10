@@ -49,9 +49,11 @@ workstation's command is `/opt/exradius/runtime/bin/exradius-runner <run id>`.
 
 A rebuilt bundle is a new image digest, so a running pod never sees it change; there is
 nothing to extract and nothing to clean up. Image volumes need containerd 2.1 or later on the
-nodes (GA in Kubernetes 1.36); kind has it. For a cloud node image without it, values
-`runs.bundleMount: copy` is planned for phase 6 (`kubernetes.md` §7.2): an init container
-that copies the bundle into an `emptyDir`.
+nodes (GA in Kubernetes 1.36); kind has it. For a node image without it, values
+`runs.bundleMount: copy` adds a first init container, `bundle`, that runs the bundle image
+itself and copies the bundle into an `emptyDir` with the image's own copy command
+(`/.exradius/copy`, for the static busybox beside it in `/.exradius/`; `kubernetes.md` §7.2),
+which every other container mounts read-only at the same path.
 
 The bundle also carries `git-hooks/`: the hooks dispatcher under every standard hook name
 (`run-environment.md` §3), written at build time by `python -m exradius.runner.gitconfig`.

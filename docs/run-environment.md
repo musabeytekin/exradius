@@ -143,7 +143,8 @@ Rewritten for Kubernetes in phase 3 (2026-11-09; `docs/kubernetes.md` §7.6).
 - Values `runs.projectVolume`: `ReadWriteOnce` for one node (kind), `ReadWriteMany` with an
   RWX storage class (EFS, Filestore, Azure Files, NFS) for several, or `enabled: false`: then
   clones fetch from the remote and each cache is an empty directory of the run's own
-  workspace.
+  workspace. An RWX class is NFS or SMB, which user-namespaced pods cannot mount
+  (`docs/kubernetes.md` §28).
 - Nothing cleans the caches, and the panel no longer shows their size: no Exradius process
   mounts the volume. Resetting a project's caches means deleting its PVC while no run of the
   project is active (`kubectl -n exradius-runs delete pvc exradius-project-<slug>`); the

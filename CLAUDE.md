@@ -53,6 +53,26 @@ Egress proxy (Go, standard library only; `egress/`):
 make -C egress test          # go test -race: forward and reverse proxy, real git clone/push through it, pod watch
 ```
 
+Builder credential helper (Go, standard library only; `builder/`, in `deploy/builder.Dockerfile`):
+
+```bash
+make -C builder test         # docker-credential-exradius-gcr and -acr against fake metadata, Entra ID and ACR
+```
+
+Clouds (Terraform; nothing here needs an account; `apply` costs money and is the user's):
+
+```bash
+cd deploy/terraform/aws && terraform init -backend=false && terraform validate
+cd deploy/terraform/aws && terraform test     # plan and apply against mocked providers (also gcp, azure)
+cd deploy/terraform/aws && tflint --init && tflint
+deploy/terraform/bootstrap.sh aws             # after a real apply: kubeconfig, Traefik, Secrets
+make -C deploy push REGISTRY=<registry> PLATFORM=linux/arm64   # every image to a cloud registry
+```
+
+`tests/test_cloud_storage.py` runs the GCS and Azure stores against fake-gcs-server and
+Azurite in Docker when `EXRADIUS_TEST_GCS_ENDPOINT` and `EXRADIUS_TEST_AZURITE_ENDPOINT` are
+set (the commands are in its docstring).
+
 Frontend (Node 24, Vite):
 
 ```bash
@@ -159,14 +179,18 @@ The schema is strict pydantic with `extra="forbid"` in `schemas/project_config.p
   into `CLAUDE_CONFIG_DIR` (for example `includeCoAuthoredBy: false`).
 - `models/`: SQLAlchemy models plus Alembic migrations (`0006` is the move to Kubernetes).
 - `storage.py`: object store for transcripts, artifacts and attachments: S3 (SeaweedFS
-  locally); the filesystem and in-memory stores are for tests. `messaging/`: queue/exchange
+  locally), GCS or Azure Blob (httpx clients), signing in with the pod's cloud identity
+  (`pod_identity.py`; boto3's chain for S3); the filesystem and in-memory stores are for
+  tests. `messaging/`: queue/exchange
   names and the publisher. `git.py`: git helpers shared by the api, worker and runner.
 - `cli.py`: the `exradius` CLI (publish-task, answer, events, generate-key, migrate).
 
 **Operator `operator/`.** Go, controller-runtime. `api/v1alpha1` holds the `Run` and
 `Build` CRDs (`exradius.dev`); `internal/podspec` builds the PVC and the pod from a Run
 (prepare, clone-<n>, setup-<n>, the files sidecar, the workstation with the bundle as an
-image volume) and the build pod from a Build (`build.go`: context fetch, rootless BuildKit),
+image volume, or copied by a first `bundle` container with `runs.bundleMount: copy`) and the
+build pod from a Build (`build.go`: context fetch, rootless BuildKit from `exradius-builder`,
+the cloud credential helper for the image's registry),
 and writes the security context itself; `internal/status` maps pods onto Run and Build
 status (steps, log tails, pull failures, cancel, pod lost, podGeneration, digest);
 `internal/controller` reconciles both. The Run spec is the contract with
@@ -184,7 +208,9 @@ or attach a patch).
 **Run isolation (kubernetes.md §7, runtime-bundles.md).** Images: `exradius-backend` (api
 and worker; no Agent SDK, no Docker SDK; uid 1000), `exradius-operator`, `exradius-frontend`,
 `exradius-runtime-claude-code` (a relocatable Python with the Agent SDK and a pinned native
-Claude Code binary, plus the git hooks dispatcher; no Node), `exradius-project-default`. Run
+Claude Code binary, plus the git hooks dispatcher; no Node), `exradius-project-default`,
+`exradius-builder` (pinned rootless BuildKit with the ECR, Artifact Registry and ACR credential
+helpers). Run
 pods mount the bundle image as an image volume at `/opt/exradius/runtime`, so a project's
 workstation can be any glibc image with bash and git (no Alpine). The operator writes the
 pod's security: uid 1000, `/etc/passwd` from the `exradius-run-identity` ConfigMap (`runner`,
@@ -194,7 +220,8 @@ workspace PVC per Run. Runs live in the `exradius-runs` namespace (Pod Security 
 the stack in `exradius` (`restricted`), builds in `exradius-builds` (`baseline` with the
 node-installed `charts/exradius/files/profiles/buildkit.json`, and `charts/exradius/files/profiles/exradius-buildkit` on
 AppArmor nodes, via `builds.seccompProfile`/`appArmorProfile`; `privileged` without them:
-rootless BuildKit creates a user namespace and mounts in it; kubernetes.md §12, §27).
+rootless BuildKit creates a user namespace and mounts in it; kubernetes.md §12, §27). Values
+`nodeSetup` installs both profiles on every node with a privileged DaemonSet.
 
 **Isolation (kubernetes.md §7.8, §27; phase 5).** `runs.userNamespaces` (`hostUsers: false`,
 on by default) and `runs.runtimeClassName` (`gvisor`, an opt-in that excludes user namespaces:
@@ -241,3 +268,14 @@ information exists nowhere else.
   `make_config_repo`, `commit_config`, `configured`); follow that pattern rather than mocking
   the git layer.
 - Commit messages are short imperative subjects without a scope prefix (see `git log`).
+
+**Clouds (kubernetes.md §16, §28; phase 6).** `deploy/terraform/{aws,gcp,azure}` make the
+cluster (system pool, tainted run pool, Arm), registries (builds apart from the Exradius
+images), bucket, managed Postgres (Amazon MQ on AWS, the RabbitMQ operator elsewhere), the
+cloud identities of the api, the worker and build pods, a static ingress address and
+`values-generated.yaml`; `bootstrap.sh` adds the kubeconfig, Traefik and the Secrets. Only
+the values differ from kind: `values-eks.yaml`, `values-gke.yaml`, `values-aks.yaml`, then
+the generated file. The chart's `ingress` routes every path to the panel's nginx;
+`publicApiUrl` is its address. Values `identity`, `stack`, `objectStore.gcs|azure`,
+`builds.credentialHelper`, `runs.bundleMount` and `nodeSetup` are what the clouds use.
+

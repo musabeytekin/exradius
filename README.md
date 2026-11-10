@@ -250,7 +250,9 @@ containerd 2, runc 1.2 or later and a Linux 6.3+ kernel on the nodes. Optional h
 with a node requirement: `runs.runtimeClassName: gvisor` (runsc and a RuntimeClass on the
 nodes; turn user namespaces off with it), and build pods at Pod Security `baseline`
 (`builds.seccompProfile` with `charts/exradius/files/profiles/buildkit.json` on every node, plus
-`builds.appArmorProfile` with `charts/exradius/files/profiles/exradius-buildkit` on AppArmor nodes). A registry build pods push to on a private address needs an
+`builds.appArmorProfile` with `charts/exradius/files/profiles/exradius-buildkit` on AppArmor nodes;
+`nodeSetup.enabled` installs both). The panel from outside the cluster is values `ingress`
+with an ingress controller, and `publicApiUrl` its address. A registry build pods push to on a private address needs an
 `egress.allowPrivate` entry; a corporate proxy goes in `egress.upstreamProxy`. Create the Secrets the values name
 (`secretKey.existingSecret`, `admin.existingSecret`, the database, broker and object store
 credentials), then:
@@ -261,8 +263,33 @@ kubectl label namespace exradius pod-security.kubernetes.io/enforce=restricted
 helm install exradius charts/exradius -n exradius -f my-values.yaml
 ```
 
-`charts/exradius/values.yaml` documents every key. Values files for EKS, GKE and AKS come
-with phase 6.
+`charts/exradius/values.yaml` documents every key.
+
+### In a cloud
+
+`deploy/terraform/aws`, `gcp` and `azure` make everything an install needs on EKS, GKE or AKS
+(docs/kubernetes.md §16, §28): the cluster with a system and a run node pool (Arm), the
+registries, the bucket, managed PostgreSQL (and Amazon MQ on AWS; RabbitMQ runs in the
+cluster on the others), the cloud identities of the api, the worker and build pods (no cloud
+key is ever in a Secret), a static address for the panel, and `values-generated.yaml`. With
+the cloud's CLI signed in:
+
+```bash
+cd deploy/terraform/aws
+terraform init
+terraform apply -var 'allowed_cidrs=["<your address>/32"]'
+cd ../../..
+deploy/terraform/bootstrap.sh aws        # kubeconfig, load balancer, Traefik, Secrets
+$(terraform -chdir=deploy/terraform/aws output -raw push_command)
+helm upgrade --install exradius charts/exradius --namespace exradius \
+  -f charts/exradius/values-eks.yaml -f deploy/terraform/aws/values-generated.yaml
+```
+
+GCP takes `-var project=<id>` and Azure `-var subscription_id=<id>`, with `values-gke.yaml` and
+`values-aks.yaml`. The panel is at `terraform output public_api_url`, open to `allowed_cidrs`
+only. Before `terraform destroy`, uninstall the chart (its load balancer and disks are the
+cluster's) and, on AWS, run `terraform output cleanup_command` (the build repositories ECR
+made on push).
 
 ### In the panel
 

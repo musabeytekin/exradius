@@ -2,7 +2,7 @@
 
 Status: agreed design, 2026-11-08; details settled by phase 1 folded in the same day (§23),
 by phase 2 on 2026-11-09 (§24), by phase 3 the same day (§25), by phase 4 on 2026-11-10
-(§26) and by phase 5 the same day (§27). Supersedes the Docker-based execution of `architecture.md`
+(§26), by phase 5 the same day (§27) and by phase 6, up to its live part, the same day (§28). Supersedes the Docker-based execution of `architecture.md`
 (§3, §5, §9, §10, the run-container parts of §12), `runtime-bundles.md` §2.2, the services
 lifecycle and networks of `environment-and-services.md` §2, and the memory budget and cache
 mounts of `run-environment.md` §4 and §5. The phases are in `kubernetes-plan.md`. The last
@@ -75,7 +75,7 @@ reset.
 | `operator` | Deployment, Go (controller-runtime) | nothing secret | in `exradius-runs`: create, watch and delete pods and PVCs; in `exradius-builds`: create, watch and delete pods. In both: read `pods/log`; update `runs/status` or `builds/status`; write Events. Its leader-election Lease | read Secrets; reach Postgres or the broker |
 | `egress` | Deployment, Go | decrypted credentials of active runs, in memory only | list and watch pods in `exradius-runs` and `exradius-builds` | anything else |
 | run pod | Pod per Run | the per-run Secret (§10) | nothing: `automountServiceAccountToken: false`, and NetworkPolicy blocks the API server | reach anything but the proxy, the api's internal port and DNS |
-| build pod | Pod per Build | its Build's token (for the context); registry push identity from phase 6 | nothing: no ServiceAccount token | |
+| build pod | Pod per Build | its Build's token (for the context); in a cloud, its ServiceAccount's cloud identity, which may push to the builds registry only (§12) | nothing: no ServiceAccount token | |
 | `frontend` | Deployment, nginx | nothing | nothing | |
 
 - **Why three Python and Go parts.** The worker keeps today's job: intake, the state machine,
@@ -289,9 +289,14 @@ replaces extraction into Docker volumes (`bundles.py`). A rebuilt bundle is a ne
 so a running pod never sees it change.
 
 - Image volumes need containerd 2.1 or later on the nodes. Kind has it.
-- For a cloud node image without it, values `runs.bundleMount: copy` turns the mount into an
-  init container that copies the bundle into an `emptyDir`. Slower, and the same everywhere
-  else.
+- For a node image without it, values `runs.bundleMount: copy` turns the mount into an
+  `emptyDir` and adds a first init container, `bundle`, that runs the bundle image itself
+  with its own copy command (`/.exradius/copy`, a script for a static busybox the image
+  carries, since the bundle has no libc): `tar` copies `bin`, `python`, `git-hooks` and
+  `VERSION` with their modes and times (the `.pyc` files check their sources' times) as the
+  run user. Every other container mounts the copy read-only where the image volume was. It
+  costs about 0.5 GB of the node's ephemeral storage and a few seconds per pod, and is not a
+  step. Probe pods get it too.
 - The git hooks dispatcher (architecture §12, "Git at the command-line level") moves from the
   state mount into the bundle, at `/opt/exradius/runtime/git-hooks`. It is read-only there, so
   the agent can no longer edit it. `core.hooksPath` points there through `GIT_CONFIG_*`.
@@ -387,7 +392,7 @@ Run and not owned by any Run. The worker deletes it when the project is deleted.
 | Values | Behaviour |
 |---|---|
 | `runs.projectVolume.accessMode: ReadWriteOnce` | single-node clusters (local kind). |
-| `ReadWriteMany` with `storageClass` | EFS, Filestore, Azure Files or NFS. Every run of the project mounts it on any node. A network filesystem can be slow for stores of many small files (pnpm), which Verify timings show. |
+| `ReadWriteMany` with `storageClass` | EFS, Filestore, Azure Files or NFS. Every run of the project mounts it on any node. A network filesystem can be slow for stores of many small files (pnpm), which Verify timings show. NFS and SMB have no idmapped mounts, so a user-namespaced pod cannot mount them: it needs `runs.userNamespaces: false` (§28). |
 | `enabled: false` | no mirrors (direct clones) and no caches (each `workstation.cache` path is an empty directory on the workspace). |
 
 - Each `workstation.cache` entry is the subPath `caches/<n>-<sanitised path>`, mounted at its
@@ -836,19 +841,46 @@ in `exradius-builds`.
   - without: seccomp and AppArmor `Unconfined`, and `exradius-builds` is `privileged`.
 
   `restricted` is never possible: `newuidmap` is setuid. kind installs the seccomp profile
-  in `dev-up` and uses it. What was checked is in §24 and §27. kaniko is not an option: it
-  was archived in June 2025.
+  in `dev-up` and uses it. Elsewhere values `nodeSetup.enabled` installs both profiles
+  (`charts/exradius/files/profiles/`) on every node and keeps them there: a privileged
+  DaemonSet in a namespace of its own (`exradius-node-setup`), whose init container writes
+  the seccomp profile into the kubelet's directory and, where the node has AppArmor, loads
+  the AppArmor profile with the node's own `apparmor_parser` in the node's mount namespace
+  (the parser containerd uses for its default profile, so it matches the kernel); a pod that
+  restarts after a reboot loads it again. A build that lands on a new node before its
+  profiles waits: the kubelet retries the container, and the operator gives a
+  `CreateContainerError` 120 s (§5). What was checked is in §24, §27 and §28. kaniko is not
+  an option: it was archived in June 2025.
 
 | | Local (kind) | EKS | GKE | AKS |
 |---|---|---|---|---|
-| registry | `registry:2` container `kind-registry` on kind's Docker network: `localhost:5001` from the host, `kind-registry:5000` from pods and nodes (containerd `hosts.toml`) | ECR | Artifact Registry | ACR |
-| push identity of build pods | none (HTTP, `builds.insecureRegistries`) | EKS Pod Identity + `docker-credential-ecr-login` | Workload Identity + `docker-credential-gcr` | Workload Identity + an ACR token helper |
-| pull by nodes | containerd mirror config | node role | node service account | kubelet identity with `AcrPull` |
+| registry | `registry:2` container `kind-registry` on kind's Docker network: `localhost:5001` from the host, `kind-registry:5000` from pods and nodes (containerd `hosts.toml`) | ECR: the Exradius images in repositories of their own, builds under `exradius/`, created on their first push (a repository creation template) | Artifact Registry: two repositories, `<name>-images` and `<name>-builds` | ACR: two registries, the images' and `<name>builds` |
+| push identity of build pods | none (HTTP, `builds.insecureRegistries`) | EKS Pod Identity + `docker-credential-ecr-login`; push to `exradius/*` only | Workload Identity + `docker-credential-exradius-gcr`; writer on the builds repository only | Workload Identity + `docker-credential-exradius-acr`; `AcrPush` on the builds registry only |
+| pull by nodes | containerd mirror config | node role | node service account, reader on both repositories | kubelet identity with `AcrPull` on both |
+| the worker reads built images' configs (§7.4) | anonymously | `ecr:GetAuthorizationToken` (boto3) | the metadata server's token as `oauth2accesstoken` | its Entra ID token exchanged at `/oauth2/exchange` |
 
-- The builder image is the pinned upstream rootless BuildKit image
-  (`builds.builderImage`, `moby/buildkit:v0.34.1-rootless` by digest). Phase 6 replaces it
-  with an Exradius builder image that adds those credential helpers, and values name the one
-  to use (`builds.credentialHelper`).
+- The builder image is `exradius-builder` (`deploy/builder.Dockerfile`, built by Tilt and
+  `make -C deploy push`): the pinned upstream rootless BuildKit (`moby/buildkit:v0.34.1-rootless`
+  by digest) plus `docker-credential-ecr-login` (Amazon's, built from its Go module, which
+  the Go checksum database verifies) and `docker-credential-exradius` (`builder/`, standard
+  library only) under the names `-gcr` and `-acr`. `builds.builderImage` overrides it.
+- Values `builds.credentialHelper` (`none`, `ecr`, `gcr`, `acr`) picks the helper. The build
+  container then writes `{"credHelpers": {"<the image's registry>": "<helper>"}}` into
+  buildctl's Docker config, so only that registry gets the credentials; base images from
+  public registries are pulled anonymously as before. The same key tells the worker how to
+  read the builds registry (`EXRADIUS_BUILDS_CREDENTIALS`, `worker/registry.py`).
+- Build pods have no ServiceAccount token, but the clouds' identity webhooks mount their own
+  token (audience `pods.eks.amazonaws.com` or `api://AzureADTokenExchange`, which the API
+  server does not accept), and GKE's metadata server answers the pod by its ServiceAccount.
+  The pod identity endpoint is reached directly: `builds.noProxy` (EKS Pod Identity's
+  `169.254.170.23`, GKE's `169.254.169.254`) and the NetworkPolicy entry
+  `networkPolicy.buildIdentity`. Entra ID and ACR are public hosts, reached through the
+  proxy. AKS's webhook acts on the pod label `azure.workload.identity/use`, which the
+  operator adds from `identity.build.podLabels` (`--build-pod-labels`).
+- A Dockerfile's `RUN` steps share the build pod's network, so a hostile Dockerfile can
+  fetch the build identity's token. That identity may push to the builds registry and
+  nothing else: never the Exradius images, the bucket or the database. On kind any build
+  pod may push anywhere in the kind registry already.
 - `image:` references are pulled by the nodes. Private registries named in configs get
   `runs.imagePullSecrets` from values, which replaces the Docker daemon's own login.
 
@@ -893,9 +925,17 @@ probes become a Run with `purpose: probe`:
 | RabbitMQ | RabbitMQ Cluster Operator + a one-replica `RabbitmqCluster` from the chart | Amazon MQ on AWS; the same operator in-cluster on GKE and AKS (no managed RabbitMQ there) |
 | Object storage | SeaweedFS (S3 API, Apache 2.0) from the chart | S3, GCS, Azure Blob |
 
-- **Object storage.** `storage.py` gains `gcs` and `azure` backends next to `s3`. Each signs in
-  with the cloud's pod identity (IRSA or EKS Pod Identity, GKE Workload Identity, AKS Workload
-  Identity), so no key is in values.
+- **Object storage.** `storage.py` has `gcs` and `azure` backends next to `s3`
+  (`objectStore.kind`). Each signs in with the cloud's pod identity (EKS Pod Identity or IRSA
+  through boto3's default chain, GKE Workload Identity's metadata server, AKS Workload
+  Identity's federated token, `pod_identity.py`), so no key is in values; the api and the
+  worker carry it (values `identity.app`). The two new backends are small httpx clients of
+  the clouds' REST APIs, as `kube.py` is of Kubernetes's, rather than their SDKs (which
+  would bring dozens of packages for three calls): GCS's JSON API, and Blob Storage's REST
+  API with a Bearer token or, for clusters outside AKS and for Azurite, a Shared Key from a
+  Secret (`objectStore.azure.existingSecret`). Both retry connection errors, 408, 429 and 5xx
+  twice. The GCS identity has object rights on its bucket only, so `ensure_bucket` checks
+  by listing and never creates; Terraform makes the bucket.
   - The `ObjectStore` protocol (put, get, ensure_bucket) is unchanged.
   - The filesystem backend stays for tests only.
   - MinIO is not used: its community edition is no longer maintained.
@@ -936,9 +976,26 @@ probes become a Run with `purpose: probe`:
 - the three namespaces with their Pod Security labels;
 - the run identity ConfigMap;
 - NetworkPolicies (phase 4);
-- an Ingress or Gateway for the panel and API (values);
+- an Ingress for the panel and the API (values `ingress`): every path goes to the panel's
+  nginx, which serves the panel and forwards `/api` to the api with the settings its streams
+  need, so the api keeps the frontend as its only HTTP peer and the internal port is never
+  routed. `publicApiUrl` is the Ingress's address. The cloud installs and the k3s check use
+  Traefik (`deploy/terraform/traefik.yaml`), the one controller that is maintained, runs on
+  every cluster, and lets the k3s server check exactly what the clouds run: ingress-nginx
+  was retired in March 2026, and AKS's NGINX-based app routing gets security patches only
+  through November 2026 (§28);
+- the node setup DaemonSet that installs the build pods' profiles (values `nodeSetup`, §12);
 - the CRDs;
 - optionally the Postgres `Cluster`, the `RabbitmqCluster` and SeaweedFS.
+
+- **Placement.** Values `stack.nodeSelector` and `stack.tolerations` place the stack's pods
+  (the Deployments, and the in-cluster Postgres, RabbitMQ and SeaweedFS); the cloud values
+  put them on the system pool, and runs on the tainted run pool (`runs.nodeSelector`,
+  `runs.tolerations`), so a run never shares a node with the stack.
+- **Cloud identities.** Values `identity.app` (the api and the worker) and `identity.build`
+  (build pods) are ServiceAccount annotations and pod labels: IRSA's role, GKE's Google
+  service account, or AKS's client id and its webhook's label. EKS Pod Identity and GKE's
+  direct grants name the ServiceAccounts and need neither.
 
 - **CRDs** are generated by controller-gen from `operator/` and shipped as templates with
   `helm.sh/resource-policy: keep` behind `crds.install`. Helm never upgrades files in `crds/`,
@@ -952,7 +1009,8 @@ probes become a Run with `purpose: probe`:
   kernel whose volume filesystems support idmapped mounts (ext4, xfs, tmpfs; Linux 6.3 or
   later); for build pods at `baseline`, the seccomp profile file on every node
   (`/var/lib/kubelet/seccomp/<builds.seccompProfile>`) and, on AppArmor nodes, the AppArmor
-  profile loaded (`builds.appArmorProfile`).
+  profile loaded (`builds.appArmorProfile`), which `nodeSetup` does; an ingress controller
+  for `ingress`.
 - **Nodes on Ubuntu 26.04** (or any host with AppArmor's
   `kernel.apparmor_restrict_unprivileged_unconfined=1`) need that sysctl set to `0`, kept in
   `/etc/sysctl.d/`. With it on, containerd's default profile is stacked with `unconfined`
@@ -962,8 +1020,10 @@ probes become a Run with `purpose: probe`:
   keep the stacked profile until they restart. Found on the k3s test server (§26); cloud
   node images on Ubuntu 26.04 are expected to need the same.
 
-Values files: `values.yaml` (defaults), `values-local.yaml`, and from phase 6
-`values-eks.yaml`, `values-gke.yaml`, `values-aks.yaml`. The main keys:
+Values files: `values.yaml` (defaults), `values-local.yaml`, `values-eks.yaml`,
+`values-gke.yaml` and `values-aks.yaml`. A cloud's file holds what every install there
+shares; Terraform writes the account's own part (`values-generated.yaml`), given after it.
+The main keys:
 
 ```yaml
 publicApiUrl: https://exradius.example.com
@@ -976,7 +1036,7 @@ runs:
   defaults: {memoryRequest: 1Gi, cpuRequest: 500m, serviceMemoryRequest: 256Mi, serviceCpuRequest: 100m}
   workspace: {storageClass: "", size: 50Gi}
   projectVolume: {enabled: true, accessMode: ReadWriteOnce, storageClass: "", size: 100Gi}
-  bundleMount: image            # or copy
+  bundleMount: image            # or copy (§7.2)
   runtimeClassName: ""          # gvisor (opt-in), kata-..., or the default
   userNamespaces: true          # hostUsers: false; off for gvisor
   nodeSelector: {}
@@ -987,23 +1047,35 @@ projectDefaultImage: ...
 egress: {replicas: 1, allow: [], allowPrivate: [], upstreamProxy: "", upstreamProxySecret: {name: "", key: url},
          upstreamNoProxy: [], caBundle: {configMap: "", key: ca.crt}, logLevel: info}
 networkPolicy: {enabled: true, dns: {namespace: kube-system, podLabels: {k8s-app: kube-dns}}, apiFrom: [],
-                clusterCIDRs: []}
-builds: {registry: ..., builderImage: moby/buildkit:<pinned>-rootless, cache: true, insecureRegistries: [],
-         resources: {}, egress: proxy, seccompProfile: "", appArmorProfile: "",
-         credentialHelper: none}   # credentialHelper: phase 6
-objectStore: {kind: s3, bucket: exradius, s3: {endpoint: ...}, inCluster: {seaweedfs: true}}
+                clusterCIDRs: [], buildIdentity: []}
+builds: {registry: ..., builderImage: "", cache: true, insecureRegistries: [], resources: {}, egress: proxy,
+         seccompProfile: "", appArmorProfile: "", credentialHelper: none, noProxy: []}
+objectStore: {kind: s3, bucket: exradius, s3: {endpoint: ...}, gcs: {endpoint: ""},
+              azure: {account: "", endpoint: "", existingSecret: ""}, inCluster: {seaweedfs: true}}
+identity: {app: {serviceAccountAnnotations: {}, podLabels: {}}, build: {serviceAccountAnnotations: {}, podLabels: {}}}
+stack: {nodeSelector: {}, tolerations: []}
 postgres: {existingSecret: ..., inCluster: {cloudnativepg: true, storage: 10Gi}}
 rabbitmq: {existingSecret: ..., inCluster: {operator: true}}
-ingress: {enabled: false, className: "", host: ""}
+ingress: {enabled: false, className: "", host: "", annotations: {}, tls: []}
+nodeSetup: {enabled: false, namespace: exradius-node-setup, image: busybox:<pinned>-musl, kubeletDir: /var/lib/kubelet}
 crds: {install: true}
 ```
 
-Terraform (phase 6, `deploy/terraform/<cloud>/`) creates what the values point at:
+Terraform (`deploy/terraform/<cloud>/`, §28) creates what the values point at:
 
-- the cluster, with a system node pool and a tainted run node pool;
-- the registry, the bucket, managed Postgres (and Amazon MQ on AWS), optional RWX storage;
-- the workload identity bindings;
-- a generated values file.
+- the network and the cluster, with a system node pool and a tainted run node pool (Arm by
+  default, so images built on an Apple silicon Mac run natively);
+- the registries, the bucket, managed Postgres (and Amazon MQ on AWS), optional RWX
+  storage;
+- the cloud identities of the api, the worker and build pods;
+- a static address for the panel's load balancer, so `publicApiUrl` is known before the
+  install;
+- `values-generated.yaml`.
+
+`deploy/terraform/bootstrap.sh <cloud>` then prepares the cluster (kubeconfig, the AWS Load
+Balancer Controller or cert-manager and the RabbitMQ operator, Traefik on the reserved
+address and open to `allowed_cidrs` only, the Secrets from Terraform's outputs), and
+`make -C deploy push` pushes the images.
 
 ## 17. The local developer loop
 
@@ -1030,8 +1102,8 @@ Terraform (phase 6, `deploy/terraform/<cloud>/`) creates what the values point a
     creates the RuntimeClass `gvisor`. It works in the arm64 kind node on this Mac;
     `runs.runtimeClassName: gvisor` then runs every run pod in it.
 - **Tilt** (`Tiltfile` at the root):
-  - `tilt up` builds the images (backend, frontend, operator, egress, runtime bundle, project
-    default; the builder from phase 6, until then the pinned upstream BuildKit image) and
+  - `tilt up` builds the images (backend, frontend, operator, egress, builder, runtime
+    bundle, project default) and
     pushes them to `localhost:5001`;
   - installs the chart with `values-local.yaml`;
   - syncs changed Python files into the api and worker pods and restarts the process, with no
@@ -1061,7 +1133,8 @@ egress/             Go module: the egress proxy
 charts/exradius/    the Helm chart; CRD templates generated from operator/
 frontend/
 deploy/             Dockerfiles for every image (backend, frontend, operator, egress, runtime bundle,
-                    project default, builder); kind/; terraform/ (phase 6)
+                    project default, builder); kind/; terraform/ (aws, gcp, azure, bootstrap.sh)
+builder/            Go module: the builder image's credential helper for Artifact Registry and ACR
 Tiltfile
 docs/
 ```
@@ -1077,8 +1150,9 @@ The bridges (Jira, GitHub) stay separate. They depend only on the public message
 the integration API, which this change keeps. Split later only if the chart or the operator
 gets users and a release cadence of its own.
 
-Two Go modules rather than one, because the proxy shares no types with the operator and should
-keep a small dependency set. A `go.work` file ties them together for development.
+Three Go modules rather than one, because the proxy and the builder's credential helper share
+no types with the operator and should keep a small dependency set (both use the standard
+library only). A `go.work` file ties them together for development.
 
 ## 19. What stays, what goes
 
@@ -1101,7 +1175,7 @@ keep a small dependency set. A `go.work` file ties them together for development
 | `diagnose.py` | stays, gains Kubernetes reasons |
 | runner, prompts, `exradius` MCP tools, runtimes | stay; the runner waits in-process and gains `prepare`, `clone`, `--verify`, the files sidecar mode and the delivery check |
 | `api/internal.py` | stays, on port 8001, with the new routes of §9 |
-| `storage.py` | gains `gcs` and `azure` |
+| `storage.py` | gains `gcs` and `azure` (phase 6) |
 | panel | unchanged, except system status and the task page (§15) |
 | Postgres models | `runs.container_id`, `directory` and `worker_id` give way to the Run's name; new `egress_records`, `project_verifications.token_hash`, `runs.waiting_for = 'capacity'` |
 | `deploy/docker-compose.yml`, `EXRADIUS_DATA_DIR`, the Docker socket | go in phase 1 |
@@ -1549,5 +1623,108 @@ Desktop VM), one run at a time, caches warm.
   |---|---|---|---|---|
   | `runs.userNamespaces` | `true` | `true` | `true` | `true`, once each node image passes |
   | `runs.runtimeClassName` | empty | empty | empty | empty; `gvisor` is an opt-in for installs that take tickets from untrusted sources (and excludes user namespaces) |
-  | `builds.seccompProfile`, `builds.appArmorProfile` | empty (`privileged` builds): the files must be on the nodes first | seccomp profile (`dev-up` installs it) | both (installed by hand) | both, installed by the node bootstrap |
+  | `builds.seccompProfile`, `builds.appArmorProfile` | empty (`privileged` builds): the files must be on the nodes first | seccomp profile (`dev-up` installs it) | both (installed by hand) | both, installed by `nodeSetup` (§28; seccomp only on EKS's Amazon Linux, which has no AppArmor) |
   | `egress.replicas` | 1 | 1 | 1 | 2 |
+
+## 28. Settled in phase 6
+
+Details decided while preparing the clouds (2026-11-10), up to the point where only a cloud
+account is missing: the live part (`terraform apply` to a real task and `terraform destroy`)
+is the user's, later. §3, §7.2, §12, §14, §16–§18 are written to match; this is the list.
+
+- **Storage backends** (§14). `gcs` and `azure` are httpx clients of the clouds' REST APIs
+  (`storage.py`) with tokens from the pod's identity (`pod_identity.py`), not the clouds'
+  SDKs: three calls do not justify dozens of packages in the backend image, and `kube.py`
+  set the pattern. `EXRADIUS_S3_BUCKET` became `EXRADIUS_BUCKET` (the chart writes it). S3
+  uses path-style addresses only with an endpoint (SeaweedFS); AWS gets virtual-hosted ones.
+  Checked against Azurite 3.37.0 (Shared Key) and fake-gcs-server 1.56.1 in Docker
+  (`tests/test_cloud_storage.py`, skipped unless their endpoints are set), and against
+  recorded fakes for the bearer paths, the token exchanges and the retries.
+- **The builds registry** (§12) is read by the worker with its identity too, for the
+  `HEALTHCHECK` of built service images (§7.4); before, a cloud registry would have made
+  such a service count as started. ECR answers with a Basic challenge, which the session
+  now answers with the credentials; Artifact Registry and ACR with a Bearer one, whose token
+  endpoint gets them. Credentials go to the builds registry's host only.
+- **The builder image and its credential helpers** (§12): `deploy/builder.Dockerfile`;
+  Amazon's ECR helper, built from its Go module; Exradius's own for Artifact Registry and
+  ACR (`builder/`), because Google's helper adds nothing to one metadata request and no
+  maintained ACR helper speaks Workload Identity. Tilt builds it; the operator reads it from
+  `EXRADIUS_BUILDER_IMAGE`, which Tilt can rewrite (`match_in_env_vars`), where a flag it
+  could not.
+- **One registry for builds, apart from the Exradius images**, on every cloud, so the build
+  identity (which a Dockerfile's `RUN` step can read) can push only there. ECR creates the
+  `exradius/<project>/<name>` repositories on their first push (a repository creation
+  template, `CREATE_ON_PUSH`); they are not in Terraform's state, so `terraform output
+  cleanup_command` deletes them before `terraform destroy`.
+- **`runs.bundleMount: copy`** (§7.2) is built: the bundle image gained a static busybox and
+  its copy script under `/.exradius/`. busybox's `cp -a` fails as a non-root user (it cannot
+  keep root's ownership); `tar -o` keeps modes and times without owners. The copy is 477 MB
+  for Claude Code 2.1.318.
+- **Node setup is a DaemonSet in the chart** (`nodeSetup`, §12), not cloud user data: GKE and
+  AKS have no node bootstrap hook (their documented way is a privileged DaemonSet), EKS's
+  would have been a third mechanism, and the k3s server checks the same DaemonSet. The
+  profiles moved from `deploy/seccomp/` and `deploy/apparmor/` to
+  `charts/exradius/files/profiles/`, because Helm reads only files inside the chart. It
+  uses the node's own `apparmor_parser` through `nsenter`, so its image is a pinned static
+  busybox and needs no AppArmor tools of its own. It only reports
+  `kernel.apparmor_restrict_unprivileged_unconfined=1` (§16): that sysctl is the node
+  owner's decision.
+- **Traefik for the ingress, everywhere** (§16), behind each cloud's layer-4 load balancer on
+  a static address Terraform reserves (two Elastic IPs on AWS, one per public subnet; a
+  regional address on GCP; a Standard public IP on Azure), with `loadBalancerSourceRanges`
+  from `allowed_cidrs`. Checked on 2026-11-10: ingress-nginx was retired in March 2026; AKS's
+  app routing add-on is still NGINX and gets security patches through November 2026, its
+  successor runs on Istio; ALB and GKE's Ingress need per-cloud annotations (idle timeouts,
+  `BackendConfig`) for the task stream. The task stream sends a heartbeat, so layer-4
+  timeouts do not cut it. TLS needs a host name (`ingress.host`, `ingress.tls`); without
+  one the panel is plain HTTP, open to `allowed_cidrs` only.
+- **Arm nodes by default** on all three clouds (Graviton `m7g`/`t4g`, Tau `t2a`, Ampere
+  `Dpsv5`): the images are built on the user's Apple silicon Mac, natively (`make -C deploy
+  push PLATFORM=linux/arm64`), and every image Exradius runs is multi-arch. GKE taints Arm
+  nodes (`kubernetes.io/arch=arm64:NoSchedule`), which is why values `stack` exists and the
+  GKE values and `bootstrap.sh` tolerate it. GCP uses T2A rather than C4A because C4A takes
+  only Hyperdisk, which GKE's default storage class is not.
+- **AWS**: nodes in public subnets with public addresses and no inbound rule from outside,
+  so no NAT gateway is paid for; RDS and the broker in private subnets. Amazon MQ's
+  `mq.t3.micro` is gone; RabbitMQ 4 runs on `mq.m7g` only (`mq.m7g.medium`, about $0.16 an
+  hour, a quarter of the install's cost). The broker is RabbitMQ 4.2 (kind runs 4.3.4, with
+  durable queues only, which RabbitMQ 4 keeps). A public broker (`mq_public`) has no
+  security group, so it is off by default. The VPC CNI enforces NetworkPolicy
+  (`enableNetworkPolicy`). New EKS clusters have no default storage class: `bootstrap.sh`
+  adds gp3.
+- **GCP**: a zonal cluster, whose management fee GKE's free tier covers for one cluster per
+  billing account; Dataplane V2; IAM grants name the Kubernetes ServiceAccounts directly
+  (Workload Identity Federation's principals), so there is no Google service account per
+  component and no annotation. Cloud SQL Enterprise edition (PostgreSQL 16 and later
+  default to Enterprise Plus, which has no shared-core tier). RabbitMQ in the cluster.
+  `gvisor` turns on GKE Sandbox on the run pool and, since gVisor cannot run a
+  user-namespaced pod (§27), turns user namespaces off in the generated values.
+- **Azure**: AKS Free tier; Azure CNI overlay powered by Cilium for NetworkPolicy; Ubuntu
+  24.04 nodes (AppArmor 4 for the build profile; user namespaces need Ubuntu 24.04 or Azure
+  Linux 3). AKS Pod Sandboxing (Kata, RuntimeClass `kata-vm-isolation`) runs on Azure Linux
+  x86 nodes only, so it is not offered. The storage account allows no Shared Key; Terraform
+  makes the container through Azure Resource Manager. RabbitMQ in the cluster.
+- **ReadWriteMany project volumes and user namespaces exclude each other**: EFS, Filestore
+  and Azure Files are NFS or SMB, which have no idmapped mounts, so a user-namespaced pod
+  cannot mount them. Terraform's `rwx` therefore turns user namespaces off in the generated
+  values. The default is one run node with ReadWriteOnce project volumes; with more run
+  nodes and no `rwx`, the runs of one project wait for the node that holds its volume.
+- **Found by the offline checks.** `terraform test` plans and applies each module against
+  mocked providers (`deploy/terraform/<cloud>/tests/`). It found two errors `terraform
+  validate` passes: AWS refuses an apostrophe in a security group rule's description, and
+  GKE's sandbox type is `GVISOR`, not `gvisor`. Mocks cannot fill AKS's computed
+  `kubelet_identity`, so the Azure test leaves out the two `AcrPull` grants to the kubelet.
+  tflint (0.66.0, with the AWS, Google and AzureRM rulesets) passes; on Azure it does not ask
+  for `prevent_destroy`, as these installs are meant to be destroyed.
+- **Per-cloud facts checked from the providers' documentation on 2026-11-10**, to be
+  confirmed live:
+
+  | | EKS | GKE | AKS |
+  |---|---|---|---|
+  | Kubernetes | 1.34–1.37 (Terraform: 1.37) | Regular channel 1.34–1.37, default 1.36 (Terraform: at least 1.36) | 1.34–1.37, default 1.36 (Terraform: 1.36) |
+  | containerd on the node image | 2.3.7 (Amazon Linux 2023, 1.37) | 2.2.7 (COS, 1.36); 2.4.1 (1.37) | 2.3.3 (Ubuntu 24.04) |
+  | image volumes (containerd 2.1+, Kubernetes 1.36) | expected (GA features are on) | expected, no GKE page | expected, no AKS page |
+  | user namespaces | GA in 1.36 | expected, no GKE page | documented (Ubuntu 24.04, Azure Linux 3) |
+  | RuntimeClass offerings | none | GKE Sandbox: `gvisor`, Arm included | Pod Sandboxing: `kata-vm-isolation`, Azure Linux x86 only |
+  | NetworkPolicy | VPC CNI's agent | Dataplane V2 | Cilium |
+  | AppArmor on the nodes | no (Amazon Linux) | yes (COS) | yes (Ubuntu) |
