@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Exradius">
+  <title>Exradius</title>
+  <!-- A closed boundary with one controlled way out: the run pod and its egress proxy. -->
+  <path d="M 205.32 95.18 A 84 84 0 1 1 160.82 50.68" fill="none" stroke="#111827" stroke-width="22" stroke-linecap="round"/>
+  <line x1="128" y1="128" x2="207.2" y2="48.8" stroke="#6D5EF6" stroke-width="16" stroke-linecap="round"/>
+  <circle cx="128" cy="128" r="22" fill="#6D5EF6"/>
+  <circle cx="207.2" cy="48.8" r="15" fill="#6D5EF6"/>
+</svg>

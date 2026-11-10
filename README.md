@@ -1,119 +1,168 @@
-# Exradius
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+    <img src="docs/assets/logo-light.svg" alt="Exradius logo" width="112">
+  </picture>
+</p>
 
-**A self-hosted harness that runs AI coding agents on a company's own codebases.**
-A ticket arrives on a queue. Exradius brings up a fully provisioned, isolated workstation
-for the project (its repositories, toolchain and services such as Postgres or RabbitMQ),
-runs a Claude Code agent in it, and publishes what happened: status changes, questions for a
-human, and a result with a branch or pull request.
+<h1 align="center">Exradius</h1>
 
-Exradius only executes. It has no ticket model and no chat integration: whatever tracker a
-company uses publishes tasks on RabbitMQ and consumes the events. It runs on Kubernetes,
-locally on kind or in a cloud cluster, and is administered from a web panel.
+<p align="center">
+  <strong>Run AI coding agents on your own codebases, in isolated workstations on your own Kubernetes.</strong>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#configuring-a-project">Configuring a project</a> ·
+  <a href="#sending-tasks">Sending tasks</a> ·
+  <a href="#deploying">Deploying</a> ·
+  <a href="#documentation">Documentation</a>
+</p>
+
+<p align="center">
+  <img alt="Status: alpha" src="https://img.shields.io/badge/status-alpha-orange">
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue"></a>
+  <img alt="Runs on Kubernetes" src="https://img.shields.io/badge/runs%20on-Kubernetes-326CE5?logo=kubernetes&logoColor=white">
+  <img alt="Python 3.14" src="https://img.shields.io/badge/python-3.14-3776AB?logo=python&logoColor=white">
+  <img alt="Go" src="https://img.shields.io/badge/go-operator%20%26%20proxy-00ADD8?logo=go&logoColor=white">
+</p>
+
+---
+
+Exradius is a self-hosted harness for AI coding agents. Hand it a task from Jira, GitHub,
+your own tooling or the command line. It brings up a fully provisioned workstation for the
+project in one hardened Kubernetes pod, with the repositories, the toolchain, and services
+such as Postgres or Redis. It runs a Claude Code agent in that pod and reports back:
+status changes, questions for a human, and a result with a branch or a pull request.
+
+Exradius only executes. Tracking work, discussing it and reviewing the result stay in the
+tools your team already uses; small bridges connect those tools to Exradius over a message
+queue.
 
 [![A ticket in a tracker is assigned to the Exradius agent](docs/media/assign-ticket.gif)](docs/media/assign-ticket.mp4)
 
-*Assigning a ticket to the agent: the tracker's integration turns it into an Exradius task
-([video, 6 s](docs/media/assign-ticket.mp4)).*
+*Assigning a ticket to the agent starts a task.*
 
-## Seen working
+## Features
 
-Agents run by Exradius opened these pull requests on forks of four open-source codebases,
-each project set up from its own config repository:
+- **Projects as code.** A project is a git repository with an `exradius.yaml`. It lists:
+  - the repositories;
+  - the workstation image and its setup commands;
+  - the services;
+  - the environment;
+  - the MCP connections;
+  - the agents.
 
-| Project | Stack | Pull request |
-|---|---|---|
-| [Plane](https://github.com/makeplane/plane) | TypeScript/React monorepo and a Django API; Postgres, Valkey, RabbitMQ, MinIO | [Register estimate routes in the public API](https://github.com/musabeytekin/plane/pull/1) |
-| [Saleor](https://github.com/saleor/saleor) | Django GraphQL API and the React dashboard, two repositories; Postgres, Valkey | [Trim whitespace around email on registration and login](https://github.com/musabeytekin/saleor/pull/1) |
-| [Outline](https://github.com/outline/outline) | TypeScript, Node and React, Yarn 4 | [Reject a past expiry when creating API keys](https://github.com/musabeytekin/outline/pull/1) |
-| [Bank of Anthos](https://github.com/GoogleCloudPlatform/bank-of-anthos) | Java and Python microservices; Postgres | [Label transactions as deposit or payment](https://github.com/musabeytekin/bank-of-anthos/pull/1) |
+  It is reviewed in pull requests like any other code, validated strictly, and every run
+  records the commit it used.
+- **Real workstations.** Every run gets its own pod:
+  - the project's services run as sidecars on the pod's `localhost`;
+  - the setup commands run before the agent starts;
+  - caches persist per project.
 
-These tickets were written for the trials. A graded evaluation on real upstream bugs is the
-next step (see [Status](#status)).
+  Any glibc image with bash and git can be the workstation. Dockerfiles are built in the
+  cluster with rootless BuildKit.
+- **No credentials inside the sandbox.** Every request a run makes leaves through an egress
+  proxy, which adds the model key, repository tokens and connection headers on the way out.
+  In the agent phase, only an allowlist is reachable. Everything else is refused, and the
+  task page shows each host the run reached and each host it was refused.
+- **Hardened by default.** Run pods have:
+  - a non-root user;
+  - a read-only root filesystem;
+  - no capabilities;
+  - user namespaces;
+  - NetworkPolicy;
+  - no Kubernetes credentials.
 
-## How a task runs
+  gVisor is available as an opt-in.
+- **Questions mid-run.** When a ticket is not enough, the agent asks. The pod waits, and the
+  same session resumes when the answer arrives.
+- **Automatic agent routing.** Leave the agent out of a task and Exradius picks one of the
+  project's agents from their roles and tools.
+- **The agent authors; the harness never acts for it.** Exradius never commits, pushes or
+  opens pull requests on its own. Agents push under their own git identity, and every
+  commit carries `Exradius-Task` and `Exradius-Agent` trailers. Approving and merging stay
+  with people.
+- **One chart, any cluster.** The same Helm chart installs on kind on a laptop, on a
+  self-hosted cluster, or on EKS, GKE and AKS, for which Terraform modules are included.
+  Only the values file changes.
+
+## How it works
 
 ```mermaid
 flowchart LR
-    tracker["Tracker or<br/>integration layer"] -- task --> tasks[("exradius.tasks")]
+    tracker["Tracker bridge<br/>(Jira, GitHub, ...)"] -- task --> tasks[("exradius.tasks")]
     tasks --> worker["Worker"]
     worker -- reads at branch head --> config["Config repository<br/>exradius.yaml"]
     worker -- creates a Run --> operator["Operator"]
-    operator -- creates the pod --> run["Run pod<br/>clones, setup, workstation + Claude Code"]
-    run -- pushes branch, opens PR --> git["Git host"]
+    operator -- creates the pod --> run["Run pod<br/>clones, services, setup,<br/>Claude Code"]
+    run -- every request --> egress["Egress proxy<br/>allowlist, credentials"]
+    egress --> git["Git host, model API,<br/>package registries"]
     worker -- status, questions, result --> events[("exradius.events")]
     events --> tracker
     tracker -- answers --> answers[("exradius.answers")]
     answers --> worker
 ```
 
-1. **Intake.** The worker reads the project's `exradius.yaml` afresh, rejects the task with
-   a reason if the config has errors or the secret store lacks a key it references, and
-   stores the task before acknowledging the message.
-2. **Preparing.** It creates a `Run` object, and the operator turns it into one pod on a
-   fresh workspace volume: images the config builds are built first, the repositories are
-   cloned from the project's mirrors, the services (Postgres, Redis, ...) start next to the
-   agent on the pod's `localhost`, then the setup commands run (`pnpm install`,
-   `uv sync`, ...) in the workstation image with the project's caches.
-3. **Running.** The agent works in `/work`, where every folder is a git clone. Its system
-   prompt holds Exradius's operating rules and a generated description of the environment:
-   image, repositories with branch and push rights, services with their settings, the
-   project's notes.
-4. **Questions.** When the ticket is not enough, the agent calls `request_information`.
-   The session stops, the question goes out as an event, and the pod waits; an answer on
-   `exradius.answers` resumes the same session in the same pod.
-5. **Ending.** The agent pushes a branch named after the task (or attaches a patch when it
-   may not push) and submits its result. The runner warns about any work left unpushed; the
-   worker uploads the transcript, publishes `task.result` and deletes the Run, which
-   removes the pod and its workspace.
+1. **Intake.** The worker reads the project's config afresh and checks that every secret it
+   references exists. If anything is missing, it rejects the task with the reason.
+2. **Preparing.** The worker creates a `Run` object, and the operator turns it into a pod:
+   - images the config builds are built first;
+   - the repositories are cloned from the project's mirrors;
+   - the services start;
+   - the setup commands run (`pnpm install`, `uv sync`, ...).
+3. **Running.** The agent works in `/work`, where every folder is a git clone. Its prompt
+   describes the environment: the image, the repositories with their branch and push
+   rights, the services, the project's notes.
+4. **Ending.** The agent pushes a branch named after the task, or attaches a patch when it
+   may not push, and submits its result. Exradius publishes the result with the
+   transcript, then deletes the pod and its workspace.
 
-Several runs of one project can go at once, each in its own pod and workspace.
+Several runs of one project can go at once, each in its own pod.
 
-## Design decisions
+## Quick start
 
-- **The agent authors; the harness never acts for it.** The worker never commits, pushes,
-  merges or opens pull requests. The agent pushes through a per-repository route that adds
-  the credential, under its own git identity, and every commit carries `Exradius-Task` and `Exradius-Agent` trailers.
-  Approving and deploying stay with people.
-- **A project is a git repository.** `exradius.yaml` declares repositories, workstation,
-  services, environment, MCP connections and agents. It is reviewed in pull requests like
-  code. The panel only manages what cannot live in git: secret stores, model providers and
-  one credential per git host. The schema is strict, so unknown keys are errors, not
-  warnings, and each run records the config commit it used.
-- **Enforce, don't configure.** Whatever Exradius needs inside a run is enforced at kernel,
-  Kubernetes or git command-line level, never through a setting a project can override. For
-  example, Plane's husky hooks set a repository-local `core.hooksPath` that silently dropped
-  the task trailers. The hooks path now comes from git's command-line config, which outranks
-  every config file, and a dispatcher runs the project's own hooks after Exradius's
-  ([docs/run-environment.md](docs/run-environment.md)).
-- **Hardened, isolated runs.** One pod per run: an unprivileged user, read-only root
-  filesystem, all capabilities dropped, no Kubernetes credentials, and a declared memory as
-  the pod's request and limit, so the scheduler places it where it fits. A run's services
-  are sidecars of its own pod, reached by name on its `localhost`, so a project service
-  called `postgres` can never resolve to Exradius's database or another run's.
-- **No credentials in the run, and an allowlist for the agent.** Every request of a run goes
-  through Exradius's egress proxy; NetworkPolicy refuses everything else. Setup reaches any
-  host; the agent reaches its model, its repositories, its connections and the hosts the
-  config's `network.allow` names, and anything else is a `403` that names the host. The model
-  key, the repository tokens and secret connection headers stay in the proxy, which adds them
-  on the way out and refuses a push to a repository the config does not let it push to. The
-  task page lists every host reached and refused
-  ([docs/kubernetes.md](docs/kubernetes.md) §11).
-- **Any image can be the workstation.** The agent runtime (a relocatable Python with the
-  Claude Agent SDK and a pinned Claude Code binary) is a bundle mounted read-only into the
-  container. A project's image needs only bash and git on glibc; `node:22`, `python:3.14`
-  and `maven` images work unchanged.
-- **Postgres is the source of truth.** Every state change locks the run row and writes its
-  event in the same transaction; events are published after commit and retried until
-  marked as published. Finalisation happens exactly once, and a restarted worker
-  reconciles the runs it finds in flight.
-- **Secrets appear only at run start.** Stores are encrypted at rest and write-only
-  through the API. Prompts, the panel, events and logs show `$NAME` placeholders.
-- **No special-case permissions.** An agent may fully use every MCP server it is given;
-  what it does with them is a matter of its role, not of flags.
+Exradius runs locally on [kind](https://kind.sigs.k8s.io) with [Tilt](https://tilt.dev).
+You need:
+- Docker, with at least 4 GB of memory; 8 GB or more for larger projects;
+- kind, kubectl, Helm and Tilt:
 
-## A project, as code
+  ```bash
+  brew install kind kubectl helm tilt-dev/tap/tilt
+  ```
+- a model credential: an Anthropic API key, or a Claude Code OAuth token.
 
-Adapted from the Plane config repository, shortened, with a cache and a memory limit added:
+```bash
+git clone https://github.com/musabeytekin/exradius.git && cd exradius
+make -C deploy/kind dev-up     # local registry, kind cluster, operators, Secrets
+tilt up                        # build the images, install the chart, live-reload the backend
+```
+
+Read the generated admin password:
+
+```bash
+kubectl --context kind-exradius -n exradius get secret exradius-admin -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+Then open the panel at http://localhost:3100 and:
+
+1. add a model provider (**Providers**);
+2. add a credential for the git host of your config repository (**Settings**);
+3. create the secret store your config names (**Stores**);
+4. add the project by its config repository URL (**Projects**).
+
+Once the store has every key the config references, **Verify** builds the workstation,
+starts the services and runs setup. If anything fails, it names the cause. Then send a task
+from the **Tasks** page.
+
+Tilt also forwards the API to http://localhost:8100 (OpenAPI at `/docs`) and RabbitMQ to
+`localhost:5673` (UI at http://localhost:15673). Stop with Ctrl-C. `tilt down` uninstalls
+the chart, and `make -C deploy/kind dev-down` deletes the cluster.
+
+## Configuring a project
+
+A project lives in its own git repository. A shortened example, for
+[Plane](https://github.com/makeplane/plane):
 
 ```yaml
 version: 1
@@ -126,17 +175,17 @@ secret_store: plane               # every ${secret:NAME} resolves from this stor
 
 repositories:
   - name: plane
-    url: https://github.com/musabeytekin/plane.git
+    url: https://github.com/acme/plane.git
     branch: preview
     credential: "${secret:GITHUB_TOKEN}"
     push: true
 
 workstation:
-  dockerfile: docker/workstation.Dockerfile   # node 22, pnpm, uv, Python 3.12
+  dockerfile: docker/workstation.Dockerfile
   setup:
     - cd plane && pnpm install --frozen-lockfile
     - cd plane/apps/api && uv sync --locked
-  cache: [~/.local/share/pnpm/store]          # kept across runs
+  cache: [~/.local/share/pnpm/store]
 
 resources:
   memory: 6g
@@ -150,16 +199,13 @@ services:
   redis:
     image: valkey/valkey:7.2.11-alpine
     ports: [6379]
-    ready: {tcp: 6379}
 
 env:
   DATABASE_URL: postgresql://plane:plane@postgres:5432/plane
   REDIS_URL: redis://redis:6379/
-  pnpm_config_store_dir: /home/runner/.local/share/pnpm/store   # keep pnpm's store in the cache
 
-notes: |
-  API tests: from apps/api, `uv run pytest plane/tests/unit`. Web checks: `pnpm check:lint`,
-  `pnpm check:types`, vitest per package. Pull requests target `preview`.
+network:
+  allow: [registry.npmjs.org, pypi.org, files.pythonhosted.org]
 
 connections:
   github:
@@ -169,141 +215,32 @@ connections:
 agents:
   developer:
     connections: [github]
-    role: |
-      You implement what the ticket asks, run the checks for what you touched, push a
-      branch and open a pull request against preview.
+    role: You implement what the ticket asks, run the checks, and open a pull request.
   scout:
     role: You investigate questions about the codebase and report evidence. You never change code.
 ```
 
 The full format is in [docs/config-repo.md](docs/config-repo.md).
 
-### Writing the config: the setup skill
+### The setup skill
 
-Working out a project's toolchain and services is where onboarding takes the most time,
-so it is automated by a Claude Code plugin, the setup skill in [`skill/`](skill/). Run in
-the project's
-checkout, it reads the code, writes `exradius.yaml`, a workstation Dockerfile when a stock
-image is not enough, and a README for the admin. It checks all of it locally with Docker,
-using the same container flags as Exradius, then creates the config repository. Plane was
-set up this way and passed Exradius's Verify on the first try.
+The setup skill can write this file for you. It is a Claude Code plugin in
+[`skill/`](skill/). Run it in your project's checkout:
+- it reads the code and writes `exradius.yaml`, a workstation Dockerfile when a stock
+  image is not enough, and a README for the Exradius admin;
+- it checks all of it locally with Docker, the same way Verify does.
 
 ```bash
 claude plugin marketplace add musabeytekin/exradius
 claude plugin install exradius@exradius
 ```
 
-Then `/exradius:exradius-project` inside Claude Code. In the panel, Verify runs by itself
-when a project is added and on every new config commit. It builds the image, starts the
-services and runs setup; when that fails, it names the cause.
+Then run `/exradius:exradius-project` inside Claude Code.
 
-## Running it
+## Sending tasks
 
-Exradius runs on Kubernetes (since 0.2.0; [docs/kubernetes.md](docs/kubernetes.md)). The
-same Helm chart installs it on a local kind cluster and, with another values file, on a
-cloud cluster. It runs everything v0.1.0 ran: workstation and service images or
-Dockerfiles, services, declared memory and per-project caches
-([docs/kubernetes-plan.md](docs/kubernetes-plan.md) has the phases still to come). v0.1.0
-is the last Docker Compose version.
-
-### Locally, on kind
-
-You need Docker, [kind](https://kind.sigs.k8s.io), kubectl, Helm and
-[Tilt](https://tilt.dev) (`brew install kind kubectl helm tilt-dev/tap/tilt`), about 4 GB
-of free memory for Docker, and a model provider's credential (an Anthropic API key or a
-Claude Code OAuth token).
-
-```bash
-make -C deploy/kind dev-up     # local registry, kind cluster "exradius", operators, Secrets
-tilt up                        # build every image, install the chart, live-update the backend
-```
-
-`dev-up` installs CloudNativePG, the RabbitMQ Cluster Operator (and cert-manager, which it
-needs), creates the namespace `exradius` and generates the Secrets `exradius-secret-key`,
-`exradius-admin` and `exradius-objectstore`. It prints how to read the admin password:
-
-```bash
-kubectl --context kind-exradius -n exradius get secret exradius-admin -o jsonpath='{.data.password}' | base64 -d; echo
-```
-
-Tilt forwards, on ports that leave room for a v0.1.0 install beside it:
-
-- Panel: http://localhost:3100
-- API: http://localhost:8100 (OpenAPI at `/docs`)
-- RabbitMQ: `localhost:5673`, its UI at http://localhost:15673
-- Tilt's own UI: http://localhost:10350
-
-`tilt down` uninstalls the chart; `make -C deploy/kind dev-down` deletes the cluster and the
-registry. Without Tilt, `make -C deploy/kind images install` builds and pushes the images
-with their version tag and installs the chart with `charts/exradius/values-local.yaml`.
-
-To watch runs: `kubectl --context kind-exradius -n exradius-runs get runs,pods -w`.
-
-### On a cluster
-
-Prerequisites, which the chart does not install: a storage class for the run workspaces,
-nodes with containerd 2.1 or later (image volumes), a network plugin that enforces
-NetworkPolicy, on Ubuntu 26.04 nodes `kernel.apparmor_restrict_unprivileged_unconfined=0`
-(docs/kubernetes.md §16), and either CloudNativePG and the RabbitMQ operator or an external Postgres
-and RabbitMQ. Run pods use user namespaces by default (`runs.userNamespaces`), which needs
-containerd 2, runc 1.2 or later and a Linux 6.3+ kernel on the nodes. Optional hardening, each
-with a node requirement: `runs.runtimeClassName: gvisor` (runsc and a RuntimeClass on the
-nodes; turn user namespaces off with it), and build pods at Pod Security `baseline`
-(`builds.seccompProfile` with `charts/exradius/files/profiles/buildkit.json` on every node, plus
-`builds.appArmorProfile` with `charts/exradius/files/profiles/exradius-buildkit` on AppArmor nodes;
-`nodeSetup.enabled` installs both). The panel from outside the cluster is values `ingress`
-with an ingress controller, and `publicApiUrl` its address. A registry build pods push to on a private address needs an
-`egress.allowPrivate` entry; a corporate proxy goes in `egress.upstreamProxy`. Create the Secrets the values name
-(`secretKey.existingSecret`, `admin.existingSecret`, the database, broker and object store
-credentials), then:
-
-```bash
-kubectl create namespace exradius
-kubectl label namespace exradius pod-security.kubernetes.io/enforce=restricted
-helm install exradius charts/exradius -n exradius -f my-values.yaml
-```
-
-`charts/exradius/values.yaml` documents every key.
-
-### In a cloud
-
-`deploy/terraform/aws`, `gcp` and `azure` make everything an install needs on EKS, GKE or AKS
-(docs/kubernetes.md §16, §28): the cluster with a system and a run node pool (Arm), the
-registries, the bucket, managed PostgreSQL (and Amazon MQ on AWS; RabbitMQ runs in the
-cluster on the others), the cloud identities of the api, the worker and build pods (no cloud
-key is ever in a Secret), a static address for the panel, and `values-generated.yaml`. With
-the cloud's CLI signed in:
-
-```bash
-cd deploy/terraform/aws
-terraform init
-terraform apply -var 'allowed_cidrs=["<your address>/32"]'
-cd ../../..
-deploy/terraform/bootstrap.sh aws        # kubeconfig, load balancer, Traefik, Secrets
-$(terraform -chdir=deploy/terraform/aws output -raw push_command)
-helm upgrade --install exradius charts/exradius --namespace exradius \
-  -f charts/exradius/values-eks.yaml -f deploy/terraform/aws/values-generated.yaml
-```
-
-GCP takes `-var project=<id>` and Azure `-var subscription_id=<id>`, with `values-gke.yaml` and
-`values-aks.yaml`. The panel is at `terraform output public_api_url`, open to `allowed_cidrs`
-only. Before `terraform destroy`, uninstall the chart (its load balancer and disks are the
-cluster's) and, on AWS, run `terraform output cleanup_command` (the build repositories ECR
-made on push).
-
-### In the panel
-
-1. Add a model provider (Providers).
-2. Add a credential for the host of your config repository (Settings).
-3. Create the secret store your config names (Stores).
-4. Add the project by its config repository URL (Projects). The Secrets tab lists the keys
-   the config references and which are still missing; Verify runs once they are filled.
-
-Tasks can then be sent from the panel's Tasks page or from the command line.
-
-## Sending a task
-
-A task names a project and an agent by slug:
+A task is a JSON message on the `exradius.tasks` queue. It names a project and, optionally,
+an agent:
 
 ```json
 {
@@ -312,113 +249,152 @@ A task names a project and an agent by slug:
   "project": "plane",
   "agent": "developer",
   "instructions": "Estimates created through the public API return 404. Fix it.",
-  "context": {"reporter": "support"},
   "correlation": {"ticket": "PLANE-214"}
 }
 ```
 
-Events go to the `exradius.events` topic exchange: `task.status` on every state change
-(`queued`, `preparing`, `running`, `waiting_for_input`, `resuming`, then `completed`,
-`failed` or `cancelled`), `task.info_request` when the agent asks something, and
-`task.result` with the summary, the structured output, signed links to artifacts and the
-transcript. `correlation` comes back unchanged on every event. The task ID must be new:
-reusing one, even of a failed task, gets the task rejected.
+Events come back on the `exradius.events` topic exchange, each carrying `correlation`
+unchanged:
 
-The backend ships a CLI for trying this from a shell:
+| Event | When |
+|---|---|
+| `task.status` | on every state change: `queued`, `preparing`, `running`, `waiting_for_input`, `resuming`, then `completed`, `failed` or `cancelled` |
+| `task.info_request` | when the agent asks a question |
+| `task.result` | at the end, with the summary, the structured output and signed links to the artifacts and the transcript |
+
+Answers go to `exradius.answers`. The contracts are in
+[docs/architecture.md](docs/architecture.md) §4.
+
+From a shell, with the backend's CLI:
 
 ```bash
 cd backend
-export EXRADIUS_BROKER_URL=amqp://<user>:<password>@localhost:5673/   # the exradius-rabbitmq-default-user Secret
-uv run exradius events --task-id PLANE-214 --until-result      # in one terminal
-uv run exradius publish-task --task-id PLANE-214 --project plane --agent developer \
+export EXRADIUS_BROKER_URL=amqp://<user>:<password>@localhost:5673/
+uv run exradius publish-task --task-id PLANE-214 --project plane \
   --instructions "Estimates created through the public API return 404. Fix it."
-uv run exradius answer --task-id PLANE-214 --request-id <id> --answer "Yes, v1 only."
+uv run exradius events --task-id PLANE-214 --until-result
 ```
 
-The message contracts are in [docs/architecture.md](docs/architecture.md) §4.
+### Bridges
+
+Bridges connect trackers to Exradius:
+
+| Bridge | What it does |
+|---|---|
+| [`bridges/jira`](bridges/jira) | Assigning an issue to the bot account starts a task. Questions and results arrive as comments; mention the bot to answer. |
+| [`bridges/github`](bridges/github) | A GitHub App that starts tasks from issue labels and answers in comments. |
+| [`bridges/kit`](bridges/kit) | The library both are meant to build on, for writing a bridge for another tracker. |
+
+Bridges use only the public contracts in
+[docs/integration-api.md](docs/integration-api.md). They run as separate containers.
+
+## Deploying
+
+### On a Kubernetes cluster
+
+The chart expects:
+- nodes with containerd 2.1 or later, for image volumes; otherwise set
+  `runs.bundleMount: copy`;
+- for user namespaces, which are on by default: containerd 2, runc 1.2 or later and Linux
+  6.3 or later;
+- a network plugin that enforces NetworkPolicy, and a default storage class;
+- PostgreSQL and RabbitMQ, from CloudNativePG and the RabbitMQ operator or as external
+  services;
+- on Ubuntu 26.04 nodes, `kernel.apparmor_restrict_unprivileged_unconfined=0`.
+
+```bash
+kubectl create namespace exradius
+kubectl label namespace exradius pod-security.kubernetes.io/enforce=restricted
+helm install exradius charts/exradius -n exradius -f my-values.yaml
+```
+
+[`charts/exradius/values.yaml`](charts/exradius/values.yaml) documents every key: the
+ingress, a corporate upstream proxy and CA bundle, gVisor, and the build profiles.
+
+### In a cloud
+
+[`deploy/terraform`](deploy/terraform) has modules for AWS, GCP and Azure. Each creates:
+- a cluster with system and run node pools;
+- registries, a bucket and managed PostgreSQL;
+- cloud identities, so that no cloud key is stored in a Secret;
+- a static address for the panel;
+- a generated values file.
+
+```bash
+cd deploy/terraform/gcp
+terraform init && terraform apply -var project=<id> -var 'allowed_cidrs=["<your address>/32"]'
+cd ../../.. && deploy/terraform/bootstrap.sh gcp     # kubeconfig, ingress controller, Secrets
+$(terraform -chdir=deploy/terraform/gcp output -raw push_command)   # push the images
+helm upgrade --install exradius charts/exradius -n exradius \
+  -f charts/exradius/values-gke.yaml -f deploy/terraform/gcp/values-generated.yaml
+```
+
+A small installation costs roughly $9–16 a day, depending on the cloud. Run
+`terraform destroy` when you are done.
+
+## Documentation
+
+The design notes in [`docs/`](docs) describe how Exradius works and why:
+
+| Document | Covers |
+|---|---|
+| [architecture.md](docs/architecture.md) | the system, message contracts, run lifecycle and state machine |
+| [kubernetes.md](docs/kubernetes.md) | the Run resource, pods, the operator, the egress proxy, isolation, the chart |
+| [config-repo.md](docs/config-repo.md) | projects as config repositories and the `exradius.yaml` format |
+| [environment-and-services.md](docs/environment-and-services.md) | services and the environment section of the agent's prompt |
+| [run-environment.md](docs/run-environment.md) | what is enforced inside a run: hooks, credentials, memory, caches |
+| [agent-routing.md](docs/agent-routing.md) | how Exradius picks an agent when a task names none |
+| [integration-api.md](docs/integration-api.md) | the API bridges use: directory, config hooks, bridge status |
+| [agent-identity.md](docs/agent-identity.md) | agents' git identities, trailers and push rights |
+| [runtime-bundles.md](docs/runtime-bundles.md) | the relocatable agent runtime mounted into run pods |
+| [setup-and-verify.md](docs/setup-and-verify.md) | Verify, its diagnoses, and the setup skill |
+| [providers.md](docs/providers.md) | model providers and credential tests |
 
 ## Development
 
 ```bash
-cd backend && uv sync && uv run pytest      # 500+ tests: SQLite, a fake Kubernetes API, local bare git repositories
-make -C operator test                       # the operator: unit tests and envtest (a real API server)
-cd frontend && npm install && npm run dev   # http://localhost:5173; EXRADIUS_API_URL=http://localhost:8100 for the kind install
-cd frontend && npm run lint && npm test && npm run build
-cd bridges/kit && uv run pytest             # the bridge kit; likewise bridges/jira and bridges/github
-cd bridges/jira && docker build --build-context kit=../kit -t exradius-jira .
+cd backend && uv sync && uv run pytest      # Python: api, worker, runner
+make -C operator test                       # Go: the operator, with envtest
+make -C egress test                         # Go: the egress proxy
+cd frontend && npm install && npm run dev   # the panel at http://localhost:5173
+cd bridges/jira && uv run pytest            # likewise bridges/kit and bridges/github
 ```
 
-Under `tilt up`, a change to a Python file is synced into the api and restarts it in place;
-the worker and the runtime bundle are rebuilt, because run pods mount the bundle.
-`make -C deploy/kind e2e PROJECT=<slug>` publishes one task to the kind install and waits
-for its result. `tests/test_integration.py` also exercises a real RabbitMQ
-(`EXRADIUS_TEST_BROKER_URL`).
-
-**Stack.** Backend: Python 3.14, FastAPI, SQLAlchemy and Alembic on Postgres, aio-pika on
-RabbitMQ, httpx for the Kubernetes API, the Claude Agent SDK and MCP. Operator: Go,
-controller-runtime. Install: Helm, kind and Tilt locally. Panel: React 19, TypeScript,
-Vite, Tailwind CSS 4, Radix, TanStack Router and Query.
-
-## Repository layout
+Under `tilt up`, a change to a Python file is synced into the api and restarts it in place.
+`make -C deploy/kind e2e PROJECT=<slug>` sends one task to the local install and waits for
+its result.
 
 ```
-backend/exradius/
-  api/          admin API (port 8000) and the internal API for run pods (port 8001)
-  worker/       intake, Run objects and settling, Verify, provider probes
-  runner/       the process in the run pod: prepare, clone, files sidecar, the agent's
-                session, the built-in exradius MCP server, the delivery check
-  runtimes/     the runtime interface and its Claude Code implementation
-  models/       SQLAlchemy models and Alembic migrations
-  schemas/      broker messages, API bodies and the exradius.yaml schema
-  messaging/    RabbitMQ topology and publishing
-backend/tests/
-operator/       Go operator: the Run and Build CRDs, the pod builders, status mapping, the controllers
-charts/exradius/  the Helm chart
-frontend/src/   the admin panel
-deploy/         Dockerfiles (backend, operator, Claude Code runtime bundle, default project
-                image) and kind/ (the local cluster)
-Tiltfile        the local developer loop
-bridges/
-  kit/          the bridge kit: the whole task flow for a tracker, as a library
-  jira/         the Jira Cloud bridge, on the kit
-  github/       the GitHub issues bridge (predates the kit and agent routing)
-skill/          the setup skill, a Claude Code plugin; .claude-plugin/ makes this repository
-                its marketplace
-docs/           design notes
+backend/      the api, the worker and the runner (Python, FastAPI, SQLAlchemy, aio-pika)
+operator/     the Kubernetes operator for Run and Build objects (Go, controller-runtime)
+egress/       the egress proxy (Go, standard library)
+builder/      credential helpers for in-cluster image builds
+frontend/     the admin panel (React, TypeScript, Vite, Tailwind)
+charts/       the Helm chart
+deploy/       Dockerfiles, the kind setup, Terraform for the clouds
+bridges/      the bridge kit and the Jira and GitHub bridges
+skill/        the setup skill (a Claude Code plugin)
+docs/         design notes
 ```
-
-## Design notes
-
-| Document | Covers |
-|---|---|
-| [architecture.md](docs/architecture.md) | the system, message contracts, run lifecycle, state machine, implementation notes, operating rules |
-| [kubernetes.md](docs/kubernetes.md) | Exradius on Kubernetes: the Run resource, pods, the operator, the chart, the local loop |
-| [kubernetes-plan.md](docs/kubernetes-plan.md) | the phases of the move to Kubernetes |
-| [config-repo.md](docs/config-repo.md) | projects as config repositories and the `exradius.yaml` format |
-| [run-environment.md](docs/run-environment.md) | what is enforced inside a run, and how: hooks, credentials, memory, caches |
-| [runtime-bundles.md](docs/runtime-bundles.md) | the relocatable agent runtime, mounted into run pods |
-| [environment-and-services.md](docs/environment-and-services.md) | services (sidecars of the run's pod) and the environment section of the prompt |
-| [agent-identity.md](docs/agent-identity.md) | agents' git identities, trailers and push credentials |
-| [setup-and-verify.md](docs/setup-and-verify.md) | Verify with diagnosis, and the setup skill |
-| [providers.md](docs/providers.md) | model providers and credential tests |
-| [onboarding.md](docs/onboarding.md) | the admin panel |
 
 ## Status
 
-Exradius is working software that has been exercised on the four codebases above. Its
-scope today: one company per installation, a single admin user, and Claude Code as the
-only runtime.
+Exradius is alpha software. It has been run end to end, on kind and on a self-hosted k3s
+cluster, against [Plane](https://github.com/makeplane/plane),
+[Saleor](https://github.com/saleor/saleor), [Outline](https://github.com/outline/outline)
+and [Bank of Anthos](https://github.com/GoogleCloudPlatform/bank-of-anthos).
 
-Not done yet:
+Known limits:
 
-- **A graded evaluation.** Every trial so far used tickets written for it. Next is a
-  repeatable evaluation on real upstream bugs: the agent gets the original issue text,
-  and the upstream fix's tests, which the agent never sees, are run on its branch.
-- **Egress control.** Outbound network is open during runs; an allowlist for the agent
-  phase is planned.
-- **Corporate networks.** There is no support yet for a corporate proxy, CA bundle or
-  package mirrors at installation level.
-- **Usage and cost.** Neither is recorded per run.
+- **Clouds.** The Terraform modules are tested offline, but none has yet been applied to a
+  real account.
+- **DNS.** Run pods can still resolve names through the cluster's DNS, which can leak data.
+  A DNS policy is designed but not built.
+- **Scope.** Each installation serves one organization with a single admin user. Claude
+  Code is the only agent runtime.
+- **Bridges.** The GitHub bridge predates the bridge kit and agent routing.
+- **Measurement.** Usage and cost are not yet recorded per run, and there is no graded
+  evaluation on real upstream bugs yet.
 
 ## License
 
