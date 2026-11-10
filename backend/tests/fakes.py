@@ -216,7 +216,9 @@ class FakeCluster:
         return {k: base64.b64decode(v).decode() for k, v in data.items()}
 
     def workstation_env(self, name: str) -> dict[str, str]:
-        """The workstation container's environment as the operator builds it (contract §3)."""
+        """The workstation container's environment as the operator builds it (contract §3), as
+        the runner holds it once it has read its token file: ``EXRADIUS_RUN_TOKEN`` stands for
+        the token the runner read from prepare's handoff (docs/kubernetes.md §7.8)."""
         obj = self.runs[name]
         spec = obj["spec"]
         secret = self.secret_data(spec["secretName"])

@@ -76,15 +76,12 @@ spec:
       value: exradius-egress-pods.exradius
     - name: EXRADIUS_API_URL
       value: http://exradius-api-internal.exradius:8001
-    - name: EXRADIUS_RUN_TOKEN
-      valueFrom:
-        secretKeyRef:
-          key: token
-          name: verify-9a1b
     - name: EXRADIUS_PURPOSE
       value: verify
     - name: EXRADIUS_ID
       value: 9a1b
+    - name: EXRADIUS_RUN_TOKEN_FILE
+      value: /exradius/token/token
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: workstation
@@ -129,6 +126,8 @@ spec:
       name: identity
       readOnly: true
       subPath: group
+    - mountPath: /exradius/token
+      name: run-token
     workingDir: /work
   enableServiceLinks: false
   initContainers:
@@ -140,15 +139,14 @@ spec:
     env:
     - name: EXRADIUS_API_URL
       value: http://exradius-api-internal.exradius:8001
-    - name: EXRADIUS_RUN_TOKEN
-      valueFrom:
-        secretKeyRef:
-          key: token
-          name: verify-9a1b
     - name: EXRADIUS_PURPOSE
       value: verify
     - name: EXRADIUS_ID
       value: 9a1b
+    - name: EXRADIUS_RUN_TOKEN_FILE
+      value: /exradius/secret/token
+    - name: EXRADIUS_RUN_TOKEN_HANDOFF
+      value: /exradius/token/token
     - name: EXRADIUS_PROJECT_DIR
       value: /exradius/project
     - name: HTTP_PROXY
@@ -186,6 +184,11 @@ spec:
     - mountPath: /opt/exradius/runtime
       name: runtime
       readOnly: true
+    - mountPath: /exradius/secret
+      name: run-secret
+      readOnly: true
+    - mountPath: /exradius/token
+      name: run-token
     - mountPath: /exradius/project
       name: project
   - command:
@@ -194,11 +197,6 @@ spec:
     env:
     - name: EXRADIUS_API_URL
       value: http://exradius-api-internal.exradius:8001
-    - name: EXRADIUS_RUN_TOKEN
-      valueFrom:
-        secretKeyRef:
-          key: token
-          name: verify-9a1b
     - name: EXRADIUS_PURPOSE
       value: verify
     - name: EXRADIUS_ID
@@ -374,7 +372,18 @@ spec:
       defaultMode: 292
       name: exradius-run-identity
     name: identity
+  - name: run-secret
+    secret:
+      defaultMode: 288
+      items:
+      - key: token
+        path: token
+      secretName: verify-9a1b
   - name: project
     persistentVolumeClaim:
       claimName: exradius-project-saleor
+  - emptyDir:
+      medium: Memory
+      sizeLimit: 1Mi
+    name: run-token
 status: {}

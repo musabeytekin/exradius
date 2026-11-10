@@ -258,11 +258,11 @@ async def test_a_finished_session_reports_its_outcome_with_warnings(tmp_path, mo
     assert (tmp_path / "git" / "exradius.gitconfig").exists()  # written at start
 
 
-def test_run_dispatches_the_modes(monkeypatch):
+def test_run_dispatches_the_modes(monkeypatch, tmp_path):
     seen = []
 
-    async def prepare(purpose, object_id, url, token, root, environ):
-        seen.append(("prepare", purpose, object_id, url, token, str(root)))
+    async def prepare(purpose, object_id, url, token, root, environ, handoff):
+        seen.append(("prepare", purpose, object_id, url, token, str(root), str(handoff)))
         return 0
 
     async def files(run_id, url, token, directory):
@@ -281,18 +281,20 @@ def test_run_dispatches_the_modes(monkeypatch):
     monkeypatch.setattr(runner_main.workspace, "files", files)
     monkeypatch.setattr(runner_main.workspace, "clone", clone)
     monkeypatch.setattr(runner_main, "verify", verify)
+    monkeypatch.setattr(runner_main, "protect_process", lambda: False)  # not the test process
     monkeypatch.setenv("EXRADIUS_API_URL", "http://api")
-    monkeypatch.setenv("EXRADIUS_RUN_TOKEN", "tok")
-    monkeypatch.setenv("EXRADIUS_EGRESS_URL", "http://egress:3129")
+    monkeypatch.setenv("EXRADIUS_RUN_TOKEN_HANDOFF", "/exradius/token/token")
+    token = tmp_path / "token"
     for argv in (["--prepare", "task", "r-1"], ["--files", "r-1"], ["--clone"], ["--verify", "v-1"]):
         monkeypatch.setattr("sys.argv", ["exradius-runner", *argv])
-        monkeypatch.setenv("EXRADIUS_RUN_TOKEN", "tok")  # isolate() removes it each time
+        token.write_text("tok")  # the runner deletes what it can
+        monkeypatch.setenv("EXRADIUS_RUN_TOKEN_FILE", str(token))  # isolate() removes it each time
         monkeypatch.setenv("EXRADIUS_EGRESS_URL", "http://egress:3129")  # and this
         with pytest.raises(SystemExit) as exit_info:
             runner_main.run()
         assert exit_info.value.code == 0
     assert seen == [
-        ("prepare", "task", "r-1", "http://api", "tok", "/exradius/workspace"),
+        ("prepare", "task", "r-1", "http://api", "tok", "/exradius/workspace", "/exradius/token/token"),
         ("files", "r-1", "/exradius/attachments"),
         ("clone", "/work", "/exradius/state", "http://egress:3129"),
         ("verify", "v-1"),

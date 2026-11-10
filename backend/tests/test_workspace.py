@@ -153,6 +153,21 @@ async def test_prepare_writes_the_task_attachments_read_only(tmp_path, monkeypat
     assert (tmp_path / "home" / "kept").exists()
 
 
+async def test_prepare_hands_the_token_over_in_every_pod(tmp_path, monkeypatch):
+    """The workstation's runner reads the token from prepare's handoff (docs/kubernetes.md
+    §7.8); a recreated pod has a new, empty handoff volume, so prepare writes it again even
+    when the workspace is already prepared."""
+    monkeypatch.setattr(workspace, "HttpRunApi", lambda *a: pytest.fail("a verify Run has no attachments"))
+    handoff = tmp_path / "token-volume" / "token"
+    handoff.parent.mkdir()
+    root = tmp_path / "workspace"
+    assert await workspace.prepare("verify", "v-1", "http://api:8001", "tok", root, handoff=handoff) == 0
+    assert handoff.read_text() == "tok" and mode(handoff) == 0o400
+    handoff.unlink()  # the runner read it
+    assert await workspace.prepare("verify", "v-1", "http://api:8001", "tok", root, handoff=handoff) == 0
+    assert handoff.read_text() == "tok"
+
+
 async def test_prepare_of_a_verify_run_fetches_no_attachments(tmp_path, monkeypatch):
     monkeypatch.setattr(workspace, "HttpRunApi", lambda *a: pytest.fail("a verify Run has no attachments"))
     assert await workspace.prepare("verify", "v-1", "http://api:8001", "tok", tmp_path) == 0

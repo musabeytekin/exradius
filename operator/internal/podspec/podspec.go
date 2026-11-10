@@ -43,6 +43,13 @@ const (
 	ProjectDir      = "/exradius/project"
 	MirrorsDir      = "/exradius/mirrors"
 	attachmentsPath = "work/.exradius/attachments"
+	// SecretDir holds the run token from the per-run Secret, read-only, in the containers
+	// where no project code runs (prepare, files) and in a probe's workstation.
+	SecretDir = "/exradius/secret"
+	// TokenDir is where prepare hands the token to the workstation's runner, which reads
+	// and deletes it before anything of the project starts: the agent, running as the same
+	// user, finds nothing there (docs/kubernetes.md §7.8).
+	TokenDir = "/exradius/token"
 )
 
 // Container names.
@@ -368,6 +375,8 @@ const (
 	volHome      = "home"
 	volTmp       = "tmp"
 	volState     = "state"
+	volSecret    = "run-secret"
+	volToken     = "run-token"
 )
 
 func (b Pods) volumes(run *v1.Run) []corev1.Volume {
@@ -378,6 +387,13 @@ func (b Pods) volumes(run *v1.Run) []corev1.Volume {
 		{Name: volIdentity, VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 			LocalObjectReference: corev1.LocalObjectReference{Name: b.Config.IdentityConfigMap},
 			DefaultMode:          ptr.To[int32](0o444),
+		}}},
+		// Only the token: the project's secret variables reach containers by key, as env.
+		// Group-readable, for the run user and the files sidecar's uid in the run group.
+		{Name: volSecret, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName:  run.Spec.SecretName,
+			Items:       []corev1.KeyToPath{{Key: TokenKey, Path: TokenKey}},
+			DefaultMode: ptr.To[int32](0o440),
 		}}},
 	}
 	if run.Spec.Purpose == v1.PurposeProbe {
@@ -394,6 +410,9 @@ func (b Pods) volumes(run *v1.Run) []corev1.Volume {
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: ProjectVolumeName(run.Spec.Project)},
 		}})
 	}
+	vols = append(vols, corev1.Volume{Name: volToken, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+		Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("1Mi")),
+	}}})
 	if run.Spec.Purpose == v1.PurposeTask {
 		vols = append(vols, corev1.Volume{Name: volFilesTmp, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
 	}
@@ -461,13 +480,28 @@ func workspaceMounts(attachments bool) []corev1.VolumeMount {
 	)
 }
 
+// baseEnv is what every runner mode learns about its run. The run token is never an
+// environment variable, so neither a process listing nor `kubectl exec ... env` shows it:
+// tokenEnv says where the runner reads it.
 func (b Pods) baseEnv(run *v1.Run) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "EXRADIUS_API_URL", Value: b.Config.APIURL},
-		secretEnv(run, "EXRADIUS_RUN_TOKEN", TokenKey),
 		{Name: "EXRADIUS_PURPOSE", Value: string(run.Spec.Purpose)},
 		{Name: "EXRADIUS_ID", Value: run.Spec.ID},
 	}
+}
+
+// tokenEnv is the run token's file: in the Secret's volume, or the handoff in TokenDir.
+func tokenEnv(dir string) []corev1.EnvVar {
+	return []corev1.EnvVar{{Name: "EXRADIUS_RUN_TOKEN_FILE", Value: dir + "/" + TokenKey}}
+}
+
+func secretMount() corev1.VolumeMount {
+	return corev1.VolumeMount{Name: volSecret, MountPath: SecretDir, ReadOnly: true}
+}
+
+func tokenMount() corev1.VolumeMount {
+	return corev1.VolumeMount{Name: volToken, MountPath: TokenDir}
 }
 
 func pathEnv(workDir string) []corev1.EnvVar {
@@ -651,8 +685,9 @@ func (b Pods) workstationResources(run *v1.Run) corev1.ResourceRequirements {
 // cache directories, as the run user, so no directory a later container mounts is made by
 // the kubelet as root (a cache under the home would leave ~/.cache root-owned).
 func (b Pods) prepare(run *v1.Run) corev1.Container {
-	env := b.baseEnv(run)
-	mounts := []corev1.VolumeMount{{Name: volWorkspace, MountPath: WorkspaceDir}, runtimeMount()}
+	env := append(b.baseEnv(run), append(tokenEnv(SecretDir),
+		corev1.EnvVar{Name: "EXRADIUS_RUN_TOKEN_HANDOFF", Value: TokenDir + "/" + TokenKey})...)
+	mounts := []corev1.VolumeMount{{Name: volWorkspace, MountPath: WorkspaceDir}, runtimeMount(), secretMount(), tokenMount()}
 	if len(run.Spec.Workstation.Caches) > 0 {
 		caches, _ := json.Marshal(run.Spec.Workstation.Caches)
 		env = append(env, corev1.EnvVar{Name: "EXRADIUS_CACHES", Value: string(caches)})
@@ -769,7 +804,7 @@ func (b Pods) files(run *v1.Run) corev1.Container {
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Command:         []string{Runner, "--files", run.Spec.ID},
 		RestartPolicy:   ptr.To(corev1.ContainerRestartPolicyAlways),
-		Env: mergeEnv(b.baseEnv(run), []corev1.EnvVar{
+		Env: mergeEnv(b.baseEnv(run), tokenEnv(SecretDir), []corev1.EnvVar{
 			{Name: "HOME", Value: "/tmp"},
 			{Name: "EXRADIUS_ATTACHMENTS_DIR", Value: FilesMountDir},
 		}, b.proxyEnv(run)),
@@ -777,6 +812,7 @@ func (b Pods) files(run *v1.Run) corev1.Container {
 			{Name: volWorkspace, MountPath: FilesMountDir, SubPath: attachmentsPath},
 			runtimeMount(),
 			{Name: volFilesTmp, MountPath: "/tmp"},
+			secretMount(),
 		},
 		SecurityContext: sc,
 	}
@@ -813,9 +849,11 @@ func (b Pods) workstation(run *v1.Run) corev1.Container {
 			b.javaEnv(run),
 			b.runnerEgressEnv(),
 			b.baseEnv(run),
+			tokenEnv(TokenDir),
 		),
-		Resources:       b.workstationResources(run),
-		VolumeMounts:    append(append(append(workspaceMounts(true), runtimeMount()), identityMounts()...), b.cacheMounts(run)...),
+		Resources: b.workstationResources(run),
+		VolumeMounts: append(append(append(append(workspaceMounts(true), runtimeMount()), identityMounts()...),
+			b.cacheMounts(run)...), tokenMount()),
 		SecurityContext: b.securityContext(),
 	}
 }
@@ -834,13 +872,16 @@ func (b Pods) probeWorkstation(run *v1.Run) corev1.Container {
 			b.proxyEnv(run),
 			b.runnerEgressEnv(),
 			b.baseEnv(run),
+			tokenEnv(SecretDir),
 		),
 		Resources: b.workstationResources(run),
+		// A probe has no prepare to hand the token over; nothing of a project runs in it.
 		VolumeMounts: append([]corev1.VolumeMount{
 			{Name: volHome, MountPath: HomeDir},
 			{Name: volTmp, MountPath: "/tmp"},
 			{Name: volState, MountPath: StateDir},
 			runtimeMount(),
+			secretMount(),
 		}, identityMounts()...),
 		SecurityContext: b.securityContext(),
 	}

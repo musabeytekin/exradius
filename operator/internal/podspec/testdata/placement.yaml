@@ -74,15 +74,12 @@ spec:
       value: exradius-egress-pods.exradius
     - name: EXRADIUS_API_URL
       value: http://exradius-api-internal.exradius:8001
-    - name: EXRADIUS_RUN_TOKEN
-      valueFrom:
-        secretKeyRef:
-          key: token
-          name: run-5e5e
     - name: EXRADIUS_PURPOSE
       value: task
     - name: EXRADIUS_ID
       value: 5e5e
+    - name: EXRADIUS_RUN_TOKEN_FILE
+      value: /exradius/token/token
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: workstation
@@ -127,6 +124,8 @@ spec:
       name: identity
       readOnly: true
       subPath: group
+    - mountPath: /exradius/token
+      name: run-token
     workingDir: /work
   enableServiceLinks: false
   hostUsers: false
@@ -141,15 +140,14 @@ spec:
     env:
     - name: EXRADIUS_API_URL
       value: http://exradius-api-internal.exradius:8001
-    - name: EXRADIUS_RUN_TOKEN
-      valueFrom:
-        secretKeyRef:
-          key: token
-          name: run-5e5e
     - name: EXRADIUS_PURPOSE
       value: task
     - name: EXRADIUS_ID
       value: 5e5e
+    - name: EXRADIUS_RUN_TOKEN_FILE
+      value: /exradius/secret/token
+    - name: EXRADIUS_RUN_TOKEN_HANDOFF
+      value: /exradius/token/token
     - name: HTTP_PROXY
       value: http://exradius-egress.exradius:3128
     - name: HTTPS_PROXY
@@ -185,6 +183,11 @@ spec:
     - mountPath: /opt/exradius/runtime
       name: runtime
       readOnly: true
+    - mountPath: /exradius/secret
+      name: run-secret
+      readOnly: true
+    - mountPath: /exradius/token
+      name: run-token
   - command:
     - /opt/exradius/runtime/bin/exradius-runner
     - --files
@@ -192,15 +195,12 @@ spec:
     env:
     - name: EXRADIUS_API_URL
       value: http://exradius-api-internal.exradius:8001
-    - name: EXRADIUS_RUN_TOKEN
-      valueFrom:
-        secretKeyRef:
-          key: token
-          name: run-5e5e
     - name: EXRADIUS_PURPOSE
       value: task
     - name: EXRADIUS_ID
       value: 5e5e
+    - name: EXRADIUS_RUN_TOKEN_FILE
+      value: /exradius/secret/token
     - name: HOME
       value: /tmp
     - name: EXRADIUS_ATTACHMENTS_DIR
@@ -244,6 +244,9 @@ spec:
       readOnly: true
     - mountPath: /tmp
       name: files-tmp
+    - mountPath: /exradius/secret
+      name: run-secret
+      readOnly: true
   nodeSelector:
     exradius.dev/pool: runs
   restartPolicy: Never
@@ -272,6 +275,17 @@ spec:
       defaultMode: 292
       name: exradius-run-identity
     name: identity
+  - name: run-secret
+    secret:
+      defaultMode: 288
+      items:
+      - key: token
+        path: token
+      secretName: run-5e5e
+  - emptyDir:
+      medium: Memory
+      sizeLimit: 1Mi
+    name: run-token
   - emptyDir: {}
     name: files-tmp
 status: {}

@@ -32,7 +32,7 @@ from typing import Any
 
 from exradius.runner import delivery, egress, gitconfig, workspace
 from exradius.runner.client import HttpProbeApi, HttpRunApi, HttpVerifyApi, RunApi, RunEnded
-from exradius.runner.environment import RunnerEnvironment, isolate
+from exradius.runner.environment import RunnerEnvironment, isolate, protect_process
 from exradius.runner.prompt import build_resume_message, build_system_prompt, build_task_message
 from exradius.runner.tools import SERVER_NAME, ExradiusTools
 from exradius.runtimes import ConnectionSpec, RunSpec, get_runtime
@@ -215,7 +215,7 @@ async def amain(run_id: str, environment: RunnerEnvironment) -> int:
     api_url = os.environ["EXRADIUS_API_URL"]
     token = environment.run_token
     if not token:
-        raise SystemExit("EXRADIUS_RUN_TOKEN is not set")
+        raise SystemExit("the run token is missing (EXRADIUS_RUN_TOKEN_FILE)")
     working_dir = Path(os.environ.get("EXRADIUS_WORK_DIR", os.getcwd()))
     state_dir = Path(os.environ.get("EXRADIUS_STATE_DIR", "/exradius/state"))
     _git_config(state_dir, environment.container)
@@ -299,7 +299,9 @@ def _arg(args: list[str], name: str) -> str | None:
 
 
 def run() -> None:
-    # First of all: keep the container's environment for the agent, clean our own.
+    # First of all: keep the container's environment for the agent, clean our own, and keep
+    # our memory (the run token) from the agent's processes, which run as our user.
+    protect_process()
     environment = isolate()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -320,8 +322,10 @@ def run() -> None:
         raise SystemExit(asyncio.run(verify(args[1], environment)))
     if mode == "--prepare" and len(args) > 2:
         root = Path(os.environ.get("EXRADIUS_WORKSPACE", str(workspace.WORKSPACE)))
+        handoff = os.environ.get("EXRADIUS_RUN_TOKEN_HANDOFF")
         raise SystemExit(asyncio.run(workspace.prepare(args[1], args[2], api_url, token, root,
-                                                       dict(environment.container))))
+                                                       dict(environment.container),
+                                                       Path(handoff) if handoff else None)))
     if mode == "--clone":
         work = Path(os.environ.get("EXRADIUS_WORK_DIR", "/work"))
         state = Path(os.environ.get("EXRADIUS_STATE_DIR", "/exradius/state"))

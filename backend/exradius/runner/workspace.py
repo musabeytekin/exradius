@@ -24,6 +24,7 @@ there). ``clone`` refreshes the repository's mirror under a file lock and clones
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -97,11 +98,13 @@ def cache_directories(root: Path, caches: list[dict[str, str]], project: Path | 
 
 
 async def prepare(purpose: str, object_id: str, api_url: str, token: str, root: Path = WORKSPACE,
-                  environ: dict[str, str] | None = None) -> int:
-    """Lay out the workspace and the cache directories and, for a task, write its
-    attachments (read-only)."""
+                  environ: dict[str, str] | None = None, handoff: Path | None = None) -> int:
+    """Hand the run token to the workstation's runner, lay out the workspace and the cache
+    directories and, for a task, write its attachments (read-only)."""
     environ = dict(os.environ if environ is None else environ)
     state = root / "state"
+    if handoff is not None and token:
+        hand_over(handoff, token)
     layout(root)
     caches = json.loads(environ.get("EXRADIUS_CACHES") or "[]")
     project = Path(environ["EXRADIUS_PROJECT_DIR"]) if environ.get("EXRADIUS_PROJECT_DIR") else None
@@ -125,6 +128,16 @@ async def prepare(purpose: str, object_id: str, api_url: str, token: str, root: 
     _mark(state, "prepare")
     print("prepared /work, /home/runner, /tmp and the attachments folder (read-only)")
     return 0
+
+
+def hand_over(path: Path, token: str) -> None:
+    """Write the token where the workstation's runner reads and deletes it (an in-memory
+    volume of this pod, so every new pod gets it again, even when the rest is prepared)."""
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(token)
 
 
 def clone(work_dir: Path, state_dir: Path, environ: dict[str, str], egress_url: str | None = None) -> int:

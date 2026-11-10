@@ -58,15 +58,12 @@ spec:
       value: exradius-egress-pods.exradius
     - name: EXRADIUS_API_URL
       value: http://exradius-api-internal.exradius:8001
-    - name: EXRADIUS_RUN_TOKEN
-      valueFrom:
-        secretKeyRef:
-          key: token
-          name: probe-77aa
     - name: EXRADIUS_PURPOSE
       value: probe
     - name: EXRADIUS_ID
       value: 77aa
+    - name: EXRADIUS_RUN_TOKEN_FILE
+      value: /exradius/secret/token
     image: kind-registry:5000/exradius-project-default:0.2.0
     imagePullPolicy: IfNotPresent
     name: workstation
@@ -92,6 +89,9 @@ spec:
       name: state
     - mountPath: /opt/exradius/runtime
       name: runtime
+      readOnly: true
+    - mountPath: /exradius/secret
+      name: run-secret
       readOnly: true
     - mountPath: /etc/passwd
       name: identity
@@ -121,6 +121,13 @@ spec:
       defaultMode: 292
       name: exradius-run-identity
     name: identity
+  - name: run-secret
+    secret:
+      defaultMode: 288
+      items:
+      - key: token
+        path: token
+      secretName: probe-77aa
   - emptyDir: {}
     name: home
   - emptyDir: {}

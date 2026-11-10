@@ -43,6 +43,31 @@ def test_isolate_cleans_only_the_runners_process():
     assert env.run_token == "tok" and env.runtime_dir == Path("/opt/exradius/runtime")
 
 
+def test_the_run_token_is_read_from_its_file_and_the_handoff_deleted(tmp_path):
+    """No container has the token as a variable (docs/kubernetes.md §7.8). The workstation
+    reads prepare's handoff and deletes it, so the agent, the same user, cannot read it."""
+    handoff = tmp_path / "token"
+    handoff.write_text("tok\n")
+    environ = {**PROJECT_ENV, "EXRADIUS_RUN_TOKEN_FILE": str(handoff)}
+    env = isolate(environ)
+    assert env.run_token == "tok" and not handoff.exists()
+    assert "EXRADIUS_RUN_TOKEN_FILE" not in environ and env.container == PROJECT_ENV
+
+
+def test_a_read_only_token_file_stays(tmp_path):
+    """The Secret's volume (prepare, files, a probe) is read-only: reading is enough."""
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "token").write_text("tok")
+    secret.chmod(0o555)
+    try:
+        assert isolate({"EXRADIUS_RUN_TOKEN_FILE": str(secret / "token")}).run_token == "tok"
+        assert (secret / "token").exists()
+    finally:
+        secret.chmod(0o755)
+    assert isolate({"EXRADIUS_RUN_TOKEN_FILE": str(tmp_path / "missing")}).run_token is None
+
+
 def test_the_kubelets_api_server_variables_do_not_reach_the_agent():
     """The kubelet adds them to every container, enableServiceLinks or not (docs/kubernetes.md §23)."""
     kubelet = {

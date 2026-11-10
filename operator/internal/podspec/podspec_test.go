@@ -439,6 +439,57 @@ func TestNoCredentialInRunPods(t *testing.T) {
 	}
 }
 
+// The run token is never a variable (a process listing or `kubectl exec env` would show it):
+// a file from the Secret where no project code runs, and in the workstation prepare's
+// handoff, which the runner deletes (docs/kubernetes.md §7.8). Setup, services and clones
+// do not get it at all.
+func TestRunTokenIsAFile(t *testing.T) {
+	b := Pods{Config: config()}
+	for _, run := range []*v1.Run{taskRun(), baseRun(v1.PurposeVerify, "verify-1", "1"), baseRun(v1.PurposeProbe, "probe-1", "1")} {
+		pod := b.Pod(run)
+		for _, c := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
+			file := ""
+			for _, e := range c.Env {
+				if e.Name == "EXRADIUS_RUN_TOKEN" || (e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil && e.ValueFrom.SecretKeyRef.Key == TokenKey) {
+					t.Fatalf("%s/%s: the token is a variable", run.Name, c.Name)
+				}
+				if e.Name == "EXRADIUS_RUN_TOKEN_FILE" {
+					file = e.Value
+				}
+			}
+			mounts := map[string]string{}
+			for _, m := range c.VolumeMounts {
+				mounts[m.Name] = m.MountPath
+			}
+			_, secret := mounts[volSecret]
+			_, handoff := mounts[volToken]
+			switch {
+			case c.Name == ContainerWorkstation && run.Spec.Purpose != v1.PurposeProbe:
+				if file != TokenDir+"/token" || secret || !handoff {
+					t.Errorf("%s/%s: token file %q, secret %v, handoff %v", run.Name, c.Name, file, secret, handoff)
+				}
+			case c.Name == ContainerPrepare:
+				if file != SecretDir+"/token" || !secret || !handoff {
+					t.Errorf("%s/%s: token file %q, secret %v, handoff %v", run.Name, c.Name, file, secret, handoff)
+				}
+			case c.Name == ContainerFiles || c.Name == ContainerWorkstation:
+				if file != SecretDir+"/token" || !secret || handoff {
+					t.Errorf("%s/%s: token file %q, secret %v, handoff %v", run.Name, c.Name, file, secret, handoff)
+				}
+			default:
+				if file != "" || secret || handoff {
+					t.Errorf("%s/%s gets the token", run.Name, c.Name)
+				}
+			}
+		}
+		for _, v := range pod.Spec.Volumes {
+			if v.Secret != nil && (len(v.Secret.Items) != 1 || v.Secret.Items[0].Key != TokenKey) {
+				t.Errorf("%s: the Secret's volume holds more than the token", run.Name)
+			}
+		}
+	}
+}
+
 // Every container goes through the proxy, reaches its services and the api directly, and
 // the runner's containers know the proxy's routes.
 func TestProxyVariables(t *testing.T) {
