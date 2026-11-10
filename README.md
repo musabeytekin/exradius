@@ -245,7 +245,11 @@ Prerequisites, which the chart does not install: a storage class for the run wor
 nodes with containerd 2.1 or later (image volumes), a network plugin that enforces
 NetworkPolicy, on Ubuntu 26.04 nodes `kernel.apparmor_restrict_unprivileged_unconfined=0`
 (docs/kubernetes.md §16), and either CloudNativePG and the RabbitMQ operator or an external Postgres
-and RabbitMQ. A registry build pods push to on a private address needs an
+and RabbitMQ. Optional hardening, each with a node requirement: `runs.userNamespaces`,
+`runs.runtimeClassName: gvisor` (runsc and a RuntimeClass on the nodes), and build pods at Pod
+Security `baseline` (`builds.seccompProfile` with `deploy/seccomp/buildkit.json` on every
+node, plus `builds.appArmorProfile` with `deploy/apparmor/exradius-buildkit` on AppArmor
+nodes). A registry build pods push to on a private address needs an
 `egress.allowPrivate` entry; a corporate proxy goes in `egress.upstreamProxy`. Create the Secrets the values name
 (`secretKey.existingSecret`, `admin.existingSecret`, the database, broker and object store
 credentials), then:

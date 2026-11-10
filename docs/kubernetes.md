@@ -1,8 +1,8 @@
 # Exradius on Kubernetes
 
 Status: agreed design, 2026-11-08; details settled by phase 1 folded in the same day (§23),
-by phase 2 on 2026-11-09 (§24), by phase 3 the same day (§25) and by phase 4 on 2026-11-10
-(§26). Supersedes the Docker-based execution of `architecture.md`
+by phase 2 on 2026-11-09 (§24), by phase 3 the same day (§25), by phase 4 on 2026-11-10
+(§26) and by phase 5 the same day (§27). Supersedes the Docker-based execution of `architecture.md`
 (§3, §5, §9, §10, the run-container parts of §12), `runtime-bundles.md` §2.2, the services
 lifecycle and networks of `environment-and-services.md` §2, and the memory budget and cache
 mounts of `run-environment.md` §4 and §5. The phases are in `kubernetes-plan.md`. The last
@@ -42,6 +42,8 @@ reset.
 | NetworkPolicy | Firewall rules between pods, enforced by the network plugin. |
 | RuntimeClass | Selects the container runtime for a pod, for example gVisor or Kata. |
 | User namespace | `hostUsers: false`: uid 0 inside the pod is an unprivileged uid on the node (GA in 1.36). |
+| gVisor | A user-space kernel (`runsc`): a pod's processes talk to it instead of the node's kernel. Chosen per pod by a RuntimeClass. |
+| seccomp, AppArmor profile | Kernel filters on what a container may ask of the kernel (system calls; files, mounts, signals). `RuntimeDefault` is the runtime's own; `Localhost` names a profile installed on the node. |
 | Image volume | Mounts the content of an OCI image read-only into a pod (GA in 1.36; needs containerd 2.1+ or CRI-O). |
 | Pod Security Admission | Namespace labels (`privileged`, `baseline`, `restricted`) that refuse pods asking for more than the level allows. |
 
@@ -95,8 +97,8 @@ reset.
 | Namespace | Holds | Pod Security Admission |
 |---|---|---|
 | `exradius` | api, worker, frontend, operator, egress; locally also Postgres, RabbitMQ and SeaweedFS | `restricted` |
-| `exradius-runs` | `Run` objects, run pods, per-run Secrets, workspace PVCs, project volumes | `baseline` enforced, `restricted` warned (services run as their image's user, often root) |
-| `exradius-builds` | `Build` objects, build pods, their token Secrets | `privileged`: rootless BuildKit needs seccomp `Unconfined`, which `baseline` refuses (checked in phase 2, §24); phase 5 may try a `Localhost` profile |
+| `exradius-runs` | `Run` objects, run pods, per-run Secrets, workspace PVCs, project volumes | `baseline` enforced, `restricted` warned: services run as their image's user, often root, with capabilities `restricted` refuses, with user namespaces too (§27) |
+| `exradius-builds` | `Build` objects, build pods, their token Secrets | `baseline` with the build pods' `Localhost` seccomp profile (and AppArmor profile on AppArmor nodes) installed on the nodes, `builds.seccompProfile`; `privileged` without them: rootless BuildKit needs to create a user namespace and mount in it (§12, §27) |
 
 The names come from values. One install per cluster is the supported shape.
 
@@ -242,12 +244,12 @@ The worker turns the config into a Run spec (§5); the operator turns a Run spec
 
 | Order | Container | Image | Does | Mounts |
 |---|---|---|---|---|
-| init 1 | `prepare` | workstation + bundle | creates the workspace directories on first start, the project volume's `mirrors/` and `caches/<name>/` and the caches' mount points below the home and `/tmp` (as the run user), writes the task's attachments (fetched from the internal API) read-only, writes the marker `state/steps/prepare.done` | workspace PVC (whole), project volume (whole) |
+| init 1 | `prepare` | workstation + bundle | hands the run token to the workstation (§7.8), creates the workspace directories on first start, the project volume's `mirrors/` and `caches/<name>/` and the caches' mount points below the home and `/tmp` (as the run user), writes the task's attachments (fetched from the internal API) read-only, writes the marker `state/steps/prepare.done` | workspace PVC (whole), project volume (whole), the token from the Secret, the token handoff |
 | init 2..n | `clone-<n>` (n: the repository's index) | workstation + bundle | refreshes the mirror on the project volume, `git clone --no-hardlinks` from it, checks out the branch, resets `origin`; writes `state/steps/clone-<n>.done` | workspace `work`, project volume `mirrors` |
 | sidecar | `service-<name>` | the service's image | the service, with its startup probe | none |
 | init | `setup-<n>` | workstation | `/bin/sh -c <command>`, as today | workspace, caches, identity files |
-| sidecar | `files` | workstation + bundle | writes answer attachments as they arrive (§8.2) | workspace `attachments` |
-| main | `workstation` | workstation + bundle | `/opt/exradius/runtime/bin/exradius-runner <run_id>` | workspace, caches, identity files, `attachments` read-only |
+| sidecar | `files` | workstation + bundle | writes answer attachments as they arrive (§8.2) | workspace `attachments`, the token from the Secret |
+| main | `workstation` | workstation + bundle | `/opt/exradius/runtime/bin/exradius-runner <run_id>` | workspace, caches, identity files, `attachments` read-only, the token handoff |
 
 Each init container (except `files`) and each service is one step in status, so Verify and
 task runs report progress the same way. `restartPolicy: Never` at pod level; sidecars
@@ -331,6 +333,10 @@ worker does today.
   - A service's step passes once its container is `started`, or once a later container
     has started, and then stays passed: a service that crashes later is restarted by its
     policy, and every sidecar is stopped (exit 143) when the workstation ends.
+  - The Run ends with its workstation: its phase is final once the workstation has exited,
+    while Kubernetes is still stopping the sidecars. A service that ignores `SIGTERM` (a
+    shell as PID 1, as in Plane's `minio`) would otherwise hold every Verify and task for
+    the pod's 30 s grace period (§27).
 - **Host names.** A pod has one network namespace: services listen on `localhost`. The pod gets
   `hostAliases` mapping every service name to `127.0.0.1`, so `postgres:5432` still resolves.
   This is kubelet-managed `/etc/hosts`, which a project cannot change.
@@ -422,16 +428,37 @@ The operator writes these and the Run spec cannot change them:
   not the groups the image's `/etc/group` gives its own user of that uid (Ubuntu's uid 1000
   is in `sudo` and `adm`);
 - `terminationGracePeriodSeconds: 30` (cancel, §8.4);
-- `runtimeClassName` from values (`runs.runtimeClassName`), empty for the cluster default;
-- `hostUsers: false` when `runs.userNamespaces: true` (phase 5). With it, a service's root is an
-  unprivileged uid on the node.
+- `runtimeClassName` from values (`runs.runtimeClassName`), empty for the cluster default.
+  `gvisor` runs the pod in gVisor (`make -C deploy/kind dev-gvisor` locally); the four real
+  projects Verify and run in it, at a cost measured in §27;
+- `hostUsers: false` when `runs.userNamespaces: true`. Every uid of the pod, a service's root
+  included, is then an unprivileged uid on the node (uid 0 maps to a range like
+  2191917056–2191982591). Services' own `chown` and user switch keep working with the
+  capability set of §7.4, which act inside the pod's user namespace only. Checked on kind and
+  k3s (§27).
 
 The workstation's env is: the project's `env`, the exported service secrets
-(`resolve.exported_secrets`, as today), `GIT_*` from the Run spec, `EXRADIUS_RUN_TOKEN`,
-`EXRADIUS_API_URL` (the internal port), the provider's placeholder and `ANTHROPIC_BASE_URL`,
-the proxy variables (`HTTP(S)_PROXY`, `NO_PROXY`, `YARN_HTTP(S)_PROXY`, `JAVA_TOOL_OPTIONS`,
-§11) and the runner's route to the proxy (`EXRADIUS_EGRESS_URL`, `EXRADIUS_EGRESS_PEERS`),
-which `isolate()` keeps out of the agent's environment with the run token.
+(`resolve.exported_secrets`, as today), `GIT_*` from the Run spec, `EXRADIUS_API_URL` (the
+internal port), the provider's placeholder and `ANTHROPIC_BASE_URL`, the proxy variables
+(`HTTP(S)_PROXY`, `NO_PROXY`, `YARN_HTTP(S)_PROXY`, `JAVA_TOOL_OPTIONS`, §11), the runner's
+route to the proxy (`EXRADIUS_EGRESS_URL`, `EXRADIUS_EGRESS_PEERS`) and
+`EXRADIUS_RUN_TOKEN_FILE`, which `isolate()` keeps out of the agent's environment.
+
+**The run token is a file, never a variable.** A variable would show in `kubectl exec ... env`
+and in `/proc/<pid>/environ`, which the agent can read as the runner's own user.
+
+- `prepare` and `files`, where no project code runs, read it from the per-run Secret mounted
+  read-only at `/exradius/secret` (only the `token` key, mode 0440 for the run group).
+- `prepare` copies it into an in-memory `emptyDir` at `/exradius/token`, the only place the
+  workstation mounts it. The runner reads it there and deletes it before anything of the
+  project starts, so the agent finds an empty directory. A recreated pod (§8.3) gets a new
+  `emptyDir`, and `prepare` writes it again even when the workspace is already prepared.
+- The runner then makes itself non-dumpable (`PR_SET_DUMPABLE` 0): processes of the same
+  uid can no longer read its memory or `/proc/1/environ` or attach to it. Kind's kernel
+  has no Yama, so before this `/proc/1/mem` was open to the agent. Programs it starts are
+  dumpable again once they exec.
+- Clones and setup containers do not get the token. A probe pod has no `prepare`, so its
+  workstation mounts the Secret's token directly; nothing of a project runs there.
 
 ## 8. The run lifecycle on Kubernetes
 
@@ -555,7 +582,7 @@ decrypted by the worker at Run creation, or by the api when a component asks for
 | HTTP connection headers with `${secret:…}` | in `/spec`, as today | the api gives the pod the proxy's `/mcp/<name>` route without those headers (in `/spec` and the verify spec); the proxy adds them |
 | stdio connection env (`GITHUB_TOKEN` for a local server, a postgres DSN) | in `/spec`, as today | the same. The server process needs it, so the agent can read it; a known gap, as today |
 | `env` and service `env` values with secrets | per-run Secret, referenced by key | the same. Services need them at container start |
-| run token | per-run Secret | the same |
+| run token | per-run Secret → env | per-run Secret as a read-only file in `prepare` and `files`; in the workstation a copy that the runner deletes once read (phase 5, §7.8) |
 | config repository host credential | api and worker only, as today | the same; build pods get their context from the api, never from git (§12) |
 
 - The per-run Secret has an ownerReference to its Run and lives in etcd only for the run's
@@ -673,9 +700,17 @@ waits up to 10 s for it, then is refused.
   routes, requests, bytes). The proxy logs refusals; `egress.logLevel: debug` logs every
   request.
 - **Known gaps:** DNS queries go to the cluster DNS, so a run can still leak data through
-  query names; protocols that are not HTTP (a postgres MCP connection to an external
-  database, SSH remotes) cannot go through the proxy and are refused by NetworkPolicy; a
-  stdio connection's secret environment is in the pod, as before.
+  query names (decided in §22: not closed yet, with a design); protocols that are not HTTP
+  (a postgres MCP connection to an external database, SSH remotes) cannot go through the
+  proxy and are refused by NetworkPolicy; a stdio connection's secret environment is in the
+  pod, as before.
+- **Replicas.** One replica by default, right for one node. With `egress.replicas` above
+  one, the chart spreads the replicas over nodes (`topologySpreadConstraints`, preferred)
+  and adds a PodDisruptionBudget with `maxUnavailable: 1`, so a node drain never takes
+  every proxy at once. Each replica watches every run pod, keeps its own policy cache and
+  sends its own records; the runner asks each one before the agent phase (§27 checks two on
+  kind). A proxy that restarts drops the connections it carried (a model stream, a clone);
+  a new one sees running pods in the phase their container statuses show.
 
 **NetworkPolicy** (`charts/exradius/templates/networkpolicies.yaml`, values
 `networkPolicy.enabled`, default on):
@@ -781,12 +816,27 @@ in `exradius-builds`.
   up to date (context unchanged)` without a build pod. Each Build's outcome goes into its
   `image_builds` row (state, digest, log tail); the token's hash is cleared and its Secret
   deleted.
-- **Pod security.** Rootless BuildKit creates a user namespace (rootlesskit), which seccomp
-  `RuntimeDefault` refuses, and maps subordinate ids with the setuid `newuidmap`. So the
-  `build` container has seccomp and AppArmor `Unconfined`, keeps the runtime's default
-  capabilities (they bound what root has inside that namespace, which `apt-get` needs) and
-  no `allowPrivilegeEscalation: false`; `exradius-builds` is `privileged`. What was checked
-  is in §24. kaniko is not an option: it was archived in June 2025.
+- **Pod security.** Rootless BuildKit creates a user namespace (rootlesskit) and mounts
+  inside it, which seccomp `RuntimeDefault` refuses (and, on AppArmor nodes, the runtime's
+  default AppArmor profile, with a silent `deny mount`), and maps subordinate ids with the
+  setuid `newuidmap`. So the `build` container keeps the runtime's default capabilities
+  (they bound what root has inside that namespace, which `apt-get` needs) and no
+  `allowPrivilegeEscalation: false`, and either:
+  - with `builds.seccompProfile` (a profile path relative to the kubelet's seccomp
+    directory): seccomp `Localhost` with `deploy/seccomp/buildkit.json` installed on every
+    node that runs builds, and with `builds.appArmorProfile` AppArmor `Localhost` with
+    `deploy/apparmor/exradius-buildkit` loaded on AppArmor nodes. `exradius-builds` is then
+    `baseline`. The seccomp profile is containerd's `RuntimeDefault` for the default
+    capabilities on amd64 and arm64 plus `clone` with namespace flags, `unshare`, `setns`,
+    the mount calls (`mount`, `umount2`, the new mount API), `pivot_root`, `sethostname`
+    and `setdomainname`; `keyctl`, `add_key` and `request_key` answer `ENOSYS`, so runc
+    skips its session keyring instead of failing. The AppArmor profile is containerd's
+    default profile with `userns`, `mount` and `pivot_root` allowed;
+  - without: seccomp and AppArmor `Unconfined`, and `exradius-builds` is `privileged`.
+
+  `restricted` is never possible: `newuidmap` is setuid. kind installs the seccomp profile
+  in `dev-up` and uses it. What was checked is in §24 and §27. kaniko is not an option: it
+  was archived in June 2025.
 
 | | Local (kind) | EKS | GKE | AKS |
 |---|---|---|---|---|
@@ -894,7 +944,12 @@ probes become a Run with `purpose: probe`:
   and a Run spec change must reach clusters on `helm upgrade`.
 - **Prerequisites** are not part of the chart: CloudNativePG and the RabbitMQ operator when the
   in-cluster stack services are used; a CSI storage class; a network plugin that enforces
-  NetworkPolicy; for gVisor, a RuntimeClass.
+  NetworkPolicy; for gVisor, `runsc` on the nodes and a RuntimeClass (`runs.runtimeClassName`);
+  for user namespaces (`runs.userNamespaces`), containerd 2 with runc 1.2 or later and a
+  kernel whose volume filesystems support idmapped mounts (ext4, xfs, tmpfs; Linux 6.3 or
+  later); for build pods at `baseline`, the seccomp profile file on every node
+  (`/var/lib/kubelet/seccomp/<builds.seccompProfile>`) and, on AppArmor nodes, the AppArmor
+  profile loaded (`builds.appArmorProfile`).
 - **Nodes on Ubuntu 26.04** (or any host with AppArmor's
   `kernel.apparmor_restrict_unprivileged_unconfined=1`) need that sysctl set to `0`, kept in
   `/etc/sysctl.d/`. With it on, containerd's default profile is stacked with `unconfined`
@@ -920,7 +975,7 @@ runs:
   projectVolume: {enabled: true, accessMode: ReadWriteOnce, storageClass: "", size: 100Gi}
   bundleMount: image            # or copy
   runtimeClassName: ""          # gvisor, kata-..., or the default
-  userNamespaces: false
+  userNamespaces: false         # hostUsers: false
   nodeSelector: {}
   tolerations: []
   imagePullSecrets: []
@@ -931,7 +986,8 @@ egress: {replicas: 1, allow: [], allowPrivate: [], upstreamProxy: "", upstreamPr
 networkPolicy: {enabled: true, dns: {namespace: kube-system, podLabels: {k8s-app: kube-dns}}, apiFrom: [],
                 clusterCIDRs: []}
 builds: {registry: ..., builderImage: moby/buildkit:<pinned>-rootless, cache: true, insecureRegistries: [],
-         resources: {}, egress: proxy, credentialHelper: none}   # credentialHelper: phase 6
+         resources: {}, egress: proxy, seccompProfile: "", appArmorProfile: "",
+         credentialHelper: none}   # credentialHelper: phase 6
 objectStore: {kind: s3, bucket: exradius, s3: {endpoint: ...}, inCluster: {seaweedfs: true}}
 postgres: {existingSecret: ..., inCluster: {cloudnativepg: true, storage: 10Gi}}
 rabbitmq: {existingSecret: ..., inCluster: {operator: true}}
@@ -962,9 +1018,14 @@ Terraform (phase 6, `deploy/terraform/<cloud>/`) creates what the values point a
     2. creates the cluster `exradius` and connects the registry to kind's network;
     3. installs CloudNativePG and the RabbitMQ operator with Helm;
     4. creates the secret-key and admin Secrets from generated values;
+    5. puts the build pods' seccomp profile on the node (`make dev-seccomp`), which
+       `values-local.yaml` uses (`builds.seccompProfile`), so `exradius-builds` is `baseline`;
   - `make dev-down` deletes both;
-  - `make dev-gvisor` (phase 5) adds `runsc` to the node and a `gvisor` RuntimeClass. gVisor
-    publishes arm64 builds; whether it works in a kind node on this Mac is phase 5's check.
+  - `make dev-gvisor` puts a pinned gVisor release (`runsc`, its containerd shim and
+    `gvisor-bin/`, checked against the published sha512) into the node, adds the `runsc`
+    runtime to containerd (`systemd-cgroup = true`, as kind's kubelet uses systemd) and
+    creates the RuntimeClass `gvisor`. It works in the arm64 kind node on this Mac;
+    `runs.runtimeClassName: gvisor` then runs every run pod in it.
 - **Tilt** (`Tiltfile` at the root):
   - `tilt up` builds the images (backend, frontend, operator, egress, runtime bundle, project
     default; the builder from phase 6, until then the pinned upstream BuildKit image) and
@@ -1106,13 +1167,19 @@ To be rewritten in the phase that makes them true, and only then:
 
 ## 22. Decided against, and later
 
-- **agent-sandbox.** Not used for now. Its `Sandbox` adds a controller and CRDs to install and
-  upgrade for what a Pod and a PVC already give Exradius. Its warm pools assume interchangeable
-  pods, while a run's pod is fixed at creation: project images, references to its Secret, its
-  token. Phase 5 writes down whether warm pools are worth their own design. That design would
-  be a per-project pod template, with the runner learning its run after a claim through a
-  downward API file and a pod-bound token. The operator builds pods behind an interface, so a
-  Sandbox backend can be added.
+- **agent-sandbox and warm pools: closed** (phase 5, 2026-11-10). Its `Sandbox` adds a
+  controller and CRDs to install and upgrade for what a Pod and a PVC already give Exradius.
+  Warm pools would save only the pod's own start, and that is not where a run's time goes:
+  on kind a run pod's first container starts 3–6 s after the pod is created, with runc or
+  gVisor alike, most of it the workspace PVC's provisioning (§27), while its clones,
+  services and setup take 15–100 s and the session minutes. Pre-starting more than the sandbox means a per-project template that already
+  ran setup, which is a stale workspace by the time it is claimed, holds requests while
+  idle, and breaks what a pod is fixed to at creation: its project images, its Secret
+  references and token, its address as the proxy's identity of the run, and the phase the
+  proxy reads from its init containers. The pod builder stays behind an interface
+  (`podspec.Builder`). Reopen only if a measured start dominates: a sandbox runtime with a
+  VM per pod (Kata), or cold image pulls on new nodes, for which pre-pulling project
+  images (below) is the direct answer.
 - **Stopping pods while waiting.** Rejected: every resume would restart services empty. Only a
   lost pod is recreated (§8.3).
 - **A TLS-intercepting proxy.** Rejected: every tool would have to trust an Exradius CA.
@@ -1124,7 +1191,16 @@ To be rewritten in the phase that makes them true, and only then:
   - Kueue;
   - api metrics;
   - a `resources.disk` key;
-  - restricting DNS;
+  - restricting DNS, decided in phase 5 and not built yet. The gap: a run pod resolves names
+    through the cluster DNS, which recurses, so an agent can carry data out in query names
+    (slowly, but without limit). No run pod needs to resolve an outside name: every
+    request goes through the proxy by name, services resolve through `/etc/hosts`. The
+    design: the egress proxy also answers DNS for run pods (`dnsPolicy: None`, its Service
+    address as the only nameserver); it forwards the cluster names of the Exradius
+    namespace (the api, the proxy and its peers), answers an outside name only when it is
+    on the run's allowlist for the phase, records each query in `egress_records`, and
+    refuses the rest; NetworkPolicy then drops run pods' traffic to the cluster DNS. Until
+    then the gap is listed in §11 and the README;
   - pre-pulling project images;
   - registry garbage collection.
 
@@ -1197,8 +1273,8 @@ Details the earlier sections left open or got wrong, decided while building phas
   `/etc/group` is mounted. `supplementalGroupsPolicy: Strict` (§7.8) prevents that.
 - **Known gap, unchanged from v0.1.0:** the runner is the workstation's PID 1 and runs as the
   agent's uid, so the agent can read the run token in `/proc/1/environ`. The token reaches
-  only this run's internal API. Phases 4 and 5 should decide whether to pass it as a file
-  readable by another uid.
+  only this run's internal API. Phase 5 closed it: the token is a file the runner deletes,
+  and the runner is non-dumpable (§7.8, §27).
 
 ## 24. Settled in phase 2
 
@@ -1369,3 +1445,88 @@ Details decided while building the egress proxy, NetworkPolicy and credential in
   Postgres initialised in 16 s and a run's `postgres` service started. §16 lists it as a node
   requirement.
 
+
+## 27. Settled in phase 5
+
+Details decided while hardening isolation (2026-11-10). §3.1, §7.4, §7.8, §10–§12, §16, §17 and
+§22 are written to match; this is the list. Timings are from kind on this Mac (arm64 Docker
+Desktop VM), one run at a time, caches warm.
+
+- **The run token is a file** (§7.8). From a task's shell the agent found no token variable,
+  an empty `/exradius/token`, and `Permission denied` on `/proc/1/environ` and
+  `/proc/1/mem`; before, the token was in the container's environment, in the runner's
+  `/proc/1/environ` (the documented gap of §23) and readable from its memory, as kind's
+  kernel has no Yama. `kubectl exec` sees the same. The handoff file exists only between
+  the workstation's start and the runner's first lines, before any project code runs.
+- **A Run ends with its workstation.** Plane's `minio` service runs `/bin/sh -c "… && tail
+  -f /dev/null"`: a shell as PID 1 ignores `SIGTERM`, so the pod waited its 30 s grace
+  period after every Verify and task (phase 4's 35 s tail). The operator now takes the
+  phase from the workstation's exit while the sidecars stop; Plane's Verify went from 81 s
+  to 37–43 s. Cancel still waits for the pod to be gone (§8.4), so a cancelled Plane run
+  still takes the grace period.
+- **User namespaces** (`runs.userNamespaces`) need nothing else on kind (Kubernetes 1.36.4,
+  containerd 2.3.4, runc 1.4.3, kernel 7.0) or on the k3s server (1.37.2, containerd 2.3.7,
+  Ubuntu 26.04).
+  - `/proc/self/uid_map` in a run shows `0 2191917056 65536` (the range differs per pod);
+    on k3s the run's `postgres` service ran as uid 999 in the pod and as uid 927794151 on
+    the host.
+  - Services that start as root work with the §7.4 capabilities: the four projects' Verify
+    and one task each passed (bank 21 tests, Outline 89, Saleor 78, Plane 72).
+  - Volumes are idmapped: the project volumes' caches and mirrors, written by earlier runs
+    as host uid 1000, were reused as they were (Plane's `pnpm install` stayed at 8–10 s).
+  - Ubuntu's `kernel.apparmor_restrict_unprivileged_userns=1` does not apply: the runtime,
+    not an unprivileged process, creates the namespace.
+  - Cost: none measurable. Plane's Verify took 37–38 s against 37–39 s without (three
+    runs each, one disturbed run excluded).
+  - Pod Security: with `hostUsers: false` the `restricted` check no longer objects to root,
+    only to the services' capabilities, so `exradius-runs` stays `baseline`.
+- **gVisor** works in the arm64 kind node (`make dev-gvisor`, release 20261026.0, its default
+  `systrap` platform; runsc needs `systemd-cgroup = true` there and its `gvisor-bin/`
+  beside it). It was not tried on k3s: kind answered the question.
+  - The four projects Verify (bank 20 s, Outline 65 s, Saleor 103 s, Plane 53–61 s) and
+    ran one task each (21, 89, 72 and 78 tests).
+  - Cost, Plane: Verify 55–61 s against 37–39 s; `pnpm install` 22–23 s against 9 s
+    (about 2.5×); `uv sync` 4–5 s against 2 s; the agent's 72 issue tests 34 s against
+    16 s. Saleor's task: 93 s preparing and 171 s running, against 66 s and 82 s with user
+    namespaces. A pod's first container starts 3–6 s after its creation with gVisor or runc.
+  - gVisor cannot run a user-namespaced pod: the sandbox fails with `gofer: error setting
+    namespace of type user … invalid argument`. The two settings exclude each other.
+- **A pod the node cannot start fails its Run.** That gVisor failure showed that a sandbox
+  the node cannot create appears only in `FailedCreatePodSandBox` Events, and the run
+  waited forever. The operator now reads them (RBAC: list events in the runs namespace)
+  once a scheduled pod has started nothing for 60 s, and fails the Run after three failed
+  attempts with reason `SandboxFailed` and the kubelet's message. Verify's diagnosis names
+  the two settings, or the runtime missing on the node.
+- **Build pods at `baseline`.**
+  - kind: the seccomp profile alone suffices (its kernel has no AppArmor). A build ran its
+    `RUN` steps (`chown`, the network through the proxy) and pushed, and so did a real
+    Exradius Build of Plane's `minio`. Admission refused the old Unconfined shape at
+    `baseline`, and `RuntimeDefault` still fails in rootlesskit.
+  - The profile's first version failed at runc's `unable to join session keyring`
+    (`keyctl` refused with `EPERM`); runc skips the keyring on `ENOSYS`, which the profile
+    now returns, rather than allowing the keyring calls.
+  - k3s (Ubuntu 26.04, AppArmor 5.0.2): with the seccomp profile and the runtime's default
+    AppArmor profile, rootlesskit fails with `failed to share mount point: /: permission
+    denied`; that profile's `deny mount` is silent, so nothing is logged. Seccomp profile
+    plus AppArmor `Unconfined` builds, and so does the old fully Unconfined shape, even
+    with `apparmor_restrict_unprivileged_userns=1`. So an AppArmor node needs
+    `deploy/apparmor/exradius-buildkit` loaded (`apparmor_parser` accepts it there; it was
+    not loaded, which is a host security change and the user's to make) to reach
+    `baseline`; without it `exradius-builds` stays `privileged`.
+  - `restricted` stays impossible (setuid `newuidmap`), and user namespaces for build pods
+    stay out (§24: the image's subordinate ids do not fit the pod's range).
+- **Pod Security review.** A server-side dry run of `restricted` on each namespace, with
+  runs live:
+
+  | Namespace | Enforced | `restricted` would refuse |
+  |---|---|---|
+  | `exradius` | `restricted` | nothing |
+  | `exradius-runs` | `baseline` | run pods: "unrestricted capabilities, runAsNonRoot != true" (the services); with user namespaces only "unrestricted capabilities" |
+  | `exradius-builds` | `baseline` on kind with the profile; `privileged` on k3s | build pods: `newuidmap` needs privilege escalation |
+
+- **Two egress replicas** on kind: both carried a task's requests, the runner's log showed it
+  asked both (`10.244.0.38: agent, 10.244.0.37: agent`), and a task completed across the
+  replacement of both proxy pods in the middle of its session. With more than one replica
+  the chart adds the PodDisruptionBudget and the spread of §11.
+- **DNS and warm pools** are decided in §22: DNS stays open for now, with the proxy as the
+  run pods' resolver as the design; warm pools are closed.

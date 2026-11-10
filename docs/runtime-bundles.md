@@ -164,6 +164,10 @@ The runner is a guest in the project's container. Two rules keep it that way:
    the agent runs `python`, `node`, `cargo` or `mvn`, it gets the project image's tools and
    the project's variables.
 
+The run token is the runner's alone: it arrives as a file the runner deletes once read, and
+the runner makes itself non-dumpable, so the agent, which runs as the same user, can read
+neither the file nor the runner's memory (`docs/kubernetes.md` §7.8).
+
 The runner writes only to the workspace (the state directory, `/tmp`, the attachments in
 `prepare` and `files`). The project image must provide
 `bash` (Claude Code's shell tool uses it) and `git`; Debian-based official images have

@@ -191,8 +191,18 @@ pod's security: uid 1000, `/etc/passwd` from the `exradius-run-identity` ConfigM
 home `/home/runner`), read-only root, all capabilities dropped, no ServiceAccount token, no
 service links. `/work`, the home, `/tmp` and the state directory are subPaths of one
 workspace PVC per Run. Runs live in the `exradius-runs` namespace (Pod Security `baseline`),
-the stack in `exradius` (`restricted`), builds in `exradius-builds` (`privileged`: rootless
-BuildKit needs seccomp `Unconfined`; kubernetes.md §24).
+the stack in `exradius` (`restricted`), builds in `exradius-builds` (`baseline` with the
+node-installed `deploy/seccomp/buildkit.json`, and `deploy/apparmor/exradius-buildkit` on
+AppArmor nodes, via `builds.seccompProfile`/`appArmorProfile`; `privileged` without them:
+rootless BuildKit creates a user namespace and mounts in it; kubernetes.md §12, §27).
+
+**Isolation (kubernetes.md §7.8, §27; phase 5).** `runs.userNamespaces` (`hostUsers: false`)
+and `runs.runtimeClassName` (`gvisor`: `make -C deploy/kind dev-gvisor` locally) are install
+values the operator writes into every run pod. The run token is never a variable: `prepare`
+and `files` read it from the Secret as a file, `prepare` hands a copy to the workstation in
+an in-memory volume, and the runner deletes it once read and makes itself non-dumpable
+(`runner/environment.py`), so the agent, the same uid, cannot read it. A Run ends when its
+workstation does (`internal/status`), not when its sidecars have stopped.
 
 **Egress (kubernetes.md §10, §11; phase 4).** Every request of a run or build pod goes through
 `exradius-egress` (`egress/`, Go, a Deployment in `exradius`): a forward proxy on 3128
