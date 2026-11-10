@@ -52,15 +52,19 @@ separate identity entity.
 
 ## 4. Push
 
-- When a repository has `push_allowed` and an auth secret, the worker exports the secret as
-  `EXRADIUS_GIT_CREDENTIAL_<N>` (N = repository index) and configures a credential helper
-  for that remote's URL, at the git command-line level, that answers from the variable:
-  `credential.<url>.helper=!f() { echo username=x-access-token; echo password=$EXRADIUS_GIT_CREDENTIAL_N; }; f`
-  (username is the part before `:` when the secret is `user:token`). Nothing is written
-  into the clone's `.git/config`.
-- Without `push_allowed`, no helper is configured; a push fails with an authentication
-  error, as now.
-- Mirror fetches keep using the secret as before.
+Since phase 4 of the move to Kubernetes (`kubernetes.md` §11) the credential never reaches
+the pod:
+
+- Each http(s) repository gets `url.<egress>/git/<host><path>.insteadOf=<url>` at the git
+  command-line level, so the agent's fetch and push of `origin` go to the egress proxy's git
+  route, which adds the repository's credential as HTTP Basic (username: the part before `:`
+  of a `user:token` secret, else `x-access-token`). Nothing is written into the clone's
+  `.git/config`.
+- Without `push` (`push_allowed`) the proxy refuses the push itself; git prints `fatal:
+  remote error: pushing to <url> is not allowed for this task (push: false)`.
+- Clones and mirror fetches use the same route in their own containers.
+- Until phase 4 the token went into `EXRADIUS_GIT_CREDENTIAL_<N>` with a command-line
+  credential helper answering from it.
 
 ## 5. API and panel
 

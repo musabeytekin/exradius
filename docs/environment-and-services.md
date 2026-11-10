@@ -11,6 +11,10 @@
 > **Since phase 3 of the move to Kubernetes (2026-11-09)** services are sidecars of the run's
 > pod on its `localhost`; §2 is rewritten for it. The environment section, the delivery
 > warning and the passwd fix are unchanged.
+>
+> **Since phase 4 (2026-11-10)** a run reaches the network through the egress proxy only
+> (`docs/kubernetes.md` §11): the "Not available" line of §1 ends with the hosts the agent may
+> reach instead of "Outbound network access is available."
 
 Agreed 2026-11-07 after the Bank of Anthos live tests. Four problems and the decisions:
 
@@ -37,7 +41,7 @@ Each folder in the working directory is a git clone of one repository:
 - bank-of-anthos: branch main, origin https://github.com/musabeytekin/bank-of-anthos.git, pushing allowed
 - platform-config: branch main, origin https://github.com/acme/platform-config.git, pushing NOT allowed
 
-Not available: a Docker daemon, Kubernetes, sudo, installing packages. Outbound network access is available.
+Not available: a Docker daemon, Kubernetes, sudo, installing packages. Outbound network access is limited to the repositories above and to: repo.maven.apache.org, pypi.org, files.pythonhosted.org.
 
 Services running for this task, reachable by host name from this container:
 - postgres (postgres:16) on port 5432, POSTGRES_USER=app, POSTGRES_DB=app, POSTGRES_PASSWORD=$DB_PASSWORD
@@ -58,6 +62,13 @@ Sources:
 - **Not available**: fixed text. The agent discovers installed tools itself (`which`,
   `--version`); Exradius lists only what it cannot discover: there is no Docker daemon even
   if a client is present, no Kubernetes, no sudo, no package installation.
+- **The network sentence** (`environment.network_line`): the agent phase's hosts as the
+  egress proxy enforces them (`exradius.network.allowed_hosts`): the install's
+  `egress.allow`, the config's `network.allow`, then the agent's connections' hosts (catalog
+  `hosts`, a catalog key's URL host, a plain HTTP connection's host), each once. With
+  repositories it reads "limited to the repositories above and to: <hosts>.", without them
+  "limited to: <hosts>."; with no hosts "limited to the repositories above." or "There is no
+  outbound network access." The model and the connections need no mention: they work.
 - **Services**: the project's services (§2) with name, image, ports and settings. A
   setting is an env entry shown as `KEY=value`; a `${secret:NAME}` in it is shown as
   `$NAME`, the variable the run environment carries (project secrets are exported under

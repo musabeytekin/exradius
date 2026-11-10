@@ -6,20 +6,11 @@ of 2026-11-08.
 
 ## Exradius's own egress proxy
 
-One proxy that Exradius runs on the runs network, which every run, setup and service container
-uses through `HTTP(S)_PROXY`, with `NO_PROXY` covering `exradius-api` and the run's services.
-
-- Setup phase (image builds, setup commands, services): open; forwards to the corporate proxy
-  when the install names one.
-- Agent phase: an allowlist only, built from what the run already declares: the model
-  endpoint, the repository hosts, the mirrors, the declared connections. Decided on the
-  `CONNECT` host name, so nothing is decrypted.
-- Enforced at network level (a container that ignores the proxy variables reaches nothing),
-  per the run-environment principle (docs/run-environment.md).
-- Every host a run reached, or was refused, goes into the run's record.
-
-It answers two report items at once: corporate networks (proxy, CA, mirrors at install level)
-and no path to production from the agent phase.
+Designed in `kubernetes.md` §11 and built in phase 4 of the move to Kubernetes
+(2026-11-10): every run request goes through it, setup is open (chained to a corporate proxy
+when the install names one), the agent phase reaches only what the run declares plus
+`network.allow`, NetworkPolicy refuses everything else, credentials are added by the proxy,
+and every host reached or refused is recorded and shown on the task page.
 
 ## Harness-run checks
 

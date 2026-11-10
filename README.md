@@ -71,8 +71,8 @@ Several runs of one project can go at once, each in its own pod and workspace.
 ## Design decisions
 
 - **The agent authors; the harness never acts for it.** The worker never commits, pushes,
-  merges or opens pull requests. The agent pushes with a per-repository credential, under its
-  own git identity, and every commit carries `Exradius-Task` and `Exradius-Agent` trailers.
+  merges or opens pull requests. The agent pushes through a per-repository route that adds
+  the credential, under its own git identity, and every commit carries `Exradius-Task` and `Exradius-Agent` trailers.
   Approving and deploying stay with people.
 - **A project is a git repository.** `exradius.yaml` declares repositories, workstation,
   services, environment, MCP connections and agents. It is reviewed in pull requests like
@@ -90,6 +90,14 @@ Several runs of one project can go at once, each in its own pod and workspace.
   the pod's request and limit, so the scheduler places it where it fits. A run's services
   are sidecars of its own pod, reached by name on its `localhost`, so a project service
   called `postgres` can never resolve to Exradius's database or another run's.
+- **No credentials in the run, and an allowlist for the agent.** Every request of a run goes
+  through Exradius's egress proxy; NetworkPolicy refuses everything else. Setup reaches any
+  host; the agent reaches its model, its repositories, its connections and the hosts the
+  config's `network.allow` names, and anything else is a `403` that names the host. The model
+  key, the repository tokens and secret connection headers stay in the proxy, which adds them
+  on the way out and refuses a push to a repository the config does not let it push to. The
+  task page lists every host reached and refused
+  ([docs/kubernetes.md](docs/kubernetes.md) §11).
 - **Any image can be the workstation.** The agent runtime (a relocatable Python with the
   Claude Agent SDK and a pinned Claude Code binary) is a bundle mounted read-only into the
   container. A project's image needs only bash and git on glibc; `node:22`, `python:3.14`
@@ -234,8 +242,11 @@ To watch runs: `kubectl --context kind-exradius -n exradius-runs get runs,pods -
 ### On a cluster
 
 Prerequisites, which the chart does not install: a storage class for the run workspaces,
-nodes with containerd 2.1 or later (image volumes), and either CloudNativePG and the
-RabbitMQ operator or an external Postgres and RabbitMQ. Create the Secrets the values name
+nodes with containerd 2.1 or later (image volumes), a network plugin that enforces
+NetworkPolicy, on Ubuntu 26.04 nodes `kernel.apparmor_restrict_unprivileged_unconfined=0`
+(docs/kubernetes.md §16), and either CloudNativePG and the RabbitMQ operator or an external Postgres
+and RabbitMQ. A registry build pods push to on a private address needs an
+`egress.allowPrivate` entry; a corporate proxy goes in `egress.upstreamProxy`. Create the Secrets the values name
 (`secretKey.existingSecret`, `admin.existingSecret`, the database, broker and object store
 credentials), then:
 

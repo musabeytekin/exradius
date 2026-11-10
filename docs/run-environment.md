@@ -34,11 +34,14 @@ Goes into `docs/architecture.md` as §14, with the table above.
 | uid 1000 as `runner`, home `/home/runner` | passwd and group files bind-mounted | no | none |
 | read-only root, no capabilities, no-new-privileges | Docker | no | none |
 | networks (`exradius-runs` + the run's own) | Docker | no | none |
+| what a run reaches (since phase 4: DNS, the egress proxy, the api's internal port) | NetworkPolicy, and the proxy's decision by the pod's phase and host (`docs/kubernetes.md` §11) | no: the policy is the chart's, the decision the proxy's, from the pod watch | none |
+| the model, repository and connection credentials | since phase 4 not in the pod: the egress proxy's routes add them | no | none |
+| the proxy for the project's tools | `HTTP(S)_PROXY`, `NO_PROXY`, `YARN_HTTP(S)_PROXY`, `JAVA_TOOL_OPTIONS`, written by the operator after the project's `env` | no: ours come last; a project's `JAVA_TOOL_OPTIONS` is kept before ours | none; a tool that reads none of them is configured in the workstation image |
 | `/work`, home, `/tmp`, state, attachments | bind mounts | no | none |
 | `safe.directory=*` | git command-line level (`GIT_CONFIG_*`) | no | none |
 | author and committer identity | `GIT_AUTHOR_*`/`GIT_COMMITTER_*` (beats all config) plus the managed global config | no | none |
 | `core.hooksPath` → the Exradius hooks | managed global config | **yes** (a repo-local value wins; husky, lefthook and `git config core.hooksPath` all write one) | §3 |
-| credential helpers for push | managed global config | partly (a repo-local helper could be added; ours still answers) | move to command-line level with the hooks path (§3) |
+| credential helpers for push | managed global config | partly (a repo-local helper could be added; ours still answers) | moved to the command-line level with the hooks path (§3); since phase 4 replaced by the proxy's git route (`insteadOf` at the command-line level) |
 | `push.autoSetupRemote`, `init.defaultBranch` | managed global config | yes, and that is fine: conveniences | none |
 | Claude Code settings written by the runtime (`includeCoAuthoredBy: false`, ...) | user-level settings in `CLAUDE_CONFIG_DIR` | **yes**: a repository's `.claude/settings.json` outranks user settings | §7 |
 | runtime bundle not on `PATH`; runner strips its own interpreter variables | runner process | not applicable | none |

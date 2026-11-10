@@ -47,6 +47,12 @@ make -C operator manifests   # regenerate the CRD into charts/exradius/files/crd
 make -C operator generate    # deepcopy
 ```
 
+Egress proxy (Go, standard library only; `egress/`):
+
+```bash
+make -C egress test          # go test -race: forward and reverse proxy, real git clone/push through it, pod watch
+```
+
 Frontend (Node 24, Vite):
 
 ```bash
@@ -106,8 +112,13 @@ The schema is strict pydantic with `extra="forbid"` in `schemas/project_config.p
   `workstation.cache` (`worker/caches.py` names them); the worker deletes it with the
   project.
 - `resolve.py` turns the config into run inputs; secrets are decrypted only there, when the
-  Run and its per-run Secret are created. Everything shown to the panel, the agent's environment section, events and logs
-  uses `$NAME` placeholders.
+  Run and its per-run Secret are created (the project's own secret variables) or for the
+  egress proxy's policy (`api/egress.py`: the provider, repository and HTTP connection
+  credentials, which never reach a pod). Everything shown to the panel, the agent's
+  environment section, events and logs uses `$NAME` placeholders.
+- `network.py` is what the agent phase may reach (`network.allow`, the install's
+  `egress.allow`, the connections' catalog `hosts`): the proxy's policy and the environment
+  section's network line come from it.
 - `catalog.py` holds the MCP connection catalog (github, postgres, slack, ...); custom
   connections use the `mcpServers` shape.
 
@@ -122,7 +133,7 @@ The schema is strict pydantic with `extra="forbid"` in `schemas/project_config.p
   `/internal/probes/{id}/*`, each authenticated by its Run's token. `PortSplit` keeps each port
   to its routes.
 - `worker/`: `main.py` consumes `exradius.tasks`, `exradius.answers` and `exradius.control`
-  (cancel, verify, test_provider, run_reported) with concurrency = prefetch count, watches the
+  (cancel, verify, test_provider, run_reported, project_deleted) with concurrency = prefetch count, watches the
   Runs and sweeps every 15 s. `intake.py` accepts or rejects; `runs.py` (`RunManager`) reads
   the config, creates the Run and its per-run Secret (`run_objects.py` builds them:
   secret-free spec, secret values by key), `settle()`s runs from Run status and the runner's
@@ -181,7 +192,22 @@ home `/home/runner`), read-only root, all capabilities dropped, no ServiceAccoun
 service links. `/work`, the home, `/tmp` and the state directory are subPaths of one
 workspace PVC per Run. Runs live in the `exradius-runs` namespace (Pod Security `baseline`),
 the stack in `exradius` (`restricted`), builds in `exradius-builds` (`privileged`: rootless
-BuildKit needs seccomp `Unconfined`; kubernetes.md §24). NetworkPolicy and the egress proxy come in phase 4.
+BuildKit needs seccomp `Unconfined`; kubernetes.md §24).
+
+**Egress (kubernetes.md §10, §11; phase 4).** Every request of a run or build pod goes through
+`exradius-egress` (`egress/`, Go, a Deployment in `exradius`): a forward proxy on 3128
+(`HTTP(S)_PROXY`, decided by host name on `CONNECT`) and an injecting reverse proxy on 3129
+(`/anthropic`, `/git/<host><path>`, `/mcp/<connection>`, `/phase`). A pod's address is its
+identity (a pod watch); setup reaches any public host, the agent phase only its model,
+repositories, connections and the allow lists; private addresses need
+`egress.allowPrivate`. Its policies come from the api's `/internal/egress/runs/{run}`
+(TokenReview of its ServiceAccount token) and its records go to `egress_records`. No pod holds
+the model key (`ANTHROPIC_BASE_URL` + `placeholder`), a repository credential (git `insteadOf`
+routes) or an HTTP connection's secret header. The operator writes the proxy variables,
+`YARN_HTTP(S)_PROXY` and `JAVA_TOOL_OPTIONS` (with Maven's
+`aether.connector.http.useSystemProperties`); the runner waits until every proxy pod sees the
+agent phase (`runner/egress.py`). NetworkPolicies (chart): run pods reach DNS, the proxy and the
+api's 8001 only.
 
 **Frontend `frontend/src/`.** React 19 + TypeScript, TanStack Router (`router.tsx`) and
 Query (`lib/queries.ts`), Tailwind 4, Radix primitives, `lib/api.ts` as the only API client.
@@ -197,6 +223,9 @@ information exists nowhere else.
 - The worker does the harness's job only: it does not commit, push, open pull requests or
   otherwise act on behalf of the agent. Delivery problems become warnings in the result.
 - Unknown keys in `exradius.yaml` are errors, not warnings; keep validators strict.
+- A tool in a run that ignores `HTTPS_PROXY` cannot reach the network (NetworkPolicy): give it
+  its own proxy setting at the operator level, as `YARN_HTTPS_PROXY` and Maven's resolver flag
+  are, rather than asking each project to configure it.
 - Tests build config repositories as local bare git repos (`tests/conftest.py`:
   `make_config_repo`, `commit_config`, `configured`); follow that pattern rather than mocking
   the git layer.

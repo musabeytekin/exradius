@@ -65,20 +65,30 @@ panel needs no change.
 
 ### 2.2 Injection, Claude Code runtime
 
-| kind / auth_method | Container environment |
-|---|---|
-| anthropic / api_key | `ANTHROPIC_API_KEY` |
-| anthropic / oauth_token | `CLAUDE_CODE_OAUTH_TOKEN` |
+Since phase 4 of the move to Kubernetes (`kubernetes.md` §10, §11) no pod holds the
+credential. The workstation gets the egress proxy's model route as `ANTHROPIC_BASE_URL`
+(`<egress>/anthropic`) and the provider's variable with the value `placeholder`; the proxy
+removes the placeholder and sends the credential the way Claude Code would itself:
+
+| kind / auth_method | Container environment | The proxy sets |
+|---|---|---|
+| anthropic / api_key | `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY=placeholder` | `x-api-key: <key>` |
+| anthropic / oauth_token | `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_OAUTH_TOKEN=placeholder` | `Authorization: Bearer <token>` |
 | anthropic_bedrock (later) | `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
 | anthropic_vertex (later) | `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`, credentials file |
 | anthropic_foundry (later) | `CLAUDE_CODE_USE_FOUNDRY=1`, `ANTHROPIC_FOUNDRY_RESOURCE`, `ANTHROPIC_FOUNDRY_API_KEY` |
 
-The worker resolves the agent's provider (or the default) when it creates the run's Run,
-decrypts the credential into the per-run Secret, and the workstation gets only that
-provider's variables (`kubernetes.md` §10). MCP servers started by
-Claude Code inherit the process environment, including these variables, which is
-acceptable in v1 (they already inherit project secrets). The run token is still scrubbed
-as before.
+Later kinds would need routes of their own (Bedrock and Vertex sign requests; the proxy
+would have to as well).
+
+The worker resolves the agent's provider (or the default) when it creates the run's Run and
+records it on the run (`runs.provider_id`); the proxy reads that provider's credential from
+the api for the run's pod (a probe's from its test). A project variable named like any of
+these (or `ANTHROPIC_BASE_URL`) is dropped. Sessions also get
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`: Claude Code's telemetry and update checks go to
+Anthropic's hosts directly, which the agent phase refuses. MCP servers started by Claude Code
+inherit the process environment, which now holds only the placeholder. The run token is still
+scrubbed as before.
 
 ### 2.3 Test
 

@@ -77,6 +77,12 @@ services:                         # dependencies started next to the agent, by h
 env:                              # project environment, in the workstation and setup
   DATABASE_URL: postgres://app:${secret:DB_PASSWORD}@postgres:5432/app
 
+network:                          # optional; what the agent may reach besides its model,
+  allow:                          # repositories and connections (setup reaches any host)
+    - repo.maven.apache.org
+    - pypi.org
+    - '*.pythonhosted.org'        # quoted: * starts a YAML alias
+
 notes: |                          # quoted in the environment section; optional
   Python services: uv run pytest in the service directory. Java: mvn test per module.
 
@@ -137,6 +143,14 @@ Rules:
   (docs/run-environment.md §5).
 - A service's `command` is a non-empty list of strings (numbers quoted; `""` is an
   argument), the container's arguments; there is no `entrypoint` key.
+- `network.allow` entries are host names (`pypi.org`), `*.` and a name for every name below
+  it (`*.pythonhosted.org`, not `pythonhosted.org` itself), or IPv4 addresses; not URLs, not
+  `host:port` (every port of an allowed host is allowed), not a bare `*`, not `localhost`
+  (the run's own services need no entry), each listed once. During setup a run reaches any
+  public host; in the agent phase only its model, its repositories, its connections (with
+  their catalog hosts), the install's `egress.allow` and these. The environment section names
+  the list; a refused host is a `403` naming it, and the task page lists it
+  (docs/kubernetes.md §11).
 - Unknown keys anywhere are errors (typos must not pass silently). `version` must be 1.
 
 ### 2.1 Bridge files
@@ -233,7 +247,10 @@ The catalog moves from the panel to the backend (`exradius/catalog.py`): each en
 a key, a name, a description, the transport, `command`/`args` or `url`, the config keys
 it accepts (`required` and `optional`, each with a label and where it goes: an env
 variable, a header with a format, or an argument), and `requires` (a launcher such as
-`npx` or `uvx`, reported as a warning when the workstation is the default image).
+`npx` or `uvx`, reported as a warning when the workstation is the default image), and
+`hosts`: what it reaches besides its URL, which the agent phase allows (the package registry
+the launcher downloads it from, the service's API; a config key marked `host`, such as
+GitLab's `api_url` or Jira's `url`, adds its URL's host).
 Entries: github, gitlab, postgres, slack, sentry, linear, jira, fetch, playwright,
 filesystem (`/work` default). A catalog connection with a missing required key, or an
 unknown key, is a validation error naming the connection and the key.

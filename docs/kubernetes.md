@@ -1,7 +1,8 @@
 # Exradius on Kubernetes
 
 Status: agreed design, 2026-11-08; details settled by phase 1 folded in the same day (§23),
-by phase 2 on 2026-11-09 (§24) and by phase 3 the same day (§25). Supersedes the Docker-based execution of `architecture.md`
+by phase 2 on 2026-11-09 (§24), by phase 3 the same day (§25) and by phase 4 on 2026-11-10
+(§26). Supersedes the Docker-based execution of `architecture.md`
 (§3, §5, §9, §10, the run-container parts of §12), `runtime-bundles.md` §2.2, the services
 lifecycle and networks of `environment-and-services.md` §2, and the memory budget and cache
 mounts of `run-environment.md` §4 and §5. The phases are in `kubernetes-plan.md`. The last
@@ -67,10 +68,10 @@ reset.
 
 | Component | Kind | Holds | May do in Kubernetes | May not |
 |---|---|---|---|---|
-| `api` | Deployment, `exradius-backend` image | master key, Postgres | create TokenReviews (to authenticate the egress proxy) | touch Runs, pods or Secrets |
+| `api` | Deployment, `exradius-backend` image | master key, Postgres | create TokenReviews (to authenticate the egress proxy; `system:auth-delegator`) | touch Runs, pods or Secrets |
 | `worker` | Deployment, same image | master key, Postgres, broker | in `exradius-runs`: create, patch, delete and watch `Run`; create, patch and delete Secrets (no get or list); list and delete PVCs. In `exradius-builds`: create, get, watch and delete `Build`; create, patch and delete Secrets (the Build's token). Read the operator's Lease | create pods; read Secrets |
 | `operator` | Deployment, Go (controller-runtime) | nothing secret | in `exradius-runs`: create, watch and delete pods and PVCs; in `exradius-builds`: create, watch and delete pods. In both: read `pods/log`; update `runs/status` or `builds/status`; write Events. Its leader-election Lease | read Secrets; reach Postgres or the broker |
-| `egress` | Deployment, Go | decrypted credentials of active runs, in memory only | list and watch pods in `exradius-runs` | anything else |
+| `egress` | Deployment, Go | decrypted credentials of active runs, in memory only | list and watch pods in `exradius-runs` and `exradius-builds` | anything else |
 | run pod | Pod per Run | the per-run Secret (§10) | nothing: `automountServiceAccountToken: false`, and NetworkPolicy blocks the API server | reach anything but the proxy, the api's internal port and DNS |
 | build pod | Pod per Build | its Build's token (for the context); registry push identity from phase 6 | nothing: no ServiceAccount token | |
 | `frontend` | Deployment, nginx | nothing | nothing | |
@@ -161,7 +162,7 @@ spec:
       - {name: DATABASE_URL, secretKey: env.DATABASE_URL}
     caches: [{path: /home/runner/.cache/uv, name: 0-cache_uv}]   # caches/<name> on the project volume
   repositories:
-    - {folder: saleor, url: "https://github.com/acme/saleor.git", branch: main, push: true}
+    - {folder: saleor, url: "https://github.com/acme/saleor.git", branch: main, push: true}   # no credential: §10
   services:
     - name: db
       image: postgres:16
@@ -171,9 +172,7 @@ spec:
       ready: {exec: [pg_isready, -U, app]}        # or {tcp: 5432}; absent: started when it runs
       memory: 512Mi
   git:                               # computed by git_identity.py, non-secret
-    env: [{name: GIT_AUTHOR_NAME, value: Developer}, ...]
-  network:                           # phase 4: what the proxy allows in the agent phase
-    allow: [registry.npmjs.org, pypi.org]
+    env: [{name: GIT_AUTHOR_NAME, value: Developer}, ...]   # and each repository's insteadOf route
   cancel: false
   podGeneration: 0                   # bumped by the worker to recreate a lost pod (§8.3)
 status:
@@ -368,12 +367,11 @@ worker does today.
   An explicit `--local` would fail instead: git then refuses to fall back to copying when a
   hard link fails (`EXDEV` between mounts).
 - Without a project volume, each clone fetches straight from the remote.
-- **Credentials:**
-  - Phases 1–3: the repository's credential comes from the per-run Secret as `http.extraHeader`
-    for the fetch, as for mirrors today. Push uses the credential helper at the git
-    command-line level, as today.
-  - From phase 4: no credential is in the pod. A command-line `url.<proxy>.insteadOf` sends the
-    repository's URL to the egress proxy, which adds the credential (§11).
+- **Credentials:** none in the pod. A command-line `url.<proxy route>.insteadOf=<url>` sends
+  each repository's URL to the egress proxy's git route (`/git/<host><path>`), which adds the
+  credential (§11): in the clone containers for the mirror's fetch and the clone, and in the
+  workstation for the agent's fetch and push. Phases 1–3 put the credential in the per-run
+  Secret instead (`http.extraHeader` for clones, a credential helper for push).
 
 ### 7.6 The project volume: mirrors and caches
 
@@ -430,8 +428,10 @@ The operator writes these and the Run spec cannot change them:
 
 The workstation's env is: the project's `env`, the exported service secrets
 (`resolve.exported_secrets`, as today), `GIT_*` from the Run spec, `EXRADIUS_RUN_TOKEN`,
-`EXRADIUS_API_URL` (the internal port), the provider variables until phase 4, and the proxy
-variables from phase 4. The runner's `isolate()` is unchanged.
+`EXRADIUS_API_URL` (the internal port), the provider's placeholder and `ANTHROPIC_BASE_URL`,
+the proxy variables (`HTTP(S)_PROXY`, `NO_PROXY`, `YARN_HTTP(S)_PROXY`, `JAVA_TOOL_OPTIONS`,
+§11) and the runner's route to the proxy (`EXRADIUS_EGRESS_URL`, `EXRADIUS_EGRESS_PEERS`),
+which `isolate()` keeps out of the agent's environment with the run token.
 
 ## 8. The run lifecycle on Kubernetes
 
@@ -538,8 +538,9 @@ the only one NetworkPolicy lets a run pod reach. It uses the per-run token, as t
   `runs.token_hash` stays.
 - Verify and probe Runs get their own token the same way (§13).
 - Other internal routes on the same port:
-  - `/internal/egress/...` for the proxy (§11), authenticated by the proxy's ServiceAccount
-    token through a TokenReview with audience `exradius-api`;
+  - `/internal/egress/runs/{run}` and `/internal/egress/records` for the proxy (§11),
+    authenticated by the proxy's ServiceAccount token through a TokenReview with audience
+    `exradius-api` (remembered five minutes per token);
   - `/internal/builds/{id}/context` for build pods (§12), authenticated by a per-Build token.
 
 ## 10. Secrets
@@ -549,9 +550,9 @@ decrypted by the worker at Run creation, or by the api when a component asks for
 
 | Secret | Phases 1–3 | From phase 4 |
 |---|---|---|
-| model credential (provider) | per-run Secret → env (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`), as today | **never in the pod.** `ANTHROPIC_BASE_URL` points at the proxy and the variable holds a placeholder; the proxy swaps in the provider's credential |
+| model credential (provider) | per-run Secret → env (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`), as today | **never in the pod.** `ANTHROPIC_BASE_URL` points at the proxy and the variable holds `placeholder`; the proxy swaps in the provider's credential (`oauth_token` checked end to end on 2026-11-10; `api_key` so far only by the header Claude Code sends, §26) |
 | repository credential (clone, push) | per-run Secret → `http.extraHeader` for clones, the command-line credential helper for push | **never in the pod.** `insteadOf` to the proxy, which injects it and refuses `git-receive-pack` for a repository without `push: true` |
-| HTTP connection headers with `${secret:…}` | in `/spec`, as today | the runner points the connection at the proxy and drops those headers; the proxy adds them |
+| HTTP connection headers with `${secret:…}` | in `/spec`, as today | the api gives the pod the proxy's `/mcp/<name>` route without those headers (in `/spec` and the verify spec); the proxy adds them |
 | stdio connection env (`GITHUB_TOKEN` for a local server, a postgres DSN) | in `/spec`, as today | the same. The server process needs it, so the agent can read it; a known gap, as today |
 | `env` and service `env` values with secrets | per-run Secret, referenced by key | the same. Services need them at container start |
 | run token | per-run Secret | the same |
@@ -567,66 +568,125 @@ decrypted by the worker at Run creation, or by the api when a component asks for
 
 ## 11. The egress proxy and NetworkPolicy
 
-Designed here from `ideas.md` ("Exradius's own egress proxy"), which it replaces. It is a Go
-binary, `exradius-egress`, a Deployment in `exradius`, with two listeners:
+Every request of a run or build pod goes through `exradius-egress`, a Go binary
+(`egress/`, standard library only), one Deployment in `exradius` (`egress.replicas`, default
+1), with two listeners behind the Service `exradius-egress`:
 
-- **Forward proxy, :3128.** `HTTP_PROXY`/`HTTPS_PROXY` (and lower case) point at it.
-  `NO_PROXY` covers `localhost`, `127.0.0.1`, the service names and the api's internal host.
-  For `CONNECT` it decides on the host name and port, so nothing is decrypted. The operator
-  also sets `JAVA_TOOL_OPTIONS` with `-Dhttp(s).proxyHost/Port` and `-Dhttp.nonProxyHosts`.
-  Tools that read neither must be configured in the workstation image, for example Maven's
-  `<proxies>` in `settings.xml`. Verify shows that, and the skill learns it.
+- **Forward proxy, :3128.** `HTTP_PROXY`/`HTTPS_PROXY` (and lower case) point at it. For
+  `CONNECT` it decides on the host name and port, so nothing is decrypted; plain HTTP requests
+  in absolute form are decided the same way and forwarded.
 - **Injecting reverse proxy, :3129.** Routes it forwards upstream over HTTPS with the real
-  credential:
-  - `/anthropic/` → the provider's endpoint;
-  - `/git/<host>/<path>` → the repository;
-  - `/mcp/<connection>/` → an HTTP connection's URL.
+  credential, after removing any `Authorization`, `X-Api-Key` and `Proxy-Authorization` the
+  pod sent:
+  - `/anthropic/...` → the provider's endpoint, with `x-api-key` (an API key) or
+    `Authorization: Bearer` (a subscription token); agent phase only;
+  - `/git/<host[:port]><path>/...` → the repository, with HTTP Basic; git's own paths only
+    (`info/refs`, `git-upload-pack`, `git-receive-pack`, `HEAD`, `objects/`, `info/`); a push
+    to a repository without `push: true` gets an `ERR` packet, which git prints as `fatal:
+    remote error: pushing to <url> is not allowed for this task (push: false)`; an upstream
+    `401` becomes a `403`, so git never prompts; both phases;
+  - `/mcp/<connection>` → an HTTP connection whose headers hold a secret, with those
+    headers; agent phase only;
+  - `GET /phase` → what the proxy sees of the calling pod (`{"run", "pod", "phase"}`).
+- **The pod's variables** (operator, §7.8), in every run container after the project's own:
+  `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (`localhost`, `127.0.0.1`, `::1`, every service
+  name, the api's internal host and the proxy's), the same in lower case, and
+  `YARN_HTTP_PROXY`/`YARN_HTTPS_PROXY` (Yarn 2 and later read only those). Setup containers and
+  the workstation also get `JAVA_TOOL_OPTIONS` with `-Dhttp(s).proxyHost/Port`,
+  `-Dhttp.nonProxyHosts` and `-Daether.connector.http.useSystemProperties=true`, which makes
+  Maven 3.9's resolver use them (it reads only `settings.xml` otherwise); a project's own
+  `JAVA_TOOL_OPTIONS` comes first. A tool that reads none of these must be configured in the
+  workstation image; Verify's diagnosis says so when a setup command times out connecting.
 
-**Run identity is the source address.** The proxy watches the pods in `exradius-runs`. A pod IP
-maps to its Run, so the pod's credentials and allowlist apply. The pod's init container states
-give its phase: setup until the last `setup-*` has ended, agent after that.
+**Run identity is the source address.** The proxy lists and watches the pods of
+`exradius-runs` (label `exradius.dev/run`) and of `exradius-builds` (`exradius.dev/purpose:
+build`), with the Kubernetes API over plain HTTP (no client-go). A pod IP maps to its Run, so
+the Run's credentials and allowlist apply; a request from an address the watch does not know
+waits up to 10 s for it, then is refused.
 
+- **The phase** comes from the pod: setup while any init container that is not a sidecar
+  (`prepare`, `clone-*`, `setup-*`) has not terminated; agent once they all have, or the
+  workstation has started. It only moves forward. A probe pod (no init containers) is in the
+  agent phase from the start; a build pod is in the build phase (open, like setup).
+- **The runner waits for it.** Before the agent's session starts (and before a verify pod
+  lists tools, or a probe talks to the model), the runner asks every proxy pod for `/phase`
+  (their addresses from the headless Service `exradius-egress-pods`) and goes on only when
+  each says `agent`, up to 60 s; otherwise the run fails. So no agent request is decided on
+  a status the watch has not seen yet, and a second replica is asked too.
 - There is no proxy authentication, because Java does not send Basic credentials when
-  tunnelling HTTPS.
-- Run containers have no `NET_RAW`, so they cannot spoof another source address.
-- A run's credentials and allowlist come from `GET /internal/egress/runs/{run_id}` on the api.
-  They are cached in memory until the pod goes, and never written.
+  tunnelling HTTPS. Run containers have no `NET_RAW`, so they cannot spoof another source
+  address, and NetworkPolicy keeps pods of other namespaces off the proxy.
+- **A run's policy** comes from `GET /internal/egress/runs/{run}` on the api (§9): the agent
+  phase's hosts, the model route with the provider's credential (`runs.provider_id`; a
+  probe's test provider), each repository with its credential and `push`, and each HTTP
+  connection with secret headers. Verify Runs get no model route. It is cached in memory per
+  pod for five minutes (a replaced credential takes effect then), dropped when the pod goes,
+  and never written. A failed refresh keeps the last one; an ended run gets none.
 
 **Policy:**
 
 | Phase | Allowed |
 |---|---|
-| setup: `prepare`, `clone-*`, services, `setup-*` | any host. Chained to `egress.upstreamProxy` when values name a corporate proxy |
-| agent: the workstation, and the services from then on | the model route; the repositories' routes; the hosts of declared HTTP connections; catalog connections' hosts (`catalog.py` gains `hosts`, for example `api.githubcopilot.com`, `api.github.com`); the install-wide `egress.allow`; the config's new `network.allow` |
+| setup: `prepare`, `clone-*`, services, `setup-*`; and builds | any host, except private and cluster-internal addresses |
+| agent: the workstation, and the services from then on | the model route; the repositories' routes; the agent's HTTP connections; the hosts below |
 
-- `network.allow: [hosts]` is a new optional key in `exradius.yaml`: host names, with a leading
-  `*.` for subdomains. It is validated strictly, like every key. It is where a project names
-  its package registries (`registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org`) and the
-  hosts its custom stdio connections reach. The skill writes it for the package managers it
-  finds.
+- **The agent phase's hosts** (`exradius.network.allowed_hosts`): the install's `egress.allow`,
+  then the config's `network.allow`, then the agent's connections' hosts: a catalog entry's
+  `hosts` (the package registry its launcher downloads it from, the service's API), the host of
+  a catalog config key marked `host` (GitLab's API URL, the Jira URL), and the URL host of an
+  HTTP connection without secret headers. Names match exactly, or `*.domain` matches every
+  name below it. The model and the repositories are not on it: they have routes.
+- `network.allow: [hosts]` is an optional key in `exradius.yaml`: host names or IPv4
+  addresses, `*.` for subdomains, no URLs, ports or a bare `*` (config-repo.md §2). It is where
+  a project names its package registries and the hosts its custom stdio connections reach.
+- **Private and cluster-internal addresses** (10/8, 172.16/12, 192.168/16, 100.64/10, loopback,
+  link-local with the cloud metadata address, multicast, IPv6 ULA and link-local) are refused
+  in every phase, after resolving the name and dialling the checked address (no DNS
+  rebinding), unless values `egress.allowPrivate` lists the CIDR or `host[:port]`: an internal
+  package mirror, or the registry build pods push to. The reverse routes go where the config
+  says and are not checked.
+- **Upstream proxy.** With `egress.upstreamProxy` (`http(s)://[user:password@]host:port`, or
+  from a Secret), every outbound connection of the forward proxy and the routes goes through
+  it (`CONNECT`, with `Proxy-Authorization` from the URL), except `egress.upstreamNoProxy`; a
+  name that does not resolve locally is the upstream's to resolve. `egress.caBundle` adds an
+  intercepting upstream's CA to the proxy's own TLS.
 - **The environment section** replaces "Outbound network access is available." with
-  "Outbound network access is limited to: <hosts>." The list is generated from the same set.
-- **Audit.** Every request (run, phase, host, port, route, method and path for reverse routes,
-  allowed or refused, bytes, duration) is batched to the api and stored in a new
-  `egress_records` table. The task page lists hosts reached and refused.
-  - The proxy logs the refusal reason; the agent sees a `403` with a one-line reason, so it can
-    say in its result what was blocked.
-- **Known gap:** DNS queries go to the cluster DNS, so a run can still leak data through query
-  names. Recorded, not addressed.
+  "Outbound network access is limited to the repositories above and to: <hosts>." (or a
+  variant without repositories or hosts), from the same list.
+- **Refusals.** The agent sees `403` with the reason as the status line's text and the body:
+  `<host> is not on this task's network allowlist (network.allow)`, `<host> resolves to a
+  private or cluster-internal address`. curl prints `CONNECT tunnel failed, response 403` (the
+  reason with `-v`), Python and Go clients print the reason.
+- **Audit.** Every request (run, phase, route, method, host, port, path without the query,
+  allowed or refused with the reason, status, bytes each way, duration) is batched to
+  `POST /internal/egress/records` (every 2 s or 200 records; up to 20000 kept while the api
+  is away) and stored in `egress_records` (`kind` task, verify or probe, and the object's id).
+  Build pods' requests are not recorded. `GET /api/tasks/{id}/network` sums them per host, and
+  the task page's Network tab lists hosts refused (with the reason) and reached (phases,
+  routes, requests, bytes). The proxy logs refusals; `egress.logLevel: debug` logs every
+  request.
+- **Known gaps:** DNS queries go to the cluster DNS, so a run can still leak data through
+  query names; protocols that are not HTTP (a postgres MCP connection to an external
+  database, SSH remotes) cannot go through the proxy and are refused by NetworkPolicy; a
+  stdio connection's secret environment is in the pod, as before.
 
-**NetworkPolicy** (phase 4, in the chart):
+**NetworkPolicy** (`charts/exradius/templates/networkpolicies.yaml`, values
+`networkPolicy.enabled`, default on):
 
 | Policy | Rule |
 |---|---|
-| run pods (`exradius.dev/run` label) | deny all ingress; egress only to kube-dns (53/UDP and TCP), the egress pods (3128, 3129) and the api pods on 8001 |
-| build pods | egress to the api on 8001, to the registry, and through the proxy or directly as `builds.egress` says; no ingress |
-| api | ingress on 8001 only from run, build and egress pods; 8000 from the frontend and the ingress controller |
-| egress | ingress from run pods; egress anywhere (or to the upstream proxy) |
+| run pods (`exradius.dev/run`) | no ingress; egress only to the cluster DNS (values `networkPolicy.dns`), the egress pods on 3128 and 3129, and the api pods on 8001 |
+| build pods (`exradius.dev/purpose: build`) | no ingress; egress to the DNS, the api on 8001 and, with `builds.egress: proxy` (default), the egress pods on 3128; with `direct`, anywhere but `networkPolicy.clusterCIDRs` |
+| api | ingress on 8001 only from run, build and egress pods; on 8000 from the frontend and `networkPolicy.apiFrom` (an ingress controller) |
+| egress | ingress on 3128 and 3129 from run and build pods; egress anywhere |
 
 A run therefore cannot reach the Kubernetes API, the stack's Postgres, RabbitMQ, other runs or
-the internet directly. Phase 4's checks prove each of these on kind, whose network plugin
-(kindnet with kube-network-policies) enforces NetworkPolicy. Docker Desktop's kubeadm cluster
-does not; it was checked on 2026-11-08.
+the internet directly; this was checked from a run's shell on kind (kindnet's
+kube-network-policies) and from a Verify pod's shell on k3s (flannel with its own
+controller). Kubelet probes are not affected (the api's readiness on both, a service's `tcp`
+check on kind). Docker Desktop's kubeadm cluster
+enforces no NetworkPolicy (checked on 2026-11-08); the proxy's credentials and decisions still
+hold there, but a container that ignores the proxy variables reaches anything.
 
 ## 12. Image builds and the registry
 
@@ -828,6 +888,14 @@ probes become a Run with `purpose: probe`:
 - **Prerequisites** are not part of the chart: CloudNativePG and the RabbitMQ operator when the
   in-cluster stack services are used; a CSI storage class; a network plugin that enforces
   NetworkPolicy; for gVisor, a RuntimeClass.
+- **Nodes on Ubuntu 26.04** (or any host with AppArmor's
+  `kernel.apparmor_restrict_unprivileged_unconfined=1`) need that sysctl set to `0`, kept in
+  `/etc/sysctl.d/`. With it on, containerd's default profile is stacked with `unconfined`
+  (processes show `cri-containerd.apparmor.d//&unconfined`) and the kernel denies signals
+  between a container's own processes: Postgres hangs (the stack's CNPG `initdb`, a run's
+  `postgres` service), Go programs log denials and survive. Pods started before the change
+  keep the stacked profile until they restart. Found on the k3s test server (§26); cloud
+  node images on Ubuntu 26.04 are expected to need the same.
 
 Values files: `values.yaml` (defaults), `values-local.yaml`, and from phase 6
 `values-eks.yaml`, `values-gke.yaml`, `values-aks.yaml`. The main keys:
@@ -851,9 +919,12 @@ runs:
   imagePullSecrets: []
 runtime: {claudeCode: {image: ...}}
 projectDefaultImage: ...
-egress: {upstreamProxy: "", allow: [], caBundle: {configMap: ""}}
+egress: {replicas: 1, allow: [], allowPrivate: [], upstreamProxy: "", upstreamProxySecret: {name: "", key: url},
+         upstreamNoProxy: [], caBundle: {configMap: "", key: ca.crt}, logLevel: info}
+networkPolicy: {enabled: true, dns: {namespace: kube-system, podLabels: {k8s-app: kube-dns}}, apiFrom: [],
+                clusterCIDRs: []}
 builds: {registry: ..., builderImage: moby/buildkit:<pinned>-rootless, cache: true, insecureRegistries: [],
-         resources: {}, credentialHelper: none}   # credentialHelper: phase 6
+         resources: {}, egress: proxy, credentialHelper: none}   # credentialHelper: phase 6
 objectStore: {kind: s3, bucket: exradius, s3: {endpoint: ...}, inCluster: {seaweedfs: true}}
 postgres: {existingSecret: ..., inCluster: {cloudnativepg: true, storage: 10Gi}}
 rabbitmq: {existingSecret: ..., inCluster: {operator: true}}
@@ -1214,3 +1285,75 @@ Details decided while building services, resources, caches and Verify parity (20
   (naming `services.<name>.image`).
 - **Removed:** the panel's cache size, `ProjectConfig.memory_reservation`, the warning that
   caches are ignored, the "services are not available yet" block.
+
+## 26. Settled in phase 4
+
+Details decided while building the egress proxy, NetworkPolicy and credential injection
+(2026-11-10). §5, §7, §9–§11 and §16 are written to match; this is the list.
+
+- **The probe came first.** Before anything was built, a throwaway proxy in the kind api pod
+  and a pod with the bundle ran `exradius-runner --probe` with `ANTHROPIC_BASE_URL` at the
+  proxy and a placeholder: with the user's `oauth_token` provider Claude Code sent
+  `Authorization: Bearer <placeholder>` to the base URL and the session worked once the proxy
+  swapped in the token; with `ANTHROPIC_API_KEY=placeholder` it sent `x-api-key:
+  <placeholder>`. Claude Code also opened five `CONNECT api.anthropic.com:443` of its own
+  (telemetry, update checks); `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in every session
+  removes them.
+- **The Run spec** loses `repositories[].credentialKey`; `runtime.env` holds literal values
+  (`ANTHROPIC_BASE_URL`, the placeholder) and `git.env` the `insteadOf` routes. The per-run
+  Secret holds `token`, `env.<NAME>` and `service.<name>.<NAME>` only. The design's
+  `spec.network.allow` was not added: the proxy reads a run's policy from the api, not from
+  Runs (its RBAC is pods only), so the list would only have been a copy.
+- **`runs.provider_id`** records the provider resolved when the Run was created (migration
+  `0008`, with `egress_records`): the proxy's model route uses its credential, so a change of
+  the default provider during a run does not move the run.
+- **The proxy** is standard library only, including its pod watch (list, watch with
+  bookmarks, relist after `410`), so the module has no dependencies. One replica by
+  default; the runner asks every replica (headless Service `exradius-egress-pods`) before the
+  agent phase starts, so more replicas keep the guarantee.
+- **The phase** is from the pod's container statuses, and the runner waits for `/phase` to
+  say `agent` (60 s) rather than telling the proxy itself: a pod can only ever be seen
+  further along, never put itself back into setup.
+- **Private addresses** are refused in every phase unless `egress.allowPrivate` names them:
+  the design said "any host" for setup, which would have let a setup command reach the
+  stack's Postgres through the proxy. kind's values allow `kind-registry:5000` for build
+  pushes.
+- **Builds go through the proxy** by default (`builds.egress: proxy`): buildkitd by its
+  environment, RUN steps by BuildKit's predefined proxy build arguments (kept out of images
+  and cache keys). Their NetworkPolicy then needs no cluster CIDRs. The context fetch goes to
+  the api directly.
+- **HTTP connections** with secret headers are routed by the api (`/spec`, the verify spec),
+  not by the runner, so the secret never leaves the api for the pod.
+- **Found on kind with the real projects:** Yarn 4 ignores `HTTP(S)_PROXY` (Outline's `yarn
+  install` died on the direct connection NetworkPolicy drops), so the operator also sets
+  `YARN_HTTP(S)_PROXY`; Maven 3.9 ignores Java's proxy properties (bank: "Network is
+  unreachable"), and `-Daether.connector.http.useSystemProperties=true` in
+  `JAVA_TOOL_OPTIONS` makes its resolver use them (`aether.transport.http.useSystemProperties`
+  does not, on 3.9). npm, pnpm, uv, pip, curl, git and Claude Code use `HTTPS_PROXY` as they
+  are. bank's build tries Google's Maven Central mirror first
+  (`maven-central.storage-download.googleapis.com`), which its `network.allow` now names; the
+  task page showed the 215 refusals.
+- **`git remote -v` shows the route**, because git expands `insteadOf` there; `origin` in the
+  clone's config stays the plain URL.
+- **Kubelet probes** (a service's `tcp` check, the stack's readiness probes) pass under the
+  deny-all ingress policies on kind.
+- **k3s, the portability check:** the chart installed on the k3s test server (one node,
+  k3s v1.37.2, flannel and k3s's own NetworkPolicy controller, local-path storage) with only a
+  values file. Its config repository was an in-cluster `git daemon` and its repository a
+  public GitHub one, so no credential was needed. Two Verify runs held in the agent phase gave
+  the kind results from a pod's shell:
+  - direct connections were closed to the internet, the Kubernetes API, the stack's Postgres
+    and RabbitMQ, the other run's pod and the api's 8000; 8001 and the proxy were open;
+  - the proxy knew the pod by its flannel address and saw it in the agent phase;
+  - `example.com` was allowed in setup and refused in the agent phase with the `403` that
+    names it, and `pypi.org` (listed) was allowed;
+  - the clone and a fetch through the git route worked, and a push was refused (`push:
+    false`).
+- **Ubuntu 26.04 hosts:** on the k3s server the stack's Postgres never finished `initdb`. The
+  host's `kernel.apparmor_restrict_unprivileged_unconfined=1` makes containerd's default
+  profile stack with `unconfined`, and the kernel then denied signals between a container's
+  own processes (118 `operation="signal"` denials from `postgres`, `SIGURG` from every Go
+  process). With the sysctl at `0` (Ubuntu 26.04, kernel 7.0.0, k3s's containerd v2.3.7),
+  Postgres initialised in 16 s and a run's `postgres` service started. §16 lists it as a node
+  requirement.
+
