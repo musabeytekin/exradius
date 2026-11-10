@@ -22,10 +22,10 @@ ports:
     expose:
       default: false
 service:
-  type: LoadBalancer
-logs:
-  access:
-    enabled: false
+  spec:
+    type: LoadBalancer
+accessLog:
+  enabled: false
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65532
