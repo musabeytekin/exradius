@@ -4,6 +4,9 @@
 #   tilt up                        # build, install and live-update (repository root)
 #   make -C deploy/kind dev-down   # delete the cluster and the registry
 #
+#   make -C deploy/kind dev-seccomp  # the build pods' seccomp profile on the node (builds.seccompProfile)
+#   make -C deploy/kind dev-gvisor   # gVisor (runsc) in the node and a RuntimeClass "gvisor" (runs.runtimeClassName)
+#
 # Without Tilt: `make -C deploy/kind images install` builds every image with tag $(TAG),
 # pushes it to the local registry and installs the chart with values-local.yaml.
 #
@@ -17,7 +20,7 @@ TAG ?= 0.2.0
 # The Python package version, which the runtime bundle checks (backend/pyproject.toml).
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' $(ROOT)/backend/pyproject.toml | head -1)
 
-.PHONY: dev-up dev-down images install uninstall e2e
+.PHONY: dev-up dev-down dev-seccomp dev-gvisor images install uninstall e2e
 
 dev-up:
 	./dev-up.sh
@@ -25,6 +28,18 @@ dev-up:
 dev-down:
 	-kind delete cluster --name exradius
 	-docker rm -f kind-registry
+
+# deploy/seccomp/buildkit.json as /var/lib/kubelet/seccomp/exradius/buildkit.json on every
+# node: values builds.seccompProfile: exradius/buildkit.json then runs build pods with it.
+dev-seccomp:
+	for node in $$(kind get nodes --name exradius); do \
+	  docker exec $$node mkdir -p /var/lib/kubelet/seccomp/exradius && \
+	  docker exec -i $$node cp /dev/stdin /var/lib/kubelet/seccomp/exradius/buildkit.json < $(ROOT)/deploy/seccomp/buildkit.json || exit 1; \
+	  echo "$$node: /var/lib/kubelet/seccomp/exradius/buildkit.json"; \
+	done
+
+dev-gvisor:
+	./dev-gvisor.sh
 
 images:
 	docker build -f $(ROOT)/deploy/backend.Dockerfile -t $(REGISTRY)/exradius-backend:$(TAG) $(ROOT)

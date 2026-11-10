@@ -61,6 +61,7 @@ spec:
             - --build-service-account=exradius-build
             - --buildkitd-configmap={{ if .Values.builds.insecureRegistries }}exradius-buildkitd{{ end }}
             - --build-resources={{ .Values.builds.resources | default dict | toJson }}
+            - --build-seccomp-profile={{ .Values.builds.seccompProfile }}
             - --workers={{ .Values.operator.workers }}
             - --leader-elect={{ .Values.operator.leaderElect }}
             - --leader-election-id=exradius-operator

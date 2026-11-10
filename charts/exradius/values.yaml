@@ -196,6 +196,14 @@ builds:
   # needs an egress.allowPrivate entry. direct: they reach them themselves, and
   # networkPolicy.clusterCIDRs keeps them off the cluster's own addresses.
   egress: proxy
+  # Rootless BuildKit creates a user namespace and mounts inside it, which the runtime's
+  # default seccomp profile refuses. Empty: the build container runs with seccomp and
+  # AppArmor Unconfined, and exradius-builds is labelled Pod Security "privileged". A
+  # Localhost profile, relative to the kubelet's seccomp directory (for example
+  # exradius/buildkit.json: deploy/seccomp/buildkit.json copied to
+  # /var/lib/kubelet/seccomp/exradius/ on every node that runs builds): RuntimeDefault plus
+  # those calls, and exradius-builds at "baseline" (docs/kubernetes.md §12).
+  seccompProfile: ""
 
 crds:
   # The Run and Build CRDs, kept on uninstall (helm.sh/resource-policy: keep) and upgraded

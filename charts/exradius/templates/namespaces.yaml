@@ -21,9 +21,15 @@ metadata:
   name: {{ .Values.namespaces.builds }}
   labels:
     {{- include "exradius.labels" . | nindent 4 }}
-    # Rootless BuildKit needs seccomp and AppArmor unconfined: rootlesskit creates a user
-    # namespace, which seccomp RuntimeDefault refuses, with or without hostUsers: false
-    # (checked on kind, docs/kubernetes.md §24). Phase 5 may try a Localhost profile.
+    {{- if .Values.builds.seccompProfile }}
+    # Build pods use the node's Localhost seccomp profile (builds.seccompProfile).
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    {{- else }}
+    # Rootless BuildKit needs seccomp and AppArmor unconfined without a Localhost profile:
+    # rootlesskit creates a user namespace and mounts in it, which seccomp RuntimeDefault
+    # refuses, with or without hostUsers: false (docs/kubernetes.md §12, §24).
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/enforce-version: latest
+    {{- end }}
 {{- end }}

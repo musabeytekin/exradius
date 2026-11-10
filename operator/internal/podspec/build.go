@@ -59,6 +59,11 @@ type BuildConfig struct {
 	Proxy string
 	// NoProxy are the hosts a build reaches directly (the api's internal host).
 	NoProxy []string
+	// SeccompProfile is a Localhost seccomp profile for the build container, relative to
+	// the kubelet's seccomp directory (deploy/seccomp/buildkit.json, installed on every
+	// node). With it the build pod fits Pod Security baseline; empty: seccomp and AppArmor
+	// Unconfined, which needs privileged (docs/kubernetes.md §12).
+	SeccompProfile string
 }
 
 // proxyVars are the proxy variables of a build, upper and lower case.
@@ -226,15 +231,26 @@ func (c BuildConfig) buildContainer(build *v1.Build) corev1.Container {
 		Env:             append(env, c.proxyEnv()...),
 		Resources:       c.Resources,
 		VolumeMounts:    mounts,
-		// Rootless BuildKit creates a user namespace (rootlesskit), which seccomp
-		// RuntimeDefault refuses, and maps its subordinate ids with the setuid newuidmap
-		// (no allowPrivilegeEscalation: false). The runtime's default capabilities stay:
-		// they bound what root has inside that namespace, which RUN steps need (chown).
-		SecurityContext: &corev1.SecurityContext{
-			ReadOnlyRootFilesystem: ptr.To(true),
-			RunAsNonRoot:           ptr.To(true),
-			SeccompProfile:         &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
-			AppArmorProfile:        &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined},
-		},
+		SecurityContext: c.buildSecurityContext(),
 	}
+}
+
+// buildSecurityContext: rootless BuildKit creates a user namespace (rootlesskit) and mounts
+// inside it, which seccomp RuntimeDefault refuses, and maps its subordinate ids with the
+// setuid newuidmap (no allowPrivilegeEscalation: false). The runtime's default
+// capabilities stay: they bound what root has inside that namespace, which RUN steps need
+// (chown). The Localhost profile is RuntimeDefault plus exactly those calls; without it
+// both seccomp and AppArmor are off.
+func (c BuildConfig) buildSecurityContext() *corev1.SecurityContext {
+	sc := &corev1.SecurityContext{
+		ReadOnlyRootFilesystem: ptr.To(true),
+		RunAsNonRoot:           ptr.To(true),
+	}
+	if c.SeccompProfile != "" {
+		sc.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeLocalhost, LocalhostProfile: ptr.To(c.SeccompProfile)}
+		return sc
+	}
+	sc.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}
+	sc.AppArmorProfile = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined}
+	return sc
 }

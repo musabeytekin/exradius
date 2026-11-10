@@ -56,5 +56,8 @@ builds:
   # through its hosts.toml.
   registry: kind-registry:5000
   insecureRegistries: [kind-registry:5000]
+  # Installed on the node by dev-up (make -C deploy/kind dev-seccomp): exradius-builds runs
+  # at Pod Security baseline.
+  seccompProfile: exradius/buildkit.json
   resources:
     requests: {cpu: 250m, memory: 512Mi}

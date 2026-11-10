@@ -419,6 +419,29 @@ func TestBuildPodSecurity(t *testing.T) {
 	}
 }
 
+// With the node's Localhost profile the build container fits Pod Security baseline: no
+// Unconfined seccomp or AppArmor, nothing privileged, no host namespaces or paths.
+func TestBuildPodWithSeccompProfile(t *testing.T) {
+	c := buildConfig()
+	c.SeccompProfile = "exradius/buildkit.json"
+	pod := c.BuildPod(build())
+	sc := pod.Spec.Containers[0].SecurityContext
+	if sc.SeccompProfile.Type != corev1.SeccompProfileTypeLocalhost || *sc.SeccompProfile.LocalhostProfile != "exradius/buildkit.json" {
+		t.Fatalf("seccomp %+v", sc.SeccompProfile)
+	}
+	if sc.AppArmorProfile != nil || sc.Privileged != nil || (sc.Capabilities != nil && len(sc.Capabilities.Add) > 0) {
+		t.Fatalf("beyond baseline: %+v", sc)
+	}
+	if pod.Spec.HostNetwork || pod.Spec.HostPID || pod.Spec.HostIPC {
+		t.Fatal("host namespaces")
+	}
+	for _, v := range pod.Spec.Volumes {
+		if v.HostPath != nil {
+			t.Fatalf("host path %s", v.Name)
+		}
+	}
+}
+
 // No run container holds a provider or repository credential: only the run token, the
 // project's secret variables and the services' (docs/kubernetes.md §10).
 func TestNoCredentialInRunPods(t *testing.T) {

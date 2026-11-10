@@ -38,7 +38,7 @@ func main() {
 		buildkitdConfig, buildResources                        string
 		serviceMemory, serviceCPU, projectAccess, projectClass string
 		projectSize, egressProxy, egressURL, egressPeers       string
-		noProxy, buildEgress                                   string
+		noProxy, buildEgress, buildSeccomp                     string
 		runUID, runGID                                         int64
 		userNamespaces, leaderElect, projectVolume             bool
 		workers                                                int
@@ -74,6 +74,7 @@ func main() {
 	flag.StringVar(&egressURL, "egress-url", "", "the egress proxy's reverse address (http://host:3129): the runner's git route and phase check")
 	flag.StringVar(&egressPeers, "egress-peers", "", "a host name resolving to every egress proxy pod (a headless Service)")
 	flag.StringVar(&noProxy, "no-proxy", "", "comma-separated hosts run pods reach without the proxy, besides localhost, the services and the api")
+	flag.StringVar(&buildSeccomp, "build-seccomp-profile", "", "Localhost seccomp profile of the build container, relative to the kubelet's seccomp directory (deploy/seccomp/buildkit.json installed on every node); empty: Unconfined")
 	flag.StringVar(&buildEgress, "build-egress", "proxy", "how build pods reach the network: proxy (through --egress-proxy) or direct")
 	flag.BoolVar(&leaderElect, "leader-elect", true, "hold a Lease so only one replica reconciles")
 	flag.StringVar(&leaderID, "leader-election-id", "exradius-operator", "name of the leader election Lease")
@@ -131,6 +132,7 @@ func main() {
 	builds := podspec.BuildConfig{
 		APIURL: apiURL, Image: builderImage, ServiceAccount: buildServiceAccount,
 		BuildkitdConfigMap: buildkitdConfig, NodeSelector: config.NodeSelector, Tolerations: config.Tolerations,
+		SeccompProfile: buildSeccomp,
 	}
 	switch buildEgress {
 	case "proxy":

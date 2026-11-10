@@ -4,7 +4,8 @@
 #
 #   1. the registry container kind-registry (localhost:5001 from this machine,
 #      kind-registry:5000 from the node);
-#   2. the cluster exradius, with the node's containerd pointed at the registry;
+#   2. the cluster exradius, with the node's containerd pointed at the registry and the build
+#      pods' seccomp profile (deploy/seccomp/buildkit.json) in the kubelet's directory;
 #   3. CloudNativePG, cert-manager (the RabbitMQ operator's webhooks need it) and the
 #      RabbitMQ Cluster Operator;
 #   4. the namespace exradius and the Secrets the chart reads: the secret key, the admin
@@ -45,6 +46,8 @@ for node in $(kind get nodes --name "$cluster"); do
     printf '[host."http://%s:5000"]\n' "$registry" | docker exec -i "$node" cp /dev/stdin "/etc/containerd/certs.d/$host/hosts.toml"
   done
 done
+say "build pods' seccomp profile on the node"
+make -s -C "$here" dev-seccomp >/dev/null
 if [ "$(docker inspect -f '{{json .NetworkSettings.Networks.kind}}' "$registry")" = null ]; then
   docker network connect kind "$registry"
 fi
