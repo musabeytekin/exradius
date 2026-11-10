@@ -1,0 +1,34 @@
+# Traefik, the ingress controller of the cloud installs and of the k3s check (docs/kubernetes.md
+# §16, §28): the chart's Ingress (values ingress.className: traefik) routes every path to the
+# panel's nginx. bootstrap.sh adds the cloud's load balancer settings (its address, the
+# allowed sources) on top of this file.
+deployment:
+  replicas: 1
+ingressClass:
+  enabled: true
+  isDefaultClass: false
+  name: traefik
+providers:
+  kubernetesIngress:
+    enabled: true
+  kubernetesCRD:
+    enabled: false
+ports:
+  web:
+    port: 8000
+    exposedPort: 80
+  # Plain HTTP until an install names a host with a certificate (values ingress.tls).
+  websecure:
+    expose:
+      default: false
+service:
+  type: LoadBalancer
+logs:
+  access:
+    enabled: false
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
