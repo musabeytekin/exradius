@@ -39,6 +39,7 @@ spec:
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- include "exradius.stackPlacement" $ | nindent 6 }}
       securityContext:
         {{- include "exradius.podSecurity" (list 1000 1000) | nindent 8 }}
       containers:

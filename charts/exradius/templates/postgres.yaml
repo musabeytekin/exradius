@@ -23,5 +23,16 @@ spec:
   resources:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- if or $.Values.stack.nodeSelector $.Values.stack.tolerations }}
+  affinity:
+    {{- with $.Values.stack.nodeSelector }}
+    nodeSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $.Values.stack.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
 {{- end }}
 {{- end }}

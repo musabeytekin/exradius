@@ -90,6 +90,7 @@ spec:
     spec:
       serviceAccountName: exradius-egress
       enableServiceLinks: false
+      {{- include "exradius.stackPlacement" . | nindent 6 }}
       {{- if gt (int $e.replicas) 1 }}
       # One proxy per node where there are nodes enough: a node's loss leaves the others.
       topologySpreadConstraints:

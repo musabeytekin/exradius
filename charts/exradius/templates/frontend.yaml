@@ -18,6 +18,7 @@ spec:
       serviceAccountName: exradius-frontend
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- include "exradius.stackPlacement" . | nindent 6 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 101

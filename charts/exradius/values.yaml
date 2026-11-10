@@ -130,6 +130,13 @@ identity:
     serviceAccountAnnotations: {}
     podLabels: {}
 
+# Where the stack's pods run (api, worker, panel, operator, egress, and the in-cluster
+# Postgres, RabbitMQ and SeaweedFS): the cloud values put them on the system node pool, so
+# they never share a node with runs (runs.nodeSelector).
+stack:
+  nodeSelector: {}
+  tolerations: []
+
 api:
   replicas: 1
   resources: {}

@@ -31,6 +31,9 @@ objectStore:
   inCluster: {seaweedfs: false}
 
 # Stack pods and runs on their own node groups: the run pool is tainted.
+stack:
+  nodeSelector: {exradius.dev/pool: system}
+
 runs:
   nodeSelector: {exradius.dev/pool: runs}
   tolerations: [{key: exradius.dev/runs, operator: Exists, effect: NoSchedule}]

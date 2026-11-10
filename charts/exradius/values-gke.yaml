@@ -26,9 +26,18 @@ objectStore:
   kind: gcs
   inCluster: {seaweedfs: false}
 
+# Stack pods and runs on their own node pools: the run pool is tainted. GKE also taints Arm
+# nodes (kubernetes.io/arch=arm64:NoSchedule), which every pod tolerates here; without
+# arm64 (deploy/terraform/gcp) the taint is not there and the toleration does nothing.
+stack:
+  nodeSelector: {exradius.dev/pool: system}
+  tolerations: [{key: kubernetes.io/arch, operator: Equal, value: arm64, effect: NoSchedule}]
+
 runs:
   nodeSelector: {exradius.dev/pool: runs}
-  tolerations: [{key: exradius.dev/runs, operator: Exists, effect: NoSchedule}]
+  tolerations:
+    - {key: exradius.dev/runs, operator: Exists, effect: NoSchedule}
+    - {key: kubernetes.io/arch, operator: Equal, value: arm64, effect: NoSchedule}
   # standard-rwo (pd-balanced) is GKE's default class.
   workspace: {size: 30Gi}
   projectVolume: {size: 50Gi}

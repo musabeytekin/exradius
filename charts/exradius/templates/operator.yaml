@@ -20,6 +20,7 @@ spec:
     spec:
       serviceAccountName: exradius-operator
       enableServiceLinks: false
+      {{- include "exradius.stackPlacement" . | nindent 6 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

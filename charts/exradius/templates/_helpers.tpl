@@ -251,3 +251,15 @@ this release by its selector: (list . "egress") */}}
     matchLabels:
       {{- include "exradius.selector" (list $root (index . 1)) | nindent 6 }}
 {{- end -}}
+
+{{/* Where the stack's pods run (values stack): a pod spec's nodeSelector and tolerations. */}}
+{{- define "exradius.stackPlacement" -}}
+{{- with .Values.stack.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.stack.tolerations }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}

@@ -15,6 +15,20 @@ spec:
   resources:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  {{- with $.Values.stack.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $.Values.stack.nodeSelector }}
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              {{- range $key, $value := . }}
+              - {key: {{ $key }}, operator: In, values: [{{ $value | quote }}]}
+              {{- end }}
+  {{- end }}
   persistence:
     storage: {{ .storage }}
     {{- with .storageClass }}
