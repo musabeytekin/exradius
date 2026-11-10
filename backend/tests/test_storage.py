@@ -3,8 +3,11 @@ import os
 import pytest
 
 from exradius.config import Settings
+from exradius.pod_identity import AzureWorkloadIdentityToken, GoogleMetadataToken, PodIdentityError
 from exradius.storage import (
+    AzureBlobObjectStore,
     FilesystemObjectStore,
+    GCSObjectStore,
     InvalidObjectKey,
     MemoryObjectStore,
     ObjectNotFound,
@@ -12,6 +15,10 @@ from exradius.storage import (
     make_store,
     validate_key,
 )
+
+# Azurite's well-known development account (docs: "Azurite emulator for local Azure Storage
+# development"): public, not a secret.
+AZURITE_KEY = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
 
 
 @pytest.fixture
@@ -91,13 +98,36 @@ def test_validate_key_splits_segments():
     assert validate_key("a..b/c") == ["a..b", "c"]  # dots inside a name are fine
 
 
-def test_installs_use_s3():
-    """An install's store is always an S3 API (SeaweedFS locally); the filesystem store is for tests."""
+def test_installs_use_s3_gcs_or_azure(monkeypatch):
+    """An install's store is S3 (SeaweedFS locally), GCS or Azure Blob; the filesystem store is
+    for tests."""
     s3 = make_store(
-        Settings(s3_endpoint_url="http://s3.example:9000", s3_access_key="k", s3_secret_key="s", s3_bucket="b")
+        Settings(s3_endpoint_url="http://s3.example:9000", s3_access_key="k", s3_secret_key="s", bucket="b")
     )
     assert isinstance(s3, S3ObjectStore) and s3.bucket == "b"
-    assert isinstance(make_store(Settings()), S3ObjectStore)
+    assert s3._client.meta.config.s3["addressing_style"] == "path"
+    aws = make_store(Settings())
+    assert isinstance(aws, S3ObjectStore) and aws._client.meta.config.s3["addressing_style"] == "virtual"
+
+    gcs = make_store(Settings(object_store="gcs", bucket="g"))
+    assert isinstance(gcs, GCSObjectStore) and isinstance(gcs.tokens, GoogleMetadataToken)
+    emulated = make_store(Settings(object_store="gcs", gcs_endpoint="http://127.0.0.1:4443"))
+    assert isinstance(emulated, GCSObjectStore) and emulated.tokens is None
+
+    with pytest.raises(ValueError, match="AZURE_ACCOUNT"):
+        make_store(Settings(object_store="azure"))
+    keyed = make_store(Settings(object_store="azure", azure_account="acct", azure_account_key=AZURITE_KEY))
+    assert isinstance(keyed, AzureBlobObjectStore) and keyed.endpoint == "https://acct.blob.core.windows.net"
+    for name in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(PodIdentityError, match="azure.workload.identity/use"):
+        make_store(Settings(object_store="azure", azure_account="acct"))
+    monkeypatch.setenv("AZURE_CLIENT_ID", "c")
+    monkeypatch.setenv("AZURE_TENANT_ID", "t")
+    monkeypatch.setenv("AZURE_FEDERATED_TOKEN_FILE", "/var/run/secrets/azure/tokens/azure-identity-token")
+    identity = make_store(Settings(object_store="azure", azure_account="acct", bucket="c"))
+    assert isinstance(identity, AzureBlobObjectStore) and isinstance(identity.tokens, AzureWorkloadIdentityToken)
+
     with pytest.raises(ValueError):
         Settings(object_store="filesystem")
 

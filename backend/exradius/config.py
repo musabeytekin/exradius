@@ -25,15 +25,30 @@ class Settings(BaseSettings):
     """When set, they replace the user info of ``broker_url`` (quoted as needed), so the
     RabbitMQ operator's generated credentials can come from its Secret as they are."""
 
-    # Object store for transcripts, artifacts and attachments: any S3 API (SeaweedFS in a
-    # local install, S3 in AWS). The filesystem and in-memory stores are for tests.
-    object_store: Literal["s3"] = "s3"
+    # Object store for transcripts, artifacts and attachments (docs/kubernetes.md §14): an S3
+    # API (SeaweedFS in a local install, S3 in AWS), Google Cloud Storage or Azure Blob
+    # Storage. In clouds each signs in with the pod's identity (exradius/pod_identity.py).
+    # The filesystem and in-memory stores are for tests.
+    object_store: Literal["s3", "gcs", "azure"] = "s3"
+    bucket: str = "exradius"
+    """The S3 or GCS bucket, or the Azure Blob container."""
     s3_endpoint_url: str | None = None
     """``None`` means AWS S3; set it for another S3-compatible service."""
     s3_access_key: str | None = None
     s3_secret_key: str | None = None
-    s3_bucket: str = "exradius"
+    """Both ``None``: boto3's default chain, which reads EKS Pod Identity or IRSA."""
     s3_region: str = "us-east-1"
+    gcs_endpoint: str | None = None
+    """An emulator (fake-gcs-server), reached without credentials; ``None`` is Google Cloud
+    Storage with the GKE Workload Identity token."""
+    azure_account: str | None = None
+    """The storage account of ``object_store: azure``."""
+    azure_endpoint: str | None = None
+    """``None`` is ``https://<account>.blob.core.windows.net``; Azurite is
+    ``http://<host>:10000/<account>``."""
+    azure_account_key: str | None = None
+    """A Shared Key (from a Secret) for clusters outside AKS and for Azurite; ``None`` signs in
+    with AKS Workload Identity."""
 
     public_broker_host: str | None = None
     public_broker_port: int | None = None
@@ -96,6 +111,11 @@ class Settings(BaseSettings):
     The build pods push there and the nodes pull from there."""
     builds_cache: bool = True
     """Keep each image's layer cache in the registry at ``<image>:buildcache``."""
+    builds_credentials: Literal["none", "ecr", "gcr", "acr"] = "none"
+    """How the worker signs in to ``builds_registry`` to read built service images' configs
+    (their ``HEALTHCHECK``), with the pod's identity: ``ecr`` (boto3's chain), ``gcr``
+    (Artifact Registry, GKE Workload Identity), ``acr`` (AKS Workload Identity). Values
+    ``builds.credentialHelper``, which also picks the build pods' credential helper."""
     insecure_registries: str = ""
     """Registries reached over plain HTTP, comma-separated (the kind registry); the worker
     reads services' image configs there (docs/kubernetes.md §7.4)."""
@@ -115,6 +135,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "s3_endpoint_url", "s3_access_key", "s3_secret_key", "broker_username", "broker_password", "kube_api_url",
+        "gcs_endpoint", "azure_account", "azure_endpoint", "azure_account_key",
         mode="before",
     )
     @classmethod
