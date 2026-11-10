@@ -89,20 +89,12 @@ queue.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    tracker["Tracker bridge<br/>(Jira, GitHub, ...)"] -- task --> tasks[("exradius.tasks")]
-    tasks --> worker["Worker"]
-    worker -- reads at branch head --> config["Config repository<br/>exradius.yaml"]
-    worker -- creates a Run --> operator["Operator"]
-    operator -- creates the pod --> run["Run pod<br/>clones, services, setup,<br/>Claude Code"]
-    run -- every request --> egress["Egress proxy<br/>allowlist, credentials"]
-    egress --> git["Git host, model API,<br/>package registries"]
-    worker -- status, questions, result --> events[("exradius.events")]
-    events --> tracker
-    tracker -- answers --> answers[("exradius.answers")]
-    answers --> worker
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/flow-dark.svg">
+    <img src="docs/assets/flow-light.svg" alt="A tracker publishes a task; the worker reads the project's config and creates a Run; the operator starts one pod that clones, starts services, runs setup and runs the agent; every request leaves through the egress proxy; status, questions and the result go back to the tracker." width="100%">
+  </picture>
+</p>
 
 1. **Intake.** The worker reads the project's config afresh and checks that every secret it
    references exists. If anything is missing, it rejects the task with the reason.
