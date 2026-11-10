@@ -824,9 +824,9 @@ in `exradius-builds`.
   (they bound what root has inside that namespace, which `apt-get` needs) and no
   `allowPrivilegeEscalation: false`, and either:
   - with `builds.seccompProfile` (a profile path relative to the kubelet's seccomp
-    directory): seccomp `Localhost` with `deploy/seccomp/buildkit.json` installed on every
+    directory): seccomp `Localhost` with `charts/exradius/files/profiles/buildkit.json` installed on every
     node that runs builds, and with `builds.appArmorProfile` AppArmor `Localhost` with
-    `deploy/apparmor/exradius-buildkit` loaded on AppArmor nodes. `exradius-builds` is then
+    `charts/exradius/files/profiles/exradius-buildkit` loaded on AppArmor nodes. `exradius-builds` is then
     `baseline`. The seccomp profile is containerd's `RuntimeDefault` for the default
     capabilities on amd64 and arm64 plus `clone` with namespace flags, `unshare`, `setns`,
     the mount calls (`mount`, `umount2`, the new mount API), `pivot_root`, `sethostname`
@@ -1519,7 +1519,7 @@ Desktop VM), one run at a time, caches warm.
     denied`; that profile's `deny mount` is silent, so nothing is logged. Seccomp profile
     plus AppArmor `Unconfined` builds, and so does the old fully Unconfined shape, even
     with `apparmor_restrict_unprivileged_userns=1`. So an AppArmor node needs
-    `deploy/apparmor/exradius-buildkit` loaded to reach `baseline`; without it
+    `charts/exradius/files/profiles/exradius-buildkit` loaded to reach `baseline`; without it
     `exradius-builds` stays `privileged`.
   - k3s with both profiles (`builds.seccompProfile`, `builds.appArmorProfile`):
     `exradius-builds` is `baseline`. A real Exradius Build of a workstation Dockerfile with

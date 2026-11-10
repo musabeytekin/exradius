@@ -1,0 +1,38 @@
+{{- /* The panel and the API from outside the cluster (docs/kubernetes.md §16). Every path goes
+to the panel's nginx, which serves the panel and forwards /api to the api with the settings
+its streams need, so the api keeps its NetworkPolicy (the frontend is its only HTTP peer)
+and the internal port 8001 is never routed. publicApiUrl is this Ingress's address. */ -}}
+{{- with .Values.ingress }}
+{{- if .enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: exradius
+  labels:
+    {{- include "exradius.componentLabels" (list $ "frontend") | nindent 4 }}
+  {{- with .annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - {{- with .host }}
+      host: {{ . | quote }}
+      {{- end }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: exradius-frontend
+                port: {name: http}
+{{- end }}
+{{- end }}

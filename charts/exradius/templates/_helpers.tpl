@@ -31,6 +31,10 @@ app.kubernetes.io/component: {{ index . 1 }}
 {{- .Values.runtime.claudeCode.image | default (include "exradius.image" (list . "exradius-runtime-claude-code")) -}}
 {{- end -}}
 
+{{- define "exradius.builderImage" -}}
+{{- .Values.builds.builderImage | default (include "exradius.image" (list . .Values.images.builder)) -}}
+{{- end -}}
+
 {{- define "exradius.projectDefaultImage" -}}
 {{- .Values.projectDefaultImage | default (include "exradius.image" (list . "exradius-project-default")) -}}
 {{- end -}}
@@ -132,6 +136,9 @@ http://{{ include "exradius.serviceHost" (list . .Values.objectStore.inCluster.n
 {{- end }}
 - name: EXRADIUS_OBJECT_STORE
   value: {{ .Values.objectStore.kind | quote }}
+- name: EXRADIUS_BUCKET
+  value: {{ .Values.objectStore.bucket | quote }}
+{{- if eq .Values.objectStore.kind "s3" }}
 {{- with include "exradius.s3Endpoint" . }}
 - name: EXRADIUS_S3_ENDPOINT_URL
   value: {{ . | quote }}
@@ -148,10 +155,30 @@ http://{{ include "exradius.serviceHost" (list . .Values.objectStore.inCluster.n
       name: {{ . }}
       key: {{ $.Values.objectStore.s3.secretKeyKey }}
 {{- end }}
-- name: EXRADIUS_S3_BUCKET
-  value: {{ .Values.objectStore.bucket | quote }}
 - name: EXRADIUS_S3_REGION
   value: {{ .Values.objectStore.region | quote }}
+{{- else if eq .Values.objectStore.kind "gcs" }}
+{{- with .Values.objectStore.gcs.endpoint }}
+- name: EXRADIUS_GCS_ENDPOINT
+  value: {{ . | quote }}
+{{- end }}
+{{- else if eq .Values.objectStore.kind "azure" }}
+- name: EXRADIUS_AZURE_ACCOUNT
+  value: {{ required "objectStore.azure.account names the storage account" .Values.objectStore.azure.account | quote }}
+{{- with .Values.objectStore.azure.endpoint }}
+- name: EXRADIUS_AZURE_ENDPOINT
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.objectStore.azure.existingSecret }}
+- name: EXRADIUS_AZURE_ACCOUNT_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ . }}
+      key: {{ $.Values.objectStore.azure.keyKey }}
+{{- end }}
+{{- else }}
+{{- fail "objectStore.kind is s3, gcs or azure" }}
+{{- end }}
 - name: EXRADIUS_SECRET_KEY
   valueFrom:
     secretKeyRef:

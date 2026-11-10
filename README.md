@@ -249,8 +249,8 @@ and RabbitMQ. Run pods use user namespaces by default (`runs.userNamespaces`), w
 containerd 2, runc 1.2 or later and a Linux 6.3+ kernel on the nodes. Optional hardening, each
 with a node requirement: `runs.runtimeClassName: gvisor` (runsc and a RuntimeClass on the
 nodes; turn user namespaces off with it), and build pods at Pod Security `baseline`
-(`builds.seccompProfile` with `deploy/seccomp/buildkit.json` on every node, plus
-`builds.appArmorProfile` with `deploy/apparmor/exradius-buildkit` on AppArmor nodes). A registry build pods push to on a private address needs an
+(`builds.seccompProfile` with `charts/exradius/files/profiles/buildkit.json` on every node, plus
+`builds.appArmorProfile` with `charts/exradius/files/profiles/exradius-buildkit` on AppArmor nodes). A registry build pods push to on a private address needs an
 `egress.allowPrivate` entry; a corporate proxy goes in `egress.upstreamProxy`. Create the Secrets the values name
 (`secretKey.existingSecret`, `admin.existingSecret`, the database, broker and object store
 credentials), then:

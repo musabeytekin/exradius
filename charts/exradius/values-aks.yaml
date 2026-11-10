@@ -1,0 +1,65 @@
+# Azure Kubernetes Service (docs/kubernetes.md §16, §28). What every AKS install has in
+# common; the subscription's own values (registries, storage account, database, identities,
+# address) are in the file deploy/terraform/azure writes, given after this one:
+#
+#   helm upgrade --install exradius charts/exradius --namespace exradius \
+#     -f charts/exradius/values-aks.yaml -f deploy/terraform/azure/values-generated.yaml
+#
+# Azure Database for PostgreSQL and Blob Storage replace the in-cluster Postgres and
+# SeaweedFS; RabbitMQ stays in the cluster (no managed RabbitMQ on Azure). The api, the
+# worker and build pods sign in through AKS Workload Identity: user-assigned identities
+# federated with their ServiceAccounts, whose client ids the generated values put in the
+# annotations below, and the webhook's pod label.
+
+postgres:
+  # deploy/terraform/bootstrap.sh makes this Secret from Terraform's outputs (?ssl=require).
+  existingSecret: exradius-postgres
+  inCluster: {cloudnativepg: false}
+
+rabbitmq:
+  inCluster:
+    operator: true
+    storage: 5Gi
+
+objectStore:
+  kind: azure
+  inCluster: {seaweedfs: false}
+
+identity:
+  app:
+    podLabels: {azure.workload.identity/use: "true"}
+  build:
+    podLabels: {azure.workload.identity/use: "true"}
+
+runs:
+  nodeSelector: {exradius.dev/pool: runs}
+  tolerations: [{key: exradius.dev/runs, operator: Exists, effect: NoSchedule}]
+  # managed-csi (Azure Disk) is AKS's default class.
+  workspace: {size: 30Gi}
+  projectVolume: {size: 50Gi}
+  userNamespaces: true
+  bundleMount: image
+
+egress:
+  replicas: 2
+
+builds:
+  # ACR, as the build pods' Workload Identity (docker-credential-exradius-acr). Entra ID and
+  # the registry are public hosts, reached through the proxy: nothing to reach directly.
+  credentialHelper: acr
+  # Installed by nodeSetup. AKS's Ubuntu nodes have AppArmor: both profiles.
+  seccompProfile: exradius/buildkit.json
+  appArmorProfile: exradius-buildkit
+
+networkPolicy:
+  # Azure CNI powered by Cilium enforces NetworkPolicy.
+  enabled: true
+
+nodeSetup:
+  enabled: true
+
+ingress:
+  enabled: true
+  # Traefik, installed by deploy/terraform/bootstrap.sh behind an Azure Standard Load
+  # Balancer on the static address Terraform reserved.
+  className: traefik

@@ -296,20 +296,20 @@ BUILDKIT_PREFIX = re.compile(r"^#\d+ (?:\d+\.\d+ )?")
 
 BUILDER = [
     (re.compile(r"cannot load seccomp profile|seccomp profile .*(?:not found|no such file)", re.I),
-     "The build pod's seccomp profile is not on the node: copy `deploy/seccomp/buildkit.json` to the "
+     "The build pod's seccomp profile is not on the node: copy `charts/exradius/files/profiles/buildkit.json` to the "
      "kubelet's seccomp directory under the name in values `builds.seccompProfile` on every node that runs "
      "builds, or leave that value empty."),
     (re.compile(r"apparmor.*(?:not loaded|not found|cannot enforce)|profile .* is not loaded", re.I),
-     "The build pod's AppArmor profile is not loaded on the node: load `deploy/apparmor/exradius-buildkit` "
+     "The build pod's AppArmor profile is not loaded on the node: load `charts/exradius/files/profiles/exradius-buildkit` "
      "(`apparmor_parser -r`) on every node that runs builds, or leave values `builds.appArmorProfile` empty."),
     (re.compile(r"rootlesskit.*failed to share mount point.*permission denied", re.I),
      "Rootless BuildKit could not mount inside its own user namespace: the node's default AppArmor profile "
-     "forbids it. Load `deploy/apparmor/exradius-buildkit` on the nodes and set values "
+     "forbids it. Load `charts/exradius/files/profiles/exradius-buildkit` on the nodes and set values "
      "`builds.appArmorProfile`, or leave `builds.seccompProfile` empty (the builds namespace is then "
      "privileged)."),
     (re.compile(r"rootlesskit.*failed to start the child: fork/exec /proc/self/exe: operation not permitted", re.I),
      "Rootless BuildKit could not create its user namespace: the build pod's seccomp profile refuses it. "
-     "Values `builds.seccompProfile` must name `deploy/seccomp/buildkit.json` as installed on the nodes."),
+     "Values `builds.seccompProfile` must name `charts/exradius/files/profiles/buildkit.json` as installed on the nodes."),
 ]
 """How the install's build-pod profiles fail (docs/kubernetes.md §12): the admin's to fix."""
 

@@ -49,6 +49,7 @@ spec:
             - --project-volume-size={{ $runs.projectVolume.size }}
             - --runtime-class-name={{ $runs.runtimeClassName }}
             - --user-namespaces={{ $runs.userNamespaces }}
+            - --bundle-mount={{ $runs.bundleMount }}
             - --node-selector={{ $runs.nodeSelector | default dict | toJson }}
             - --tolerations={{ $runs.tolerations | default list | toJson }}
             - --image-pull-secrets={{ join "," $runs.imagePullSecrets }}
@@ -57,18 +58,26 @@ spec:
             - --egress-peers={{ include "exradius.serviceHost" (list . "exradius-egress-pods") }}
             - --build-egress={{ .Values.builds.egress }}
             - --builds-namespace={{ .Values.namespaces.builds }}
-            - --builder-image={{ .Values.builds.builderImage }}
+            - --builder-image=$(EXRADIUS_BUILDER_IMAGE)
             - --build-service-account=exradius-build
             - --buildkitd-configmap={{ if .Values.builds.insecureRegistries }}exradius-buildkitd{{ end }}
             - --build-resources={{ .Values.builds.resources | default dict | toJson }}
             - --build-seccomp-profile={{ .Values.builds.seccompProfile }}
             - --build-apparmor-profile={{ .Values.builds.appArmorProfile }}
+            - --build-credential-helper={{ .Values.builds.credentialHelper }}
+            - --build-no-proxy={{ join "," .Values.builds.noProxy }}
+            - --build-pod-labels={{ .Values.identity.build.podLabels | default dict | toJson }}
             - --workers={{ .Values.operator.workers }}
             - --leader-elect={{ .Values.operator.leaderElect }}
             - --leader-election-id=exradius-operator
             - --leader-election-namespace={{ .Release.Namespace }}
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
+          env:
+            # An environment variable rather than a flag, so Tilt can put the image it built
+            # here (match_in_env_vars).
+            - name: EXRADIUS_BUILDER_IMAGE
+              value: {{ include "exradius.builderImage" . | quote }}
           ports:
             - {name: metrics, containerPort: 8080}
             - {name: health, containerPort: 8081}

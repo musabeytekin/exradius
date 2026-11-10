@@ -5,7 +5,7 @@
 #   1. the registry container kind-registry (localhost:5001 from this machine,
 #      kind-registry:5000 from the node);
 #   2. the cluster exradius, with the node's containerd pointed at the registry and the build
-#      pods' seccomp profile (deploy/seccomp/buildkit.json) in the kubelet's directory;
+#      pods' seccomp profile (charts/exradius/files/profiles/buildkit.json) in the kubelet's directory;
 #   3. CloudNativePG, cert-manager (the RabbitMQ operator's webhooks need it) and the
 #      RabbitMQ Cluster Operator;
 #   4. the namespace exradius and the Secrets the chart reads: the secret key, the admin

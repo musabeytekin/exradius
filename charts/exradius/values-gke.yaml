@@ -1,0 +1,62 @@
+# Google Kubernetes Engine (docs/kubernetes.md §16, §28). What every GKE install has in
+# common; the project's own values (registry, bucket, database, address) are in the file
+# deploy/terraform/gcp writes, given after this one:
+#
+#   helm upgrade --install exradius charts/exradius --namespace exradius \
+#     -f charts/exradius/values-gke.yaml -f deploy/terraform/gcp/values-generated.yaml
+#
+# Cloud SQL for PostgreSQL and Cloud Storage replace the in-cluster Postgres and SeaweedFS;
+# RabbitMQ stays in the cluster (no managed RabbitMQ on Google Cloud), run by the RabbitMQ
+# Cluster Operator that bootstrap.sh installs. The api, the worker and build pods sign in
+# through GKE Workload Identity: IAM grants name their ServiceAccounts directly, so no
+# annotation and no key.
+
+postgres:
+  # deploy/terraform/bootstrap.sh makes this Secret from Terraform's outputs (Cloud SQL's
+  # private address, ?ssl=require).
+  existingSecret: exradius-postgres
+  inCluster: {cloudnativepg: false}
+
+rabbitmq:
+  inCluster:
+    operator: true
+    storage: 5Gi
+
+objectStore:
+  kind: gcs
+  inCluster: {seaweedfs: false}
+
+runs:
+  nodeSelector: {exradius.dev/pool: runs}
+  tolerations: [{key: exradius.dev/runs, operator: Exists, effect: NoSchedule}]
+  # standard-rwo (pd-balanced) is GKE's default class.
+  workspace: {size: 30Gi}
+  projectVolume: {size: 50Gi}
+  userNamespaces: true
+  bundleMount: image
+
+egress:
+  replicas: 2
+
+builds:
+  # Artifact Registry, as the build pods' Workload Identity (docker-credential-exradius-gcr).
+  credentialHelper: gcr
+  # The GKE metadata server answers each pod as its ServiceAccount, never through the proxy.
+  noProxy: [169.254.169.254, metadata.google.internal]
+  # Installed by nodeSetup. Container-Optimized OS has AppArmor: both profiles.
+  seccompProfile: exradius/buildkit.json
+  appArmorProfile: exradius-buildkit
+
+networkPolicy:
+  # Dataplane V2 enforces NetworkPolicy; its metadata server is 169.254.169.254:80.
+  enabled: true
+  buildIdentity: [{cidr: 169.254.169.254/32, port: 80}]
+
+nodeSetup:
+  enabled: true
+
+ingress:
+  enabled: true
+  # Traefik, installed by deploy/terraform/bootstrap.sh behind a passthrough Network Load
+  # Balancer on the static address Terraform reserved.
+  className: traefik

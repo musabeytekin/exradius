@@ -11,6 +11,11 @@ metadata:
   name: exradius-api
   labels:
     {{- include "exradius.componentLabels" (list . "api") | nindent 4 }}
+  {{- with .Values.identity.app.serviceAccountAnnotations }}
+  # Its cloud identity (values identity.app): the object store.
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 automountServiceAccountToken: false
 ---
 # TokenReviews and SubjectAccessReviews only (the built-in system:auth-delegator role).
@@ -43,6 +48,11 @@ metadata:
   name: exradius-worker
   labels:
     {{- include "exradius.componentLabels" (list . "worker") | nindent 4 }}
+  {{- with .Values.identity.app.serviceAccountAnnotations }}
+  # Its cloud identity (values identity.app): the object store, reading the builds registry.
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -61,7 +71,8 @@ metadata:
     {{- include "exradius.componentLabels" (list . "run") | nindent 4 }}
 automountServiceAccountToken: false
 ---
-# Build pods: no Kubernetes identity either.
+# Build pods: no Kubernetes identity either; in a cloud, the identity that pushes to the
+# builds registry (values identity.build, builds.credentialHelper).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -69,6 +80,10 @@ metadata:
   namespace: {{ $builds }}
   labels:
     {{- include "exradius.componentLabels" (list . "build") | nindent 4 }}
+  {{- with .Values.identity.build.serviceAccountAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1

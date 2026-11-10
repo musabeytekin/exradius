@@ -16,6 +16,9 @@ spec:
     metadata:
       labels:
         {{- include "exradius.componentLabels" (list . "api") | nindent 8 }}
+        {{- with .Values.identity.app.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: exradius-api
       # Its token asks the Kubernetes API who called /internal/egress (a TokenReview); it

@@ -9,7 +9,7 @@
 # v2.3) with one change: rootless BuildKit may create a user namespace and mount inside it
 # (userns, mount, pivot_root), which the default profile denies with a silent `deny mount`.
 # The process still has no capability on the node, so those mounts reach only its own
-# namespaces; the build pod's seccomp profile (deploy/seccomp/buildkit.json) allows the
+# namespaces; the build pod's seccomp profile (charts/exradius/files/profiles/buildkit.json) allows the
 # same calls and nothing else beyond the runtime's default. Needs AppArmor 4 (`userns`).
 
 abi <abi/4.0>,

@@ -1,0 +1,70 @@
+# Amazon EKS (docs/kubernetes.md §16, §28). What every EKS install has in common; the
+# account's own values (registry, bucket, database, broker, address) are in the file
+# deploy/terraform/aws writes, given after this one:
+#
+#   helm upgrade --install exradius charts/exradius --namespace exradius \
+#     -f charts/exradius/values-eks.yaml -f deploy/terraform/aws/values-generated.yaml
+#
+# Managed services replace the in-cluster stack: RDS for PostgreSQL, Amazon MQ for
+# RabbitMQ, S3. The api, the worker and build pods sign in as their ServiceAccounts through
+# EKS Pod Identity (associations made by Terraform), so no AWS key is in a Secret.
+
+postgres:
+  # deploy/terraform/bootstrap.sh makes this Secret from Terraform's outputs: uri is
+  # postgresql://exradius:...@<rds>:5432/exradius?ssl=require.
+  existingSecret: exradius-postgres
+  inCluster: {cloudnativepg: false}
+
+broker:
+  # Amazon MQ (url in the generated values: amqps://<broker>.mq.<region>.amazonaws.com:5671/);
+  # the user and password from this Secret.
+  existingSecret: exradius-broker
+  publicPort: 5671
+rabbitmq:
+  inCluster: {operator: false}
+
+objectStore:
+  kind: s3
+  s3:
+    # No key: boto3 reads the Pod Identity credentials.
+    existingSecret: ""
+  inCluster: {seaweedfs: false}
+
+# Stack pods and runs on their own node groups: the run pool is tainted.
+runs:
+  nodeSelector: {exradius.dev/pool: runs}
+  tolerations: [{key: exradius.dev/runs, operator: Exists, effect: NoSchedule}]
+  # gp3 (the Terraform module's default class) for workspaces and project volumes.
+  workspace: {size: 30Gi}
+  projectVolume: {size: 50Gi}
+  userNamespaces: true
+  # Amazon Linux 2023 on EKS 1.36+ (containerd 2.3) mounts image volumes; copy otherwise.
+  bundleMount: image
+
+egress:
+  # Two replicas on two nodes, with a disruption budget (docs/kubernetes.md §11).
+  replicas: 2
+
+builds:
+  # ECR, as the build pods' Pod Identity (docker-credential-ecr-login); repositories under
+  # exradius/ are created on the first push (an ECR repository creation template).
+  credentialHelper: ecr
+  # EKS Pod Identity's agent answers on the node's link-local address, never through the
+  # proxy.
+  noProxy: [169.254.170.23]
+  # Installed by nodeSetup. Amazon Linux 2023 has no AppArmor: seccomp only.
+  seccompProfile: exradius/buildkit.json
+  appArmorProfile: ""
+
+networkPolicy:
+  # The VPC CNI enforces NetworkPolicy (Terraform turns it on: enableNetworkPolicy).
+  enabled: true
+  buildIdentity: [{cidr: 169.254.170.23/32, port: 80}]
+
+nodeSetup:
+  enabled: true
+
+ingress:
+  enabled: true
+  # Traefik, installed by deploy/terraform/bootstrap.sh behind a Network Load Balancer.
+  className: traefik

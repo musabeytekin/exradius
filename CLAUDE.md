@@ -192,7 +192,7 @@ home `/home/runner`), read-only root, all capabilities dropped, no ServiceAccoun
 service links. `/work`, the home, `/tmp` and the state directory are subPaths of one
 workspace PVC per Run. Runs live in the `exradius-runs` namespace (Pod Security `baseline`),
 the stack in `exradius` (`restricted`), builds in `exradius-builds` (`baseline` with the
-node-installed `deploy/seccomp/buildkit.json`, and `deploy/apparmor/exradius-buildkit` on
+node-installed `charts/exradius/files/profiles/buildkit.json`, and `charts/exradius/files/profiles/exradius-buildkit` on
 AppArmor nodes, via `builds.seccompProfile`/`appArmorProfile`; `privileged` without them:
 rootless BuildKit creates a user namespace and mounts in it; kubernetes.md §12, §27).
 

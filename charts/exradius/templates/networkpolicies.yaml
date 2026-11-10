@@ -55,6 +55,13 @@ spec:
         {{- include "exradius.peer" (list . "api") | nindent 8 }}
       ports:
         - {protocol: TCP, port: 8001}
+    {{- range $np.buildIdentity }}
+    # The cloud's pod identity endpoint, for the registry credentials.
+    - to:
+        - ipBlock: {cidr: {{ .cidr }}}
+      ports:
+        - {protocol: TCP, port: {{ .port }}}
+    {{- end }}
     {{- if eq .Values.builds.egress "proxy" }}
     - to:
         {{- include "exradius.peer" (list . "egress") | nindent 8 }}

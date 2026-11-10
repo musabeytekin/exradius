@@ -1,0 +1,141 @@
+{{- /* The build pods' profiles on every node (docs/kubernetes.md §12, values nodeSetup): an
+init container writes files/profiles/buildkit.json into the kubelet's seccomp directory and,
+where the node has AppArmor, loads files/profiles/exradius-buildkit with the node's own
+apparmor_parser (the one containerd uses for its default profile, so it matches the
+kernel), in the node's mount namespace. A pod that restarts (a reboot clears loaded
+AppArmor profiles) does it again; the files are replaced atomically. A build scheduled on a
+new node before its profiles are there waits: the kubelet retries the container, and the
+operator gives a CreateContainerError 120 s. The init container is privileged with the
+host's PID namespace; the one that stays only sleeps. */ -}}
+{{- if .Values.nodeSetup.enabled }}
+{{- $n := .Values.nodeSetup -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $n.namespace }}
+  labels:
+    {{- include "exradius.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exradius-node-setup
+  namespace: {{ $n.namespace }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "node-setup") | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exradius-node-profiles
+  namespace: {{ $n.namespace }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "node-setup") | nindent 4 }}
+data:
+  buildkit.json: |-
+    {{- .Files.Get "files/profiles/buildkit.json" | nindent 4 }}
+  exradius-buildkit: |-
+    {{- .Files.Get "files/profiles/exradius-buildkit" | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: exradius-node-setup
+  namespace: {{ $n.namespace }}
+  labels:
+    {{- include "exradius.componentLabels" (list . "node-setup") | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "exradius.selector" (list . "node-setup") | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 100%}
+  template:
+    metadata:
+      labels:
+        {{- include "exradius.componentLabels" (list . "node-setup") | nindent 8 }}
+      annotations:
+        # A changed profile rolls the pods, which install it.
+        exradius.dev/profiles: {{ printf "%s%s" (.Files.Get "files/profiles/buildkit.json") (.Files.Get "files/profiles/exradius-buildkit") | sha256sum | trunc 16 }}
+    spec:
+      serviceAccountName: exradius-node-setup
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostPID: true
+      priorityClassName: system-node-critical
+      {{- with $n.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $n.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: install
+          image: {{ $n.image }}
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              seccomp=/host/seccomp/exradius
+              mkdir -p "$seccomp"
+              cp /profiles/buildkit.json "$seccomp/.buildkit.json.new"
+              mv "$seccomp/.buildkit.json.new" "$seccomp/buildkit.json"
+              echo "seccomp: {{ $n.kubeletDir }}/seccomp/exradius/buildkit.json"
+              if nsenter -t 1 -m -- test -d /sys/kernel/security/apparmor; then
+                cp /profiles/exradius-buildkit /host/profiles/.exradius-buildkit.new
+                mv /host/profiles/.exradius-buildkit.new /host/profiles/exradius-buildkit
+                nsenter -t 1 -m -- apparmor_parser -r /var/lib/exradius/profiles/exradius-buildkit
+                nsenter -t 1 -m -- grep -q '^exradius-buildkit ' /sys/kernel/security/apparmor/profiles
+                echo "apparmor: exradius-buildkit loaded"
+              else
+                echo "apparmor: not on this node"
+              fi
+              # Ubuntu 26.04's restriction breaks containers' own signals (docs/kubernetes.md
+              # §16); it is the node owner's setting, so this only says so.
+              f=/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined
+              if [ -r "$f" ] && [ "$(cat "$f")" = 1 ]; then
+                echo "warning: kernel.apparmor_restrict_unprivileged_unconfined=1 on this node: set it to 0 (docs/kubernetes.md §16)"
+              fi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - {name: profiles, mountPath: /profiles, readOnly: true}
+            - {name: seccomp, mountPath: /host/seccomp}
+            - {name: host-profiles, mountPath: /host/profiles}
+      containers:
+        - name: sleep
+          image: {{ $n.image }}
+          imagePullPolicy: IfNotPresent
+          command: [sh, -c, 'trap "exit 0" TERM; while true; do sleep 3600 & wait $!; done']
+          resources:
+            requests: {cpu: 1m, memory: 4Mi}
+            limits: {memory: 16Mi}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+      volumes:
+        - name: profiles
+          configMap:
+            name: exradius-node-profiles
+        - name: seccomp
+          hostPath:
+            path: {{ $n.kubeletDir }}/seccomp
+            type: DirectoryOrCreate
+        - name: host-profiles
+          hostPath:
+            path: /var/lib/exradius/profiles
+            type: DirectoryOrCreate
+{{- end }}

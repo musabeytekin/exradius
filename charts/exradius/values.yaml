@@ -1,7 +1,9 @@
 # Exradius chart defaults (docs/kubernetes.md §16). Secrets are never values: each one is
 # named by an existingSecret and read from there.
 
-# Base URL of the API as consumers of task.result reach it (artifact and transcript links).
+# Base URL of the API as consumers of task.result reach it (artifact and transcript links)
+# and as git hosts call the config hook: the ingress's address in an install with one
+# (ingress below), never localhost when a bridge runs elsewhere.
 publicApiUrl: http://localhost:8000
 clusterDomain: cluster.local
 
@@ -15,6 +17,9 @@ images:
   frontend: exradius-frontend
   operator: exradius-operator
   egress: exradius-egress
+  # Build pods' image: rootless BuildKit with the clouds' credential helpers
+  # (deploy/builder.Dockerfile); builds.builderImage overrides it.
+  builder: exradius-builder
 
 runtime:
   claudeCode:
@@ -73,16 +78,33 @@ postgres:
     resources: {}
 
 objectStore:
+  # s3 (SeaweedFS in the cluster, S3, any S3 API), gcs or azure (docs/kubernetes.md §14).
   kind: s3
+  # The bucket, or Azure's container. In clouds the installer creates it (deploy/terraform).
   bucket: exradius
+  # S3's region.
   region: us-east-1
   s3:
     # Empty: AWS S3 (or the in-cluster SeaweedFS below).
     endpoint: ""
-    # Secret with an access key and a secret key. In-cluster SeaweedFS uses it too.
+    # Secret with an access key and a secret key. In-cluster SeaweedFS uses it too. Empty:
+    # boto3's default chain, which reads EKS Pod Identity or IRSA (identity.app).
     existingSecret: exradius-objectstore
     accessKeyKey: accessKey
     secretKeyKey: secretKey
+  gcs:
+    # An emulator (fake-gcs-server), reached without credentials. Empty: Google Cloud
+    # Storage as the GKE Workload Identity of identity.app.
+    endpoint: ""
+  azure:
+    # The storage account; its blob endpoint is https://<account>.blob.core.windows.net
+    # unless endpoint names another (Azurite).
+    account: ""
+    endpoint: ""
+    # A Secret with the account's Shared Key, for clusters outside AKS. Empty: AKS Workload
+    # Identity of identity.app ("Storage Blob Data Contributor" on the container).
+    existingSecret: ""
+    keyKey: accountKey
   inCluster:
     seaweedfs: true
     name: exradius-seaweedfs
@@ -90,6 +112,23 @@ objectStore:
     storage: 20Gi
     storageClass: ""
     resources: {}
+
+# The cloud identities pods sign in with (EKS Pod Identity or IRSA, GKE and AKS Workload
+# Identity), so no cloud key is ever in a Secret. Each is ServiceAccount annotations and pod
+# labels: IRSA's eks.amazonaws.com/role-arn, GKE's iam.gke.io/gcp-service-account, AKS's
+# azure.workload.identity/client-id with the pod label azure.workload.identity/use: "true".
+# EKS Pod Identity and GKE's direct principal bindings need neither: they name the
+# ServiceAccount (exradius/exradius-api, exradius/exradius-worker,
+# exradius-builds/exradius-build). deploy/terraform writes these values.
+identity:
+  # The api and the worker: the object store; the worker also reads the builds registry.
+  app:
+    serviceAccountAnnotations: {}
+    podLabels: {}
+  # Build pods: push to the builds registry, nothing else.
+  build:
+    serviceAccountAnnotations: {}
+    podLabels: {}
 
 api:
   replicas: 1
@@ -153,6 +192,11 @@ networkPolicy:
   # With builds.egress: direct, the cluster's own CIDRs (pods, services, nodes) that
   # build pods may not reach.
   clusterCIDRs: []
+  # The cloud's pod identity endpoint, which build pods reach directly for their registry
+  # credentials (builds.credentialHelper): [{cidr: 169.254.170.23/32, port: 80}] on EKS
+  # (Pod Identity), [{cidr: 169.254.169.254/32, port: 80}] on GKE (the metadata server with
+  # Dataplane V2). AKS's Entra ID is a public host, reached through the proxy.
+  buildIdentity: []
 
 namespaces:
   # Create the runs and builds namespaces with their Pod Security labels. The release
@@ -185,6 +229,11 @@ runs:
   # on the volumes' filesystems (Linux 6.3+); a node without them fails the run with a
   # diagnosis. Turn it off for a sandbox runtime (runtimeClassName: gvisor).
   userNamespaces: true
+  # How run pods get the runtime bundle (docs/kubernetes.md §7.2): image, an image volume
+  # (Kubernetes 1.36 with containerd 2.1 or later on the nodes), or copy, an init container
+  # that copies it from the bundle image into an emptyDir (about 0.5 GB and a few seconds
+  # per run pod), for nodes without image volumes.
+  bundleMount: image
   nodeSelector: {}
   tolerations: []
   # Names of Secrets in the runs namespace for pulling private project images.
@@ -194,9 +243,17 @@ builds:
   # Prefix of images built from Dockerfiles (docs/kubernetes.md §12): build pods push
   # <registry>/exradius/<project>/<name>:<hash> and nodes pull it from there.
   registry: ""
-  # Rootless BuildKit, pinned. An Exradius builder image with the clouds' credential
-  # helpers replaces it in phase 6 (builds.credentialHelper).
-  builderImage: moby/buildkit:v0.34.1-rootless@sha256:f68752a5a94acfcdad2d07867b7075601a421638e17fc5f28efc1c814d0c4f89
+  # Empty: <images.registry>/exradius-builder:<tag>, the pinned rootless BuildKit with the
+  # clouds' credential helpers (deploy/builder.Dockerfile).
+  builderImage: ""
+  # How build pods sign in to builds.registry as their pod identity (identity.build), and
+  # the worker to read built images' configs (identity.app): none (an anonymous registry,
+  # kind's), ecr, gcr (Artifact Registry) or acr.
+  credentialHelper: none
+  # Hosts build pods reach without the egress proxy: the cloud's pod identity endpoint
+  # (EKS Pod Identity's 169.254.170.23, the GKE metadata server's 169.254.169.254). The
+  # matching NetworkPolicy entries are networkPolicy.buildIdentity.
+  noProxy: []
   # Keep each image's layer cache in the registry at <image>:buildcache (mode=max).
   cache: true
   # Registries build pods reach over plain HTTP (written into buildkitd.toml).
@@ -213,7 +270,7 @@ builds:
   # default seccomp profile refuses. Empty: the build container runs with seccomp and
   # AppArmor Unconfined, and exradius-builds is labelled Pod Security "privileged". A
   # Localhost profile, relative to the kubelet's seccomp directory (for example
-  # exradius/buildkit.json: deploy/seccomp/buildkit.json copied to
+  # exradius/buildkit.json: charts/exradius/files/profiles/buildkit.json copied to
   # /var/lib/kubelet/seccomp/exradius/ on every node that runs builds): RuntimeDefault plus
   # those calls, and exradius-builds at "baseline" (docs/kubernetes.md §12). Empty by default
   # because the file must be on every node first: kind's dev-up installs it, the k3s check
@@ -221,10 +278,40 @@ builds:
   seccompProfile: ""
   # With seccompProfile, on nodes with AppArmor (Ubuntu, GKE's COS, AKS): a Localhost
   # AppArmor profile that allows mounting in the build's own user namespace, which the
-  # runtime's default profile denies (deploy/apparmor/exradius-buildkit, loaded on every
+  # runtime's default profile denies (charts/exradius/files/profiles/exradius-buildkit, loaded on every
   # node that runs builds). Empty: the runtime's default AppArmor profile. Empty by default
   # for the same reason as seccompProfile.
   appArmorProfile: ""
+
+# The panel and the API from outside the cluster (docs/kubernetes.md §16): one Ingress, its
+# every path to the panel's nginx, which forwards /api to the api (streams unbuffered).
+# Set publicApiUrl to its address. The cloud installs use Traefik (className: traefik), as
+# the k3s check does.
+ingress:
+  enabled: false
+  className: ""
+  # Empty: any host name (the load balancer's address).
+  host: ""
+  annotations: {}
+  # [{secretName: exradius-tls, hosts: [exradius.example.com]}], with a certificate from
+  # cert-manager (annotations) or made by hand.
+  tls: []
+
+# A DaemonSet that installs the build pods' profiles on every node and keeps them there
+# (docs/kubernetes.md §12): files/profiles/buildkit.json into the kubelet's seccomp
+# directory, and on nodes with AppArmor files/profiles/exradius-buildkit loaded with the
+# node's own apparmor_parser. With it set builds.seccompProfile: exradius/buildkit.json and,
+# on AppArmor nodes, builds.appArmorProfile: exradius-buildkit. It runs privileged, in a
+# namespace of its own; kind's dev-up installs the seccomp profile itself instead.
+nodeSetup:
+  enabled: false
+  namespace: exradius-node-setup
+  image: busybox:1.37.0-musl@sha256:f6a95d611e0a8780fabdb2aec43e31275b2720dfefa3e41b16835bfc42454478
+  # The kubelet's root directory on the nodes.
+  kubeletDir: /var/lib/kubelet
+  nodeSelector: {}
+  # Every node, the tainted run pool's too.
+  tolerations: [{operator: Exists}]
 
 crds:
   # The Run and Build CRDs, kept on uninstall (helm.sh/resource-policy: keep) and upgraded
