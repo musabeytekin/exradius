@@ -430,7 +430,8 @@ The operator writes these and the Run spec cannot change them:
 - `terminationGracePeriodSeconds: 30` (cancel, §8.4);
 - `runtimeClassName` from values (`runs.runtimeClassName`), empty for the cluster default.
   `gvisor` runs the pod in gVisor (`make -C deploy/kind dev-gvisor` locally); the four real
-  projects Verify and run in it, at a cost measured in §27;
+  projects Verify and run in it on kind, and the check projects on k3s, at a cost measured
+  in §27. It cannot be combined with `hostUsers: false`;
 - `hostUsers: false` when `runs.userNamespaces: true`. Every uid of the pod, a service's root
   included, is then an unprivileged uid on the node (uid 0 maps to a range like
   2191917056–2191982591). Services' own `chown` and user switch keep working with the
@@ -944,7 +945,9 @@ probes become a Run with `purpose: probe`:
   and a Run spec change must reach clusters on `helm upgrade`.
 - **Prerequisites** are not part of the chart: CloudNativePG and the RabbitMQ operator when the
   in-cluster stack services are used; a CSI storage class; a network plugin that enforces
-  NetworkPolicy; for gVisor, `runsc` on the nodes and a RuntimeClass (`runs.runtimeClassName`);
+  NetworkPolicy; for gVisor, `runsc` (with its `gvisor-bin/`) on the nodes, a `runsc` runtime
+  in containerd (on k3s through `config-v3.toml.tmpl`, as k3s rewrites `config.toml` at
+  start) and a RuntimeClass (`runs.runtimeClassName`);
   for user namespaces (`runs.userNamespaces`), containerd 2 with runc 1.2 or later and a
   kernel whose volume filesystems support idmapped mounts (ext4, xfs, tmpfs; Linux 6.3 or
   later); for build pods at `baseline`, the seccomp profile file on every node
@@ -1482,21 +1485,27 @@ Desktop VM), one run at a time, caches warm.
     only to the services' capabilities, so `exradius-runs` stays `baseline`.
 - **gVisor** works in the arm64 kind node (`make dev-gvisor`, release 20261026.0, its default
   `systrap` platform; runsc needs `systemd-cgroup = true` there and its `gvisor-bin/`
-  beside it). It was not tried on k3s: kind answered the question.
+  beside it) and on the amd64 k3s server (the same release in `/usr/local/bin`, the runtime
+  in k3s's `config-v3.toml.tmpl`, k3s restarted).
   - The four projects Verify (bank 20 s, Outline 65 s, Saleor 103 s, Plane 53–61 s) and
     ran one task each (21, 89, 72 and 78 tests).
   - Cost, Plane: Verify 55–61 s against 37–39 s; `pnpm install` 22–23 s against 9 s
     (about 2.5×); `uv sync` 4–5 s against 2 s; the agent's 72 issue tests 34 s against
     16 s. Saleor's task: 93 s preparing and 171 s running, against 66 s and 82 s with user
     namespaces. A pod's first container starts 3–6 s after its creation with gVisor or runc.
-  - gVisor cannot run a user-namespaced pod: the sandbox fails with `gofer: error setting
-    namespace of type user … invalid argument`. The two settings exclude each other.
+  - Cost, k3s (amd64, 8 cores): a check project's Verify 16–19 s against 12 s; a setup step
+    copying `/usr` (5,353 files, 180 MB) through `tar` onto the workspace 0.95 s against
+    0.26 s (about 3.7×). The check projects (`k3s-a`, `k3s-c`) pass under it.
+  - gVisor cannot run a user-namespaced pod, on either architecture: the sandbox fails with
+    `gofer: error setting namespace of type user … invalid argument`. The two settings
+    exclude each other.
 - **A pod the node cannot start fails its Run.** That gVisor failure showed that a sandbox
   the node cannot create appears only in `FailedCreatePodSandBox` Events, and the run
   waited forever. The operator now reads them (RBAC: list events in the runs namespace)
   once a scheduled pod has started nothing for 60 s, and fails the Run after three failed
   attempts with reason `SandboxFailed` and the kubelet's message. Verify's diagnosis names
-  the two settings, or the runtime missing on the node.
+  the two settings, or the runtime missing on the node. On k3s, a Verify with both settings
+  now fails after 61 s with that diagnosis.
 - **Build pods at `baseline`.**
   - kind: the seccomp profile alone suffices (its kernel has no AppArmor). A build ran its
     `RUN` steps (`chown`, the network through the proxy) and pushed, and so did a real
@@ -1510,9 +1519,13 @@ Desktop VM), one run at a time, caches warm.
     denied`; that profile's `deny mount` is silent, so nothing is logged. Seccomp profile
     plus AppArmor `Unconfined` builds, and so does the old fully Unconfined shape, even
     with `apparmor_restrict_unprivileged_userns=1`. So an AppArmor node needs
-    `deploy/apparmor/exradius-buildkit` loaded (`apparmor_parser` accepts it there; it was
-    not loaded, which is a host security change and the user's to make) to reach
-    `baseline`; without it `exradius-builds` stays `privileged`.
+    `deploy/apparmor/exradius-buildkit` loaded to reach `baseline`; without it
+    `exradius-builds` stays `privileged`.
+  - k3s with both profiles (`builds.seccompProfile`, `builds.appArmorProfile`):
+    `exradius-builds` is `baseline`. A real Exradius Build of a workstation Dockerfile with
+    `apt-get` and `chown` steps, cold, built in 25 s; on the host `rootlesskit`,
+    `buildkitd` and `apt-get` ran as `exradius-buildkit (enforce)`, with no denials. The
+    image then ran in a user-namespaced pod.
   - `restricted` stays impossible (setuid `newuidmap`), and user namespaces for build pods
     stay out (§24: the image's subordinate ids do not fit the pod's range).
 - **Pod Security review.** A server-side dry run of `restricted` on each namespace, with
@@ -1522,7 +1535,7 @@ Desktop VM), one run at a time, caches warm.
   |---|---|---|
   | `exradius` | `restricted` | nothing |
   | `exradius-runs` | `baseline` | run pods: "unrestricted capabilities, runAsNonRoot != true" (the services); with user namespaces only "unrestricted capabilities" |
-  | `exradius-builds` | `baseline` on kind with the profile; `privileged` on k3s | build pods: `newuidmap` needs privilege escalation |
+  | `exradius-builds` | `baseline` with the profiles (kind, k3s) | build pods: `newuidmap` needs privilege escalation |
 
 - **Two egress replicas** on kind: both carried a task's requests, the runner's log showed it
   asked both (`10.244.0.38: agent, 10.244.0.37: agent`), and a task completed across the
