@@ -2,6 +2,7 @@
 name = "exradius-bridge-kit"
 version = "0.1.0"
 description = "A library for bridges between work trackers and Exradius"
+license = "Apache-2.0"
 requires-python = ">=3.14"
 dependencies = [
     "aio-pika>=9.4",

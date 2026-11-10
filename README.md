@@ -419,3 +419,9 @@ Not done yet:
 - **Corporate networks.** There is no support yet for a corporate proxy, CA bundle or
   package mirrors at installation level.
 - **Usage and cost.** Neither is recorded per run.
+
+## License
+
+Apache License 2.0; see [LICENSE](LICENSE). The license covers this repository's code. The
+Claude Code binary that the runtime bundle image downloads at build time is Anthropic's,
+under Anthropic's own terms.

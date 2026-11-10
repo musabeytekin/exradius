@@ -2,6 +2,7 @@
 name = "exradius-jira"
 version = "0.2.0"
 description = "Connects a Jira Cloud site to Exradius, on the Exradius bridge kit"
+license = "Apache-2.0"
 requires-python = ">=3.14"
 dependencies = [
     "exradius-bridge-kit",
