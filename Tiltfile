@@ -62,6 +62,11 @@ docker_build('exradius-operator', '.', dockerfile='deploy/operator.Dockerfile', 
 
 docker_build('exradius-egress', '.', dockerfile='deploy/egress.Dockerfile', only=['egress'], ignore=['egress/bin'])
 
+# Build pods' image (rootless BuildKit with the clouds' credential helpers): the operator
+# reads it from EXRADIUS_BUILDER_IMAGE.
+docker_build('exradius-builder', '.', dockerfile='deploy/builder.Dockerfile', only=['builder'],
+              ignore=['builder/bin'], match_in_env_vars=True)
+
 # Not run by any Deployment: the worker names them in run pods, so Tilt writes the pushed
 # references into its environment (EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE,
 # EXRADIUS_PROJECT_DEFAULT_IMAGE).

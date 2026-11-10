@@ -29,12 +29,12 @@ dev-down:
 	-kind delete cluster --name exradius
 	-docker rm -f kind-registry
 
-# deploy/seccomp/buildkit.json as /var/lib/kubelet/seccomp/exradius/buildkit.json on every
+# charts/exradius/files/profiles/buildkit.json as /var/lib/kubelet/seccomp/exradius/buildkit.json on every
 # node: values builds.seccompProfile: exradius/buildkit.json then runs build pods with it.
 dev-seccomp:
 	for node in $$(kind get nodes --name exradius); do \
 	  docker exec $$node mkdir -p /var/lib/kubelet/seccomp/exradius && \
-	  docker exec -i $$node cp /dev/stdin /var/lib/kubelet/seccomp/exradius/buildkit.json < $(ROOT)/deploy/seccomp/buildkit.json || exit 1; \
+	  docker exec -i $$node cp /dev/stdin /var/lib/kubelet/seccomp/exradius/buildkit.json < $(ROOT)/charts/exradius/files/profiles/buildkit.json || exit 1; \
 	  echo "$$node: /var/lib/kubelet/seccomp/exradius/buildkit.json"; \
 	done
 
@@ -46,10 +46,11 @@ images:
 	docker build -t $(REGISTRY)/exradius-frontend:$(TAG) $(ROOT)/frontend
 	docker build -f $(ROOT)/deploy/operator.Dockerfile -t $(REGISTRY)/exradius-operator:$(TAG) $(ROOT)
 	docker build -f $(ROOT)/deploy/egress.Dockerfile -t $(REGISTRY)/exradius-egress:$(TAG) $(ROOT)
+	docker build -f $(ROOT)/deploy/builder.Dockerfile -t $(REGISTRY)/exradius-builder:$(TAG) $(ROOT)
 	docker build -f $(ROOT)/deploy/runtime-claude-code.Dockerfile --build-arg EXRADIUS_VERSION=$(VERSION) \
 	  -t $(REGISTRY)/exradius-runtime-claude-code:$(TAG) $(ROOT)
 	docker build -f $(ROOT)/deploy/project-default.Dockerfile -t $(REGISTRY)/exradius-project-default:$(TAG) $(ROOT)/deploy
-	for image in backend frontend operator egress runtime-claude-code project-default; do \
+	for image in backend frontend operator egress builder runtime-claude-code project-default; do \
 	  docker push -q $(REGISTRY)/exradius-$$image:$(TAG) || exit 1; \
 	done
 

@@ -54,6 +54,8 @@ const (
 
 // Container names.
 const (
+	// ContainerBundle copies the runtime bundle into the pod with BundleMount "copy".
+	ContainerBundle      = "bundle"
 	ContainerPrepare     = "prepare"
 	ContainerFiles       = "files"
 	ContainerWorkstation = "workstation"
@@ -105,9 +107,13 @@ type Config struct {
 	Egress               EgressConfig
 	RuntimeClassName     string
 	UserNamespaces       bool
-	NodeSelector         map[string]string
-	Tolerations          []corev1.Toleration
-	ImagePullSecrets     []string
+	// BundleMount is how run pods get the runtime bundle (docs/kubernetes.md §7.2): "image"
+	// (an image volume; containerd 2.1 or later on the nodes) or "copy" (an init container
+	// copies it from the bundle image into an emptyDir, for nodes without image volumes).
+	BundleMount      string
+	NodeSelector     map[string]string
+	Tolerations      []corev1.Toleration
+	ImagePullSecrets []string
 }
 
 // ProjectVolumeConfig is the per-project PVC of mirrors and caches (§7.6).
@@ -338,6 +344,9 @@ func (b Pods) Pod(run *v1.Run) *corev1.Pod {
 		pod.Spec.ImagePullSecrets = append(pod.Spec.ImagePullSecrets, corev1.LocalObjectReference{Name: name})
 	}
 
+	if b.copiesBundle() {
+		pod.Spec.InitContainers = []corev1.Container{b.bundle(run)}
+	}
 	if run.Spec.Purpose == v1.PurposeProbe {
 		pod.Spec.Containers = []corev1.Container{b.probeWorkstation(run)}
 		return pod
@@ -379,11 +388,41 @@ const (
 	volToken     = "run-token"
 )
 
+// BundleCopy is the bundle image's own copy command (deploy/runtime-claude-code.Dockerfile):
+// a static busybox script that copies the bundle into the directory it is given.
+const BundleCopy = "/.exradius/copy"
+
+// bundleCopyDir is where the bundle container writes the copy.
+const bundleCopyDir = "/exradius/bundle"
+
+func (b Pods) copiesBundle() bool { return b.Config.BundleMount == "copy" }
+
+func (b Pods) runtimeVolume(run *v1.Run) corev1.Volume {
+	if b.copiesBundle() {
+		return corev1.Volume{Name: volRuntime, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}
+	}
+	return corev1.Volume{Name: volRuntime, VolumeSource: corev1.VolumeSource{Image: &corev1.ImageVolumeSource{
+		Reference: run.Spec.Runtime.Image, PullPolicy: corev1.PullIfNotPresent,
+	}}}
+}
+
+// bundle copies the runtime bundle into the pod's runtime volume, which every other
+// container then mounts read-only as it would the image volume. It runs from the bundle
+// image itself, as the run user; it is not a step.
+func (b Pods) bundle(run *v1.Run) corev1.Container {
+	return corev1.Container{
+		Name:            ContainerBundle,
+		Image:           run.Spec.Runtime.Image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Command:         []string{BundleCopy, bundleCopyDir},
+		VolumeMounts:    []corev1.VolumeMount{{Name: volRuntime, MountPath: bundleCopyDir}},
+		SecurityContext: b.securityContext(),
+	}
+}
+
 func (b Pods) volumes(run *v1.Run) []corev1.Volume {
 	vols := []corev1.Volume{
-		{Name: volRuntime, VolumeSource: corev1.VolumeSource{Image: &corev1.ImageVolumeSource{
-			Reference: run.Spec.Runtime.Image, PullPolicy: corev1.PullIfNotPresent,
-		}}},
+		b.runtimeVolume(run),
 		{Name: volIdentity, VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 			LocalObjectReference: corev1.LocalObjectReference{Name: b.Config.IdentityConfigMap},
 			DefaultMode:          ptr.To[int32](0o444),

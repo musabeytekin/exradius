@@ -39,6 +39,8 @@ func main() {
 		serviceMemory, serviceCPU, projectAccess, projectClass string
 		projectSize, egressProxy, egressURL, egressPeers       string
 		noProxy, buildEgress, buildSeccomp, buildAppArmor      string
+		bundleMount, buildCredentials, buildNoProxy            string
+		buildPodLabels                                         string
 		runUID, runGID                                         int64
 		userNamespaces, leaderElect, projectVolume             bool
 		workers                                                int
@@ -61,6 +63,7 @@ func main() {
 	flag.StringVar(&projectSize, "project-volume-size", "100Gi", "size of each project volume")
 	flag.StringVar(&runtimeClass, "runtime-class-name", "", "RuntimeClass of run pods; empty is the cluster default")
 	flag.BoolVar(&userNamespaces, "user-namespaces", false, "run pods with hostUsers: false")
+	flag.StringVar(&bundleMount, "bundle-mount", "image", "how run pods get the runtime bundle: image (an image volume) or copy (an init container copies it into an emptyDir)")
 	flag.StringVar(&nodeSelector, "node-selector", "{}", "node selector of run pods, as JSON")
 	flag.StringVar(&tolerations, "tolerations", "[]", "tolerations of run pods, as JSON")
 	flag.StringVar(&pullSecrets, "image-pull-secrets", "", "comma-separated imagePullSecrets of run pods")
@@ -74,9 +77,12 @@ func main() {
 	flag.StringVar(&egressURL, "egress-url", "", "the egress proxy's reverse address (http://host:3129): the runner's git route and phase check")
 	flag.StringVar(&egressPeers, "egress-peers", "", "a host name resolving to every egress proxy pod (a headless Service)")
 	flag.StringVar(&noProxy, "no-proxy", "", "comma-separated hosts run pods reach without the proxy, besides localhost, the services and the api")
-	flag.StringVar(&buildSeccomp, "build-seccomp-profile", "", "Localhost seccomp profile of the build container, relative to the kubelet's seccomp directory (deploy/seccomp/buildkit.json installed on every node); empty: Unconfined")
-	flag.StringVar(&buildAppArmor, "build-apparmor-profile", "", "Localhost AppArmor profile of the build container (deploy/apparmor/exradius-buildkit loaded on every node), with --build-seccomp-profile on AppArmor nodes; empty: the runtime's default")
+	flag.StringVar(&buildSeccomp, "build-seccomp-profile", "", "Localhost seccomp profile of the build container, relative to the kubelet's seccomp directory (charts/exradius/files/profiles/buildkit.json installed on every node); empty: Unconfined")
+	flag.StringVar(&buildAppArmor, "build-apparmor-profile", "", "Localhost AppArmor profile of the build container (charts/exradius/files/profiles/exradius-buildkit loaded on every node), with --build-seccomp-profile on AppArmor nodes; empty: the runtime's default")
 	flag.StringVar(&buildEgress, "build-egress", "proxy", "how build pods reach the network: proxy (through --egress-proxy) or direct")
+	flag.StringVar(&buildCredentials, "build-credential-helper", "none", "how build pods sign in to the registry with their pod identity: none, ecr, gcr or acr (the builder image's Docker credential helpers)")
+	flag.StringVar(&buildNoProxy, "build-no-proxy", "", "comma-separated hosts build pods reach without the proxy: the cloud's pod identity endpoint (169.254.170.23 on EKS, 169.254.169.254 on GKE)")
+	flag.StringVar(&buildPodLabels, "build-pod-labels", "{}", "further labels of build pods, as JSON (azure.workload.identity/use on AKS)")
 	flag.BoolVar(&leaderElect, "leader-elect", true, "hold a Lease so only one replica reconciles")
 	flag.StringVar(&leaderID, "leader-election-id", "exradius-operator", "name of the leader election Lease")
 	flag.StringVar(&leaderNamespace, "leader-election-namespace", "exradius", "namespace of the leader election Lease")
@@ -91,11 +97,14 @@ func main() {
 	config := podspec.Config{
 		APIURL: apiURL, RunUID: runUID, RunGID: runGID, IdentityConfigMap: identity,
 		ServiceAccount: serviceAccount, WorkspaceStorageClass: storageClass,
-		RuntimeClassName: runtimeClass, UserNamespaces: userNamespaces,
+		RuntimeClassName: runtimeClass, UserNamespaces: userNamespaces, BundleMount: bundleMount,
 		ProjectVolume: podspec.ProjectVolumeConfig{
 			Enabled: projectVolume, AccessMode: corev1.PersistentVolumeAccessMode(projectAccess), StorageClass: projectClass,
 		},
 		Egress: podspec.EgressConfig{Proxy: egressProxy, URL: egressURL, Peers: egressPeers, NoProxy: splitList(noProxy)},
+	}
+	if bundleMount != "image" && bundleMount != "copy" {
+		fail(logger, fmt.Errorf("--bundle-mount: %q is not image or copy", bundleMount))
 	}
 	if mode := config.ProjectVolume.AccessMode; mode != corev1.ReadWriteOnce && mode != corev1.ReadWriteMany {
 		fail(logger, fmt.Errorf("--project-volume-access-mode: %q is not ReadWriteOnce or ReadWriteMany", mode))
@@ -134,6 +143,16 @@ func main() {
 		APIURL: apiURL, Image: builderImage, ServiceAccount: buildServiceAccount,
 		BuildkitdConfigMap: buildkitdConfig, NodeSelector: config.NodeSelector, Tolerations: config.Tolerations,
 		SeccompProfile: buildSeccomp, AppArmorProfile: buildAppArmor,
+		CredentialHelper: buildCredentials,
+	}
+	if _, ok := podspec.CredentialHelpers[buildCredentials]; !ok && buildCredentials != "none" {
+		fail(logger, fmt.Errorf("--build-credential-helper: %q is not none, ecr, gcr or acr", buildCredentials))
+	}
+	if buildCredentials == "none" {
+		builds.CredentialHelper = ""
+	}
+	if err := json.Unmarshal([]byte(orDefault(buildPodLabels, "{}")), &builds.PodLabels); err != nil {
+		fail(logger, fmt.Errorf("--build-pod-labels: %w", err))
 	}
 	if buildAppArmor != "" && buildSeccomp == "" {
 		fail(logger, fmt.Errorf("--build-apparmor-profile needs --build-seccomp-profile"))
@@ -144,6 +163,7 @@ func main() {
 		if host := hostOf(apiURL); host != "" {
 			builds.NoProxy = []string{host}
 		}
+		builds.NoProxy = append(builds.NoProxy, splitList(buildNoProxy)...)
 	case "direct":
 	default:
 		fail(logger, fmt.Errorf("--build-egress: %q is not proxy or direct", buildEgress))

@@ -7,6 +7,8 @@
 #                         with exradius and the Claude Agent SDK installed
 #   git-hooks/            the hooks dispatcher under every hook name (core.hooksPath)
 #   VERSION               exradius version, runtime name, Claude Code version
+#   .exradius/copy        copies the entries above into a directory, with the static busybox
+#                         beside it: runs.bundleMount: copy, for nodes without image volumes
 #
 # Run pods mount it read-only at /opt/exradius/runtime as an image volume (docs/kubernetes.md
 # §7.2), so any glibc-based project image can run the agent. Compiled wheels are limited to
@@ -80,6 +82,22 @@ RUN set -eu; \
     printf 'exradius %s\nruntime claude_code\nclaude-code %s\n' "$EXRADIUS_VERSION" "$CLAUDE_CODE_VERSION" > /bundle/VERSION; \
     chmod -R a+rX,go-w /bundle; chmod 755 /bundle/bin/exradius-runner
 
+# The bundle image has no libc, so its copy command is a script for a static busybox. tar
+# keeps modes and times (the .pyc files check their sources' times) and, as the run user,
+# no owners. The entries are the layout above.
+FROM busybox:1.37.0-musl@sha256:f6a95d611e0a8780fabdb2aec43e31275b2720dfefa3e41b16835bfc42454478 AS copy
+RUN set -eu; mkdir -p /out/.exradius; cp /bin/busybox /out/.exradius/busybox; \
+    printf '%s\n' \
+      '#!/.exradius/busybox sh' \
+      '# Copies the bundle into $1 (runs.bundleMount: copy, docs/kubernetes.md §7.2).' \
+      'set -eu -o pipefail' \
+      'b=/.exradius/busybox' \
+      'cd /' \
+      '$b tar -cf - bin python git-hooks VERSION | $b tar -C "$1" -xof -' \
+      'echo "copied the runtime bundle: $($b head -1 VERSION), $($b du -sm "$1" | $b cut -f1) MB"' \
+      > /out/.exradius/copy; \
+    chmod 755 /out/.exradius/copy /out/.exradius/busybox
+
 # `docker build --target bundle --output ...` exports just the directory.
 FROM scratch AS bundle
 COPY --from=build /bundle /
@@ -92,3 +110,4 @@ LABEL exradius.role="runtime-bundle" \
       exradius.runtime="claude_code" \
       exradius.version="${EXRADIUS_VERSION}"
 COPY --from=build /bundle /
+COPY --from=copy /out/ /

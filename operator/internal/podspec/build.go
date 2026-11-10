@@ -60,15 +60,31 @@ type BuildConfig struct {
 	// NoProxy are the hosts a build reaches directly (the api's internal host).
 	NoProxy []string
 	// SeccompProfile is a Localhost seccomp profile for the build container, relative to
-	// the kubelet's seccomp directory (deploy/seccomp/buildkit.json, installed on every
+	// the kubelet's seccomp directory (charts/exradius/files/profiles/buildkit.json, installed on every
 	// node). With it the build pod fits Pod Security baseline; empty: seccomp and AppArmor
 	// Unconfined, which needs privileged (docs/kubernetes.md §12).
 	SeccompProfile string
 	// AppArmorProfile is a Localhost AppArmor profile for the build container with
-	// SeccompProfile, on nodes with AppArmor (deploy/apparmor/exradius-buildkit, loaded on
+	// SeccompProfile, on nodes with AppArmor (charts/exradius/files/profiles/exradius-buildkit, loaded on
 	// every node): the runtime's default profile denies mount, which rootlesskit needs.
 	// Empty: the runtime's default (nodes without AppArmor).
 	AppArmorProfile string
+	// CredentialHelper signs the build in to the registry of its image with the pod's
+	// cloud identity (docs/kubernetes.md §12): ecr, gcr or acr, a key of
+	// CredentialHelpers. Empty: no credentials (the kind registry).
+	CredentialHelper string
+	// PodLabels are further labels of build pods: AKS Workload Identity's webhook acts on
+	// pods labelled azure.workload.identity/use.
+	PodLabels map[string]string
+}
+
+// CredentialHelpers are the Docker credential helpers of the Exradius builder image
+// (deploy/builder.Dockerfile), by values builds.credentialHelper: the helper's name is
+// docker-credential-<name> on its PATH.
+var CredentialHelpers = map[string]string{
+	"ecr": "ecr-login",    // amazon-ecr-credential-helper: EKS Pod Identity or IRSA
+	"gcr": "exradius-gcr", // builder/: the GKE metadata server's token (Workload Identity)
+	"acr": "exradius-acr", // builder/: AKS Workload Identity, exchanged for an ACR refresh token
 }
 
 // proxyVars are the proxy variables of a build, upper and lower case.
@@ -93,8 +109,19 @@ echo "fetched the build context: $(find ` + BuildContext + ` -type f | wc -l) fi
 
 // buildScript runs the build and copies buildctl's metadata into the termination message
 // (buildctl writes its metadata file through a temporary file next to it, which /dev does
-// not allow).
-const buildScript = `buildctl-daemonless.sh "$@" && cat ` + buildMetadata + ` > /dev/termination-log`
+// not allow). With a credential helper it first names it for the image's registry in
+// buildctl's Docker config, which buildctl asks for the push credentials.
+const buildScript = `if [ -n "$EXRADIUS_CREDENTIAL_HELPER" ]; then
+  mkdir -p "$DOCKER_CONFIG"
+  printf '{"credHelpers":{"%s":"%s"}}\n' "$EXRADIUS_REGISTRY" "$EXRADIUS_CREDENTIAL_HELPER" > "$DOCKER_CONFIG/config.json"
+fi
+buildctl-daemonless.sh "$@" && cat ` + buildMetadata + ` > /dev/termination-log`
+
+// RegistryOf is the registry host of an image reference (host[:port]/path:tag).
+func RegistryOf(image string) string {
+	host, _, _ := strings.Cut(image, "/")
+	return host
+}
 
 // BuildPodName is the pod of a Build: the Build's own name (one pod per Build).
 func BuildPodName(build *v1.Build) string { return build.Name }
@@ -123,7 +150,11 @@ func (c BuildConfig) BuildArgs(build *v1.Build) []string {
 
 // BuildPod is the pod of a Build.
 func (c BuildConfig) BuildPod(build *v1.Build) *corev1.Pod {
-	labels := map[string]string{LabelPurpose: PurposeBuild, LabelImage: build.Spec.Name}
+	labels := map[string]string{}
+	for k, v := range c.PodLabels {
+		labels[k] = v
+	}
+	labels[LabelPurpose], labels[LabelImage] = PurposeBuild, build.Spec.Name
 	if build.Spec.Project != "" {
 		labels[LabelProject] = build.Spec.Project
 	}
@@ -228,6 +259,11 @@ func (c BuildConfig) buildContainer(build *v1.Build) corev1.Container {
 		mounts = append(mounts, corev1.VolumeMount{Name: volBuildkitConfig, MountPath: buildkitConfig, ReadOnly: true})
 	}
 	env[0].Value = flags
+	if helper := CredentialHelpers[c.CredentialHelper]; helper != "" {
+		env = append(env,
+			corev1.EnvVar{Name: "EXRADIUS_CREDENTIAL_HELPER", Value: helper},
+			corev1.EnvVar{Name: "EXRADIUS_REGISTRY", Value: RegistryOf(build.Spec.Image)})
+	}
 	return corev1.Container{
 		Name:            ContainerBuild,
 		Image:           c.Image,

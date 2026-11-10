@@ -19,7 +19,12 @@ spec:
   - command:
     - sh
     - -c
-    - buildctl-daemonless.sh "$@" && cat /tmp/metadata.json > /dev/termination-log
+    - |-
+      if [ -n "$EXRADIUS_CREDENTIAL_HELPER" ]; then
+        mkdir -p "$DOCKER_CONFIG"
+        printf '{"credHelpers":{"%s":"%s"}}\n' "$EXRADIUS_REGISTRY" "$EXRADIUS_CREDENTIAL_HELPER" > "$DOCKER_CONFIG/config.json"
+      fi
+      buildctl-daemonless.sh "$@" && cat /tmp/metadata.json > /dev/termination-log
     - buildctl
     - build
     - --progress

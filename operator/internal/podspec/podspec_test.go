@@ -576,3 +576,93 @@ func TestBuildPodThroughTheProxy(t *testing.T) {
 		t.Error("a direct build got proxy arguments")
 	}
 }
+
+// With runs.bundleMount: copy (nodes without image volumes) the bundle is copied from its
+// image into an emptyDir by the first init container, which every other container mounts
+// read-only where the image volume was (docs/kubernetes.md §7.2).
+func TestBundleCopy(t *testing.T) {
+	c := config()
+	c.BundleMount = "copy"
+	for _, run := range []*v1.Run{taskRun(), baseRun(v1.PurposeProbe, "probe-1", "p-1")} {
+		pod := Pods{Config: c}.Pod(run)
+		for _, v := range pod.Spec.Volumes {
+			if v.Image != nil {
+				t.Fatalf("%s: an image volume in copy mode", run.Name)
+			}
+			if v.Name == volRuntime && v.EmptyDir == nil {
+				t.Fatalf("%s: the runtime volume is not an emptyDir", run.Name)
+			}
+		}
+		first := pod.Spec.InitContainers[0]
+		if first.Name != ContainerBundle || first.Image != run.Spec.Runtime.Image || first.Command[0] != BundleCopy {
+			t.Fatalf("%s: first init container %s %s %v", run.Name, first.Name, first.Image, first.Command)
+		}
+		if sc := first.SecurityContext; *sc.RunAsUser != c.RunUID || !*sc.ReadOnlyRootFilesystem || *sc.AllowPrivilegeEscalation {
+			t.Fatalf("%s: bundle container security %+v", run.Name, sc)
+		}
+		if m := first.VolumeMounts; len(m) != 1 || m[0].Name != volRuntime || m[0].ReadOnly {
+			t.Fatalf("%s: the bundle container writes only the runtime volume: %+v", run.Name, m)
+		}
+		for _, ctr := range append(pod.Spec.InitContainers[1:], pod.Spec.Containers...) {
+			for _, m := range ctr.VolumeMounts {
+				if m.Name == volRuntime && (!m.ReadOnly || m.MountPath != RuntimeDir) {
+					t.Fatalf("%s/%s mounts the bundle copy %+v", run.Name, ctr.Name, m)
+				}
+			}
+		}
+	}
+	// Not a step: the steps are those of the image mode.
+	if got, want := StepNames(taskRun()), StepNames(taskRun()); len(got) != len(want) || got[0].Container != ContainerPrepare {
+		t.Fatalf("steps %+v", got)
+	}
+	// The default is the image volume, with no bundle container.
+	pod := Pods{Config: config()}.Pod(taskRun())
+	if pod.Spec.InitContainers[0].Name != ContainerPrepare {
+		t.Fatalf("image mode starts with %s", pod.Spec.InitContainers[0].Name)
+	}
+}
+
+// In a cloud the build signs in to its image's registry with the pod's identity: the
+// build container names the builder image's credential helper for that registry only, and
+// AKS's webhook label is on the pod.
+func TestBuildPodCredentialHelper(t *testing.T) {
+	c := buildConfig()
+	c.CredentialHelper = "ecr"
+	c.PodLabels = map[string]string{"azure.workload.identity/use": "true", LabelPurpose: "overridden?"}
+	b := build()
+	b.Spec.Image = "123456789012.dkr.ecr.eu-central-1.amazonaws.com/exradius/saleor/workstation:1a2b3c4d5e6f"
+	pod := c.BuildPod(b)
+	env := map[string]string{}
+	for _, e := range pod.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["EXRADIUS_CREDENTIAL_HELPER"] != "ecr-login" || env["EXRADIUS_REGISTRY"] != "123456789012.dkr.ecr.eu-central-1.amazonaws.com" {
+		t.Fatalf("credential helper env %v", env)
+	}
+	if !strings.Contains(pod.Spec.Containers[0].Command[2], `"credHelpers"`) {
+		t.Fatal("the build script writes the Docker config")
+	}
+	if pod.Labels["azure.workload.identity/use"] != "true" || pod.Labels[LabelPurpose] != PurposeBuild {
+		t.Fatalf("labels %v", pod.Labels)
+	}
+	for _, e := range pod.Spec.Containers[0].Env {
+		if e.ValueFrom != nil {
+			t.Fatalf("no secret in the build container: %s", e.Name)
+		}
+	}
+	for name, helper := range map[string]string{"gcr": "exradius-gcr", "acr": "exradius-acr", "": ""} {
+		c.CredentialHelper = name
+		got := ""
+		for _, e := range c.BuildPod(b).Spec.Containers[0].Env {
+			if e.Name == "EXRADIUS_CREDENTIAL_HELPER" {
+				got = e.Value
+			}
+		}
+		if got != helper {
+			t.Fatalf("%q: helper %q", name, got)
+		}
+	}
+	if RegistryOf("kind-registry:5000/exradius/p/w:1") != "kind-registry:5000" {
+		t.Fatal("RegistryOf")
+	}
+}
