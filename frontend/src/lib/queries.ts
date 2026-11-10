@@ -22,6 +22,7 @@ export const qk = {
   allTasks: ["tasks"] as const,
   task: (id: string) => ["task", id] as const,
   transcript: (id: string) => ["task", id, "transcript"] as const,
+  network: (id: string) => ["task", id, "network"] as const,
   events: ["events"] as const,
 };
 
@@ -64,3 +65,7 @@ export const useIntegrationTokens = () => useQuery({ queryKey: qk.integrationTok
 export const useBridges = () => useQuery({ queryKey: qk.bridges, queryFn: api.bridges.list, refetchInterval: 60_000 });
 export const useRouting = () => useQuery({ queryKey: qk.routing, queryFn: api.routing.get });
 export const useProviders = () => useQuery({ queryKey: qk.providers, queryFn: api.providers.list });
+// The egress proxy's records of a task's run: hosts reached and refused.
+export const useTaskNetwork = (taskId: string, live: boolean) => useQuery({
+  queryKey: qk.network(taskId), queryFn: () => api.tasks.network(taskId), refetchInterval: live ? 5000 : false,
+});

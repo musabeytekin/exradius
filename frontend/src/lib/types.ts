@@ -326,6 +326,19 @@ export interface StoredEvent {
   payload: Envelope; created_at: string; published_at: string | null;
 }
 
+/** One host a run's pod asked the egress proxy for (`GET /api/tasks/{id}/network`). */
+export interface NetworkHost {
+  host: string; ports: number[];
+  /** `setup` (clones, services, setup commands: any host) and/or `agent` (the allowlist). */
+  phases: ("setup" | "agent")[];
+  /** `connect` (a tunnel), `http`, or a route of the proxy: `model`, `git`, `mcp`. */
+  routes: string[];
+  requests: number; bytes: number; last_at: string | null;
+  /** Why the latest request was refused (refused hosts only). */
+  reason: string | null;
+}
+export interface TaskNetwork { reached: NetworkHost[]; refused: NetworkHost[]; requests: number }
+
 export interface TaskDetail extends TaskSummary {
   instructions: string; context: unknown; correlation: unknown;
   attachments: TaskAttachment[]; run: Run | null; info_requests: InfoRequest[];

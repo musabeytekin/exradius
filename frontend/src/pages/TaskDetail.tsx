@@ -3,6 +3,7 @@ import { Link, useParams } from "@tanstack/react-router";
 import { useMemo, useState, type ReactNode } from "react";
 import { FileDrop } from "@/components/FileDrop";
 import { EnvironmentPreview } from "@/components/EnvironmentPreview";
+import { NetworkHosts } from "@/components/NetworkHosts";
 import { environmentTextOf } from "@/lib/environment";
 import { Markdown } from "@/components/Markdown";
 import { TranscriptViewer } from "@/components/transcript/TranscriptViewer";
@@ -17,7 +18,7 @@ import { useConfirm } from "@/lib/confirm";
 import { elideBase64, fileToAttachment } from "@/lib/files";
 import { absoluteTime, between, bytes, clockTime, duration, pretty, relativeTime, shortId } from "@/lib/format";
 import { shortCommit } from "@/lib/projectConfig";
-import { qk, useProjects } from "@/lib/queries";
+import { qk, useProjects, useTaskNetwork } from "@/lib/queries";
 import { toast } from "@/lib/toast";
 import { TERMINAL_STATES, type Artifact, type InfoRequest, type ResultPayload, type RunRouting, type StatusPayload, type TaskDetail, type TaskState } from "@/lib/types";
 import { useTaskFeed, type FeedEvent, type FeedStatus } from "@/lib/useTaskFeed";
@@ -154,6 +155,8 @@ function Rejected({ events }: { events: FeedEvent[] }) {
 
 function Body({ task, state, live, feed, result }: { task: TaskDetail; state: TaskState; live: boolean; feed: ReturnType<typeof useTaskFeed>; result?: ResultPayload }) {
   const [tab, setTab] = useState("transcript");
+  const network = useTaskNetwork(task.task_id, live);
+  const refused = network.data?.refused.length ?? 0;
   const open = task.info_requests.filter((r) => !r.answered_at);
   // Info requests published since the task loaded: the stream knows before the task query.
   const streamed = feed.events.filter((e) => e.type === "info_request").map((e) => e.envelope.payload as { request_id: string; question: string; context: string | null });
@@ -175,6 +178,7 @@ function Body({ task, state, live, feed, result }: { task: TaskDetail; state: Ta
             <Tabs.Trigger value="transcript">Transcript</Tabs.Trigger>
             <Tabs.Trigger value="input">Task</Tabs.Trigger>
             <Tabs.Trigger value="events" count={feed.events.length || task.events.length}>Events</Tabs.Trigger>
+            <Tabs.Trigger value="network" count={refused || network.data?.reached.length || undefined} attention={refused > 0}>Network</Tabs.Trigger>
           </Tabs.List>
           <Tabs.Content value="transcript">
             <TranscriptViewer
@@ -188,6 +192,7 @@ function Body({ task, state, live, feed, result }: { task: TaskDetail; state: Ta
           </Tabs.Content>
           <Tabs.Content value="input" className="pt-4"><TaskInput task={task} /></Tabs.Content>
           <Tabs.Content value="events" className="pt-4"><EventsList events={feed.events.length ? feed.events : task.events.map((e) => ({ id: e.id, type: e.type, envelope: e.payload }))} /></Tabs.Content>
+          <Tabs.Content value="network" className="pt-4"><NetworkHosts taskId={task.task_id} live={live} /></Tabs.Content>
         </Tabs.Root>
       </div>
       <aside className="sticky top-6 flex max-h-[calc(100vh-48px)] flex-col gap-4 self-start overflow-y-auto">

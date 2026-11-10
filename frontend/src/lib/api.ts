@@ -206,6 +206,8 @@ export const api = {
     transcript: (id: string, after_seq = 0, limit = 5000) =>
       get<T.TranscriptChunk[]>(`/tasks/${encodeURIComponent(id)}/transcript`, { after_seq, limit }),
     events: (id: string) => get<T.StoredEvent[]>(`/tasks/${encodeURIComponent(id)}/events`),
+    /** Hosts the run reached and was refused, from the egress proxy's records. */
+    network: (id: string) => get<T.TaskNetwork>(`/tasks/${encodeURIComponent(id)}/network`),
     cancel: (id: string) => post<{ run_id: string; status: string }>(`/tasks/${encodeURIComponent(id)}/cancel`),
     send: (b: T.TaskMessage) => post<T.Published>("/tasks", b),
     answer: (id: string, b: { request_id: string; answer: string; attachments: T.AttachmentIn[] }) =>
