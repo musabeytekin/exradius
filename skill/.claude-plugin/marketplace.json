@@ -1,0 +1,15 @@
+{
+  "name": "exradius-skill",
+  "owner": { "name": "musabeytekin" },
+  "metadata": {
+    "description": "The Exradius project setup skill."
+  },
+  "plugins": [
+    {
+      "name": "exradius",
+      "source": "./",
+      "description": "Set up a project for Exradius: write exradius.yaml, the workstation Dockerfile and the admin README, and check them locally with Docker the way Exradius's Verify does.",
+      "version": "0.3.0"
+    }
+  ]
+}
