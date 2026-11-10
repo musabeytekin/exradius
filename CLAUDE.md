@@ -196,9 +196,10 @@ node-installed `deploy/seccomp/buildkit.json`, and `deploy/apparmor/exradius-bui
 AppArmor nodes, via `builds.seccompProfile`/`appArmorProfile`; `privileged` without them:
 rootless BuildKit creates a user namespace and mounts in it; kubernetes.md §12, §27).
 
-**Isolation (kubernetes.md §7.8, §27; phase 5).** `runs.userNamespaces` (`hostUsers: false`)
-and `runs.runtimeClassName` (`gvisor`: `make -C deploy/kind dev-gvisor` locally) are install
-values the operator writes into every run pod. The run token is never a variable: `prepare`
+**Isolation (kubernetes.md §7.8, §27; phase 5).** `runs.userNamespaces` (`hostUsers: false`,
+on by default) and `runs.runtimeClassName` (`gvisor`, an opt-in that excludes user namespaces:
+`make -C deploy/kind dev-gvisor` locally) are install values the operator writes into every run
+pod. The run token is never a variable: `prepare`
 and `files` read it from the Secret as a file, `prepare` hands a copy to the workstation in
 an in-memory volume, and the runner deletes it once read and makes itself non-dumpable
 (`runner/environment.py`), so the agent, the same uid, cannot read it. A Run ends when its

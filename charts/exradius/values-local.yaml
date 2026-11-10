@@ -45,6 +45,9 @@ runs:
   workspace: {size: 10Gi}
   # One node: ReadWriteOnce is shared by every run of a project.
   projectVolume: {size: 20Gi}
+  # As the chart default. For gVisor (make -C deploy/kind dev-gvisor) set
+  # runtimeClassName: gvisor and userNamespaces: false.
+  userNamespaces: true
 
 egress:
   # Build pods push to the kind registry through the proxy; it is on kind's Docker network.

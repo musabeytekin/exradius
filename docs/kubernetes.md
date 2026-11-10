@@ -432,8 +432,8 @@ The operator writes these and the Run spec cannot change them:
   `gvisor` runs the pod in gVisor (`make -C deploy/kind dev-gvisor` locally); the four real
   projects Verify and run in it on kind, and the check projects on k3s, at a cost measured
   in §27. It cannot be combined with `hostUsers: false`;
-- `hostUsers: false` when `runs.userNamespaces: true`. Every uid of the pod, a service's root
-  included, is then an unprivileged uid on the node (uid 0 maps to a range like
+- `hostUsers: false` when `runs.userNamespaces: true`, the default since phase 5. Every uid
+  of the pod, a service's root included, is then an unprivileged uid on the node (uid 0 maps to a range like
   2191917056–2191982591). Services' own `chown` and user switch keep working with the
   capability set of §7.4, which act inside the pod's user namespace only. Checked on kind and
   k3s (§27).
@@ -977,8 +977,8 @@ runs:
   workspace: {storageClass: "", size: 50Gi}
   projectVolume: {enabled: true, accessMode: ReadWriteOnce, storageClass: "", size: 100Gi}
   bundleMount: image            # or copy
-  runtimeClassName: ""          # gvisor, kata-..., or the default
-  userNamespaces: false         # hostUsers: false
+  runtimeClassName: ""          # gvisor (opt-in), kata-..., or the default
+  userNamespaces: true          # hostUsers: false; off for gvisor
   nodeSelector: {}
   tolerations: []
   imagePullSecrets: []
@@ -1543,3 +1543,11 @@ Desktop VM), one run at a time, caches warm.
   the chart adds the PodDisruptionBudget and the spread of §11.
 - **DNS and warm pools** are decided in §22: DNS stays open for now, with the proxy as the
   run pods' resolver as the design; warm pools are closed.
+- **Defaults, decided by the user on 2026-11-10** from the measurements above:
+
+  | Setting | Chart default (`values.yaml`) | kind (`values-local.yaml`) | k3s check values | Clouds (phase 6) |
+  |---|---|---|---|---|
+  | `runs.userNamespaces` | `true` | `true` | `true` | `true`, once each node image passes |
+  | `runs.runtimeClassName` | empty | empty | empty | empty; `gvisor` is an opt-in for installs that take tickets from untrusted sources (and excludes user namespaces) |
+  | `builds.seccompProfile`, `builds.appArmorProfile` | empty (`privileged` builds): the files must be on the nodes first | seccomp profile (`dev-up` installs it) | both (installed by hand) | both, installed by the node bootstrap |
+  | `egress.replicas` | 1 | 1 | 1 | 2 |

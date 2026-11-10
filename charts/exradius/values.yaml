@@ -119,7 +119,7 @@ egress:
   # Every run's and build's requests go through the proxy. One replica suits one node; with
   # more, the chart spreads them over nodes and adds a PodDisruptionBudget (one down at a
   # time). Each replica watches every run pod, and the runner asks each one before the
-  # agent phase (docs/kubernetes.md §11).
+  # agent phase (docs/kubernetes.md §11). Phase 6's cloud values use 2.
   replicas: 1
   # Hosts every run may reach in the agent phase (pypi.org; *.example.com for subdomains).
   allow: []
@@ -174,8 +174,17 @@ runs:
   # storage class (EFS, Filestore, Azure Files, NFS), or turn it off: clones then fetch
   # from the remote and each cache is an empty directory per run.
   projectVolume: {enabled: true, accessMode: ReadWriteOnce, storageClass: "", size: 100Gi}
+  # A sandbox runtime for run pods, by RuntimeClass name: "gvisor" (runsc and the
+  # RuntimeClass on the nodes) makes a run's processes talk to gVisor's user-space kernel.
+  # Off by default: installs and tests take about 1.5-2.5x as long (docs/kubernetes.md
+  # §27); turn it on for installs that take tickets from untrusted sources. It cannot be
+  # combined with userNamespaces.
   runtimeClassName: ""
-  userNamespaces: false
+  # hostUsers: false. Every uid of a run pod, a service's root included, is an
+  # unprivileged uid on the node. Needs containerd 2, runc 1.2 or later and idmapped mounts
+  # on the volumes' filesystems (Linux 6.3+); a node without them fails the run with a
+  # diagnosis. Turn it off for a sandbox runtime (runtimeClassName: gvisor).
+  userNamespaces: true
   nodeSelector: {}
   tolerations: []
   # Names of Secrets in the runs namespace for pulling private project images.
@@ -206,12 +215,15 @@ builds:
   # Localhost profile, relative to the kubelet's seccomp directory (for example
   # exradius/buildkit.json: deploy/seccomp/buildkit.json copied to
   # /var/lib/kubelet/seccomp/exradius/ on every node that runs builds): RuntimeDefault plus
-  # those calls, and exradius-builds at "baseline" (docs/kubernetes.md §12).
+  # those calls, and exradius-builds at "baseline" (docs/kubernetes.md §12). Empty by default
+  # because the file must be on every node first: kind's dev-up installs it, the k3s check
+  # installs it by hand, and phase 6's node bootstrap will for the clouds.
   seccompProfile: ""
   # With seccompProfile, on nodes with AppArmor (Ubuntu, GKE's COS, AKS): a Localhost
   # AppArmor profile that allows mounting in the build's own user namespace, which the
   # runtime's default profile denies (deploy/apparmor/exradius-buildkit, loaded on every
-  # node that runs builds). Empty: the runtime's default AppArmor profile.
+  # node that runs builds). Empty: the runtime's default AppArmor profile. Empty by default
+  # for the same reason as seccompProfile.
   appArmorProfile: ""
 
 crds:
