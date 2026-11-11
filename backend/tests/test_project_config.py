@@ -81,7 +81,7 @@ connections:
     config: {token: "${secret:GITHUB_TOKEN}"}
   internal-docs:
     command: npx
-    args: ["-y", "@acme/docs-mcp"]
+    args: ["-y", "@acme/docs-mcp@1.4.2"]
     env: {DOCS_TOKEN: "${secret:DOCS_TOKEN}"}
   tracker:
     url: https://mcp.example.com/mcp
@@ -128,7 +128,7 @@ def test_the_design_example_parses():
     assert config.identity("developer") == ("Developer", "dev-bot@acme.com")
     assert config.identity("scout") == ("Scout", "scout@bank.exradius.local")
     assert config.connection_definition("internal-docs") == {
-        "name": "internal-docs", "transport": "stdio", "command": "npx", "args": ["-y", "@acme/docs-mcp"],
+        "name": "internal-docs", "transport": "stdio", "command": "npx", "args": ["-y", "@acme/docs-mcp@1.4.2"],
         "url": None, "env": {"DOCS_TOKEN": "${secret:DOCS_TOKEN}"}, "headers": {},
     }
 
@@ -331,7 +331,7 @@ def test_connection_rules():
 
 
 def test_launchers_on_the_default_workstation_are_warnings():
-    text = MINIMAL + "connections:\n  fs: {catalog: filesystem}\n  docs: {command: uvx, args: [docs-mcp]}\n  web: {url: 'http://h'}\n"
+    text = MINIMAL + "connections:\n  fs: {catalog: filesystem}\n  docs: {command: uvx, args: [docs-mcp@1.0.0]}\n  web: {url: 'http://h'}\n"
     assert warnings(text) == [
         "connections.fs: needs npx, which the default workstation image does not have",
         "connections.docs: needs uvx, which the default workstation image does not have",
@@ -350,7 +350,7 @@ def test_catalog_expansion():
     assert gitlab["env"] == {"GITLAB_PERSONAL_ACCESS_TOKEN": "t", "GITLAB_API_URL": "https://gitlab.com/api/v4"}
     assert catalog.expand(catalog.entry("filesystem"), {})["args"][-1] == "/work"
     assert catalog.expand(catalog.entry("filesystem"), {"path": "/work/app"})["args"] == [
-        "-y", "@modelcontextprotocol/server-filesystem", "/work/app"]
+        "-y", "@modelcontextprotocol/server-filesystem@2.3.0", "/work/app"]
     assert {e.key for e in catalog.CATALOG if e.requires == "uvx"} == {"postgres", "jira", "fetch"}
 
 

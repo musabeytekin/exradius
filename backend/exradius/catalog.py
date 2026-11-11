@@ -17,10 +17,22 @@ resolves them (``exradius.resolve``).
 launcher downloads it from and the service's API. The agent phase may reach them
 (docs/kubernetes.md §11, ``exradius.network``), as it may the host of a config key marked
 ``host`` (GitLab's API URL, the Jira URL).
+
+Every ``npx`` and ``uvx`` package is pinned to an exact version (``npx -y <package>@<version>``,
+``uvx <command>@<version>``), so new code runs with a connection's secrets only after a
+commit here (docs/agent-routing.md §3.1). The launchers resolve the package's own
+dependencies afresh within its declared ranges; only the package itself is fixed. To bump
+one, read the version from its registry (``npm view <package> version``,
+``https://pypi.org/pypi/<package>/json``), change it in ``args`` and in the table of
+docs/config-repo.md §5, and run Verify on a project that uses the entry. The new version
+changes the connection's definition hash, so routing stops using that connection's stored
+tools until a Verify lists them again. The hosted entries (``github``, ``linear``) have no version to pin: their tools can change
+without a commit.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -84,7 +96,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Projects, merge requests and issues on GitLab.com or self-managed.",
         transport="stdio",
         command="npx",
-        args=("-y", "@modelcontextprotocol/server-gitlab"),
+        args=("-y", "@modelcontextprotocol/server-gitlab@2025.4.25"),
         config=(
             ConfigKey("token", "GitLab personal access token", "env", "GITLAB_PERSONAL_ACCESS_TOKEN"),
             ConfigKey("api_url", "GitLab API URL", "env", "GITLAB_API_URL", required=False,
@@ -99,7 +111,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Schema inspection and queries. Restricted mode runs read-only transactions.",
         transport="stdio",
         command="uvx",
-        args=("postgres-mcp", "--access-mode=restricted"),
+        args=("postgres-mcp@0.3.0", "--access-mode=restricted"),
         config=(ConfigKey("url", "Database connection string", "env", "DATABASE_URI"),),
         requires="uvx",
         hosts=PYPI,
@@ -110,7 +122,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Read channels and post messages with a bot token.",
         transport="stdio",
         command="npx",
-        args=("-y", "@modelcontextprotocol/server-slack"),
+        args=("-y", "@modelcontextprotocol/server-slack@2025.4.25"),
         config=(
             ConfigKey("bot_token", "Slack bot token", "env", "SLACK_BOT_TOKEN"),
             ConfigKey("team_id", "Slack team id", "env", "SLACK_TEAM_ID"),
@@ -124,7 +136,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Issues, events and stack traces from Sentry.",
         transport="stdio",
         command="npx",
-        args=("-y", "@sentry/mcp-server"),
+        args=("-y", "@sentry/mcp-server@0.49.0"),
         config=(ConfigKey("token", "Sentry access token", "env", "SENTRY_ACCESS_TOKEN"),),
         requires="npx",
         hosts=(*NPM, "sentry.io", "*.sentry.io"),
@@ -143,7 +155,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Jira issues and Confluence pages through mcp-atlassian.",
         transport="stdio",
         command="uvx",
-        args=("mcp-atlassian",),
+        args=("mcp-atlassian@0.24.1",),
         config=(
             ConfigKey("url", "Jira URL", "env", "JIRA_URL", host=True),
             ConfigKey("username", "Jira username", "env", "JIRA_USERNAME"),
@@ -158,7 +170,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Fetch a URL and return it as markdown.",
         transport="stdio",
         command="uvx",
-        args=("mcp-server-fetch",),
+        args=("mcp-server-fetch@2026.11.11",),
         requires="uvx",
         hosts=PYPI,
     ),
@@ -168,7 +180,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Drive a headless browser: navigate, click, read the page.",
         transport="stdio",
         command="npx",
-        args=("-y", "@playwright/mcp@latest", "--headless"),
+        args=("-y", "@playwright/mcp@0.0.85", "--headless"),
         requires="npx",
         hosts=(*NPM, "cdn.playwright.dev", "playwright.download.prss.microsoft.com"),
     ),
@@ -178,7 +190,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="File operations limited to one directory; /work is the project directory.",
         transport="stdio",
         command="npx",
-        args=("-y", "@modelcontextprotocol/server-filesystem"),
+        args=("-y", "@modelcontextprotocol/server-filesystem@2.3.0"),
         config=(ConfigKey("path", "Directory", "arg", required=False, default="/work"),),
         requires="npx",
         hosts=NPM,
@@ -192,6 +204,81 @@ LAUNCHERS = ("npx", "uvx")
 
 def entry(key: str) -> CatalogEntry | None:
     return ENTRIES.get(key)
+
+
+# -- pinned packages --------------------------------------------------------------------------
+
+NPX_VALUE_FLAGS = frozenset({"-p", "--package", "-c", "--call", "-w", "--workspace"})
+"""``npx`` options that take the next argument as their value."""
+UVX_VALUE_FLAGS = frozenset({
+    "--from", "-w", "--with", "--with-editable", "--with-requirements", "-p", "--python",
+    "-c", "--constraints", "--overrides", "-b", "--build-constraints", "--index",
+    "--default-index", "-i", "--index-url", "--extra-index-url", "-f", "--find-links",
+    "--index-strategy", "--keyring-provider", "--resolution", "--prerelease", "--exclude-newer",
+    "--exclude-newer-package", "-P", "--upgrade-package", "--reinstall-package",
+    "--refresh-package", "--no-build-package", "--no-binary-package", "-C", "--config-setting",
+    "--link-mode", "--python-platform", "--torch-backend", "--env-file", "--cache-dir",
+    "--directory", "--project", "--config-file", "--color", "--allow-insecure-host",
+})
+"""``uvx`` options that take the next argument as their value."""
+NPM_EXACT = re.compile(r"^[=v]?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+PYPI_EXACT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]*\])?\s*===?\s*[A-Za-z0-9._+!-]+$")
+
+
+def _options(args: list[str], value_flags: frozenset[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """``(flag, value)`` pairs before the first positional argument, and the arguments from
+    it on (both launchers stop reading options there)."""
+    options: list[tuple[str, str]] = []
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        flag, eq, value = args[index].partition("=")
+        if not eq and flag in value_flags and index + 1 < len(args):
+            index += 1
+            value = args[index]
+        options.append((flag, value))
+        index += 1
+    return options, args[index:]
+
+
+def _npm_unpinned(spec: str) -> bool:
+    if spec.startswith((".", "/", "~")) or ":" in spec or ("/" in spec and not spec.startswith("@")):
+        return False  # a path, URL, git or alias spec: not a registry version
+    name, _, version = spec[1:].partition("@") if spec.startswith("@") else spec.partition("@")
+    return bool(name) and not NPM_EXACT.match(version)
+
+
+def _pypi_unpinned(requirement: str) -> bool:
+    if requirement.startswith((".", "/", "~")) or "://" in requirement or " @ " in requirement:
+        return False  # a path or a direct URL: not a registry version
+    return not PYPI_EXACT.match(requirement.strip())
+
+
+def unpinned_packages(command: str | None, args: list[str]) -> list[str]:
+    """The registry packages an ``npx`` or ``uvx`` command runs without an exact version,
+    as written; the launcher fetches their latest release when the session starts."""
+    args = [str(a) for a in args]
+    if command == "npx":
+        options, rest = _options(args, NPX_VALUE_FLAGS)
+        specs = [value for flag, value in options if flag in ("-p", "--package")]
+        if not specs and rest and not any(flag in ("-c", "--call") for flag, _ in options):
+            specs = [rest[0]]
+        return [spec for spec in specs if _npm_unpinned(spec)]
+    if command == "uvx":
+        options, rest = _options(args, UVX_VALUE_FLAGS)
+        unpinned = []
+        source = next((value for flag, value in options if flag == "--from"), None)
+        if source is not None:
+            if _pypi_unpinned(source):
+                unpinned.append(source)
+        elif rest:
+            name, at, version = rest[0].partition("@")
+            if not at and _pypi_unpinned(name) or at and version in ("", "latest"):
+                unpinned.append(rest[0])
+        for flag, value in options:
+            if flag in ("-w", "--with"):
+                unpinned += [r for r in re.split(r",\s*(?=[A-Za-z0-9])", value) if _pypi_unpinned(r)]
+        return unpinned
+    return []
 
 
 def config_errors(item: CatalogEntry, config: dict[str, str]) -> list[tuple[str, str]]:

@@ -72,7 +72,7 @@ connections:                      # MCP servers agents may use; default: none
     config: {token: "${secret:GITHUB_TOKEN}"}
   docs:                           # a custom stdio server, mcpServers style
     command: npx
-    args: ["-y", "@acme/docs-mcp"]
+    args: ["-y", "@acme/docs-mcp@1.4.2"]
     env: {DOCS_TOKEN: "${secret:DOCS_TOKEN}"}
   tracker:                        # a custom http server
     url: https://mcp.example.com/mcp
@@ -198,7 +198,10 @@ accepted for `mcpServers` compatibility and ignored. Catalog entries and their c
 | `filesystem` | `path` (optional, default `/work`)   | `npx` |
 
 A connection that runs with `npx` or `uvx` needs that launcher in the workstation image
-(the default image has neither; Exradius warns).
+(the default image has neither; Exradius warns). The catalog pins each package to an exact
+version. A custom `npx` or `uvx` connection should too (`npx -y <package>@1.2.3`,
+`uvx <command>@1.2.3`, or `uvx --from '<package>==1.2.3' <command>`); without one, each
+session runs the latest release with the connection's secrets, and Exradius warns.
 
 **Secrets.** `${secret:NAME}` (NAME of letters, digits, `_`, `.`, `-`) may appear only in
 string values under `repositories[].credential`, `services.*.env`, `env`, and

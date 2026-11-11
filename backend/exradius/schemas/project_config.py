@@ -594,6 +594,10 @@ def _check(config: ProjectConfig, config_dir: str, lookup: Lookup | None, errors
             launcher = item.requires
         else:
             launcher = _uses_launcher(conn.command)
+            unpinned = catalog.unpinned_packages(conn.command, list(conn.args or []))
+            if unpinned:
+                warnings.append(f"{where}: runs {', '.join(unpinned)} without an exact version, "
+                                "so each session gets its latest release")
         if launcher and default_workstation:
             warnings.append(f"{where}: needs {launcher}, which the default workstation image does not have")
 

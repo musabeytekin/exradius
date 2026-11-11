@@ -92,7 +92,7 @@ connections:                      # MCP servers agents may use; optional
     config: {token: "${secret:GITHUB_TOKEN}"}   # quoted: { } is YAML flow syntax
   internal-docs:                  # custom, mcpServers style (stdio)
     command: npx
-    args: ["-y", "@acme/docs-mcp"]
+    args: ["-y", "@acme/docs-mcp@1.4.2"]
     env: {DOCS_TOKEN: "${secret:DOCS_TOKEN}"}
   tracker:                        # custom, mcpServers style (http)
     url: https://mcp.example.com/mcp
@@ -255,9 +255,28 @@ Entries: github, gitlab, postgres, slack, sentry, linear, jira, fetch, playwrigh
 filesystem (`/work` default). A catalog connection with a missing required key, or an
 unknown key, is a validation error naming the connection and the key.
 
+Each `npx` and `uvx` entry is pinned to an exact version, read from its registry:
+
+| entry        | command                                                   |
+|--------------|-----------------------------------------------------------|
+| `gitlab`     | `npx -y @modelcontextprotocol/server-gitlab@2025.4.25`    |
+| `postgres`   | `uvx postgres-mcp@0.3.0 --access-mode=restricted`         |
+| `slack`      | `npx -y @modelcontextprotocol/server-slack@2025.4.25`     |
+| `sentry`     | `npx -y @sentry/mcp-server@0.49.0`                        |
+| `jira`       | `uvx mcp-atlassian@0.24.1`                                |
+| `fetch`      | `uvx mcp-server-fetch@2026.11.11`                         |
+| `playwright` | `npx -y @playwright/mcp@0.0.85 --headless`                |
+| `filesystem` | `npx -y @modelcontextprotocol/server-filesystem@2.3.0 <path>` |
+
+A new version is a commit to `catalog.py` (its docstring says how), so no server code runs
+with a connection's secrets without one (agent-routing.md §3.1).
+
 A custom connection is the `mcpServers` shape: `command` + `args` + `env` (stdio) or
 `url` + `headers` (http); `type` is accepted and ignored. Exactly one of `catalog`,
-`command`, `url` must be present.
+`command`, `url` must be present. A custom `npx` or `uvx` connection whose package has no
+exact version (`npx -y <package>@1.2.3`, `uvx <command>@1.2.3` or
+`uvx --from '<package>==1.2.3' <command>`) is a warning: each session would get the latest
+release.
 
 Resolution to the runner-facing spec (`exradius.resolve.connection_spec`) happens in the
 worker at run start with secrets from the store; the panel's resolved view shows the

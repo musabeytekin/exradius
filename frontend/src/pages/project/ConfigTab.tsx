@@ -336,6 +336,7 @@ function ConnectionRow({ name, c, catalog }: { name: string; c: ConfigConnection
               <Chip>catalog</Chip>
               {entry?.transport && <span className="text-xs text-subtle">{entry.transport}</span>}
             </div>
+            {entry?.command && <Mono className="break-all text-xs text-muted">{[entry.command, ...(entry.args ?? [])].join(" ")}</Mono>}
             {configKeys.length === 0 ? <Dim>no config keys</Dim> : (
               <ul aria-label="config keys" className="flex flex-col gap-0.5">
                 {configKeys.map((k) => (
