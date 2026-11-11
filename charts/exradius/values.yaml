@@ -34,6 +34,9 @@ secretKey:
   # A Fernet key (exradius generate-key) that encrypts secrets at rest.
   existingSecret: exradius-secret-key
   key: secret-key
+  # Keys being rotated out, comma-separated: they only decrypt (docs/kubernetes.md §10.1).
+  # Optional; absent from the Secret in an install that is not rotating.
+  previousKey: previous-secret-keys
 admin:
   username: admin
   # Seeds the admin user at the first start; changed in the panel after that.

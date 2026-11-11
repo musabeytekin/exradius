@@ -5,6 +5,7 @@
     exradius events                 # print every outbound event
     exradius answer --task-id JIRA-4821 --request-id <id> --answer "Yes, on Monday."
     exradius generate-key           # a new EXRADIUS_SECRET_KEY
+    exradius rotate-key             # re-encrypt stored secrets with the primary key
     exradius migrate                # alembic upgrade head, one process at a time
 """
 
@@ -99,6 +100,32 @@ def generate_key(_: argparse.Namespace) -> None:
     print(generate_secret_key())
 
 
+async def rotate_key(_: argparse.Namespace) -> None:
+    """Re-encrypts every stored secret with ``EXRADIUS_SECRET_KEY``, decrypting with it or a
+    key in ``EXRADIUS_SECRET_KEY_PREVIOUS`` (docs/kubernetes.md §10.1). Prints counts only."""
+    from exradius.config import get_settings
+    from exradius.crypto import SecretBox
+    from exradius.db import make_engine, make_session_factory
+    from exradius.key_rotation import rotate_encrypted
+
+    settings = get_settings()
+    try:
+        box = SecretBox(settings.secret_key, settings.previous_secret_keys)
+    except RuntimeError as exc:
+        sys.exit(str(exc))
+    engine = make_engine(settings.database_url)
+    try:
+        async with make_session_factory(engine)() as session, session.begin():
+            counts = await rotate_encrypted(session, box)
+    except RuntimeError as exc:
+        sys.exit(f"nothing was changed: {exc}")
+    finally:
+        await engine.dispose()
+    for name, count in counts.items():
+        print(f"{name}: {count}")
+    print("every stored secret is encrypted with EXRADIUS_SECRET_KEY", file=sys.stderr)
+
+
 MIGRATION_LOCK = 0x6578726164697573  # "exradius"
 
 
@@ -165,6 +192,9 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("generate-key", help="print a new EXRADIUS_SECRET_KEY")
     p.set_defaults(func=generate_key)
+
+    p = sub.add_parser("rotate-key", help="re-encrypt stored secrets with EXRADIUS_SECRET_KEY")
+    p.set_defaults(func=rotate_key)
 
     p = sub.add_parser("migrate", help="bring the database to the latest migration")
     p.set_defaults(func=migrate)

@@ -175,7 +175,7 @@ def create_app(
             settings=settings,
             sessions=sessions,
             store=object_store,
-            box=SecretBox(settings.secret_key),
+            box=SecretBox(settings.secret_key, settings.previous_secret_keys),
             broker=publisher,
             router=router,
         )

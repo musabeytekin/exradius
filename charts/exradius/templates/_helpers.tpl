@@ -184,6 +184,12 @@ http://{{ include "exradius.serviceHost" (list . .Values.objectStore.inCluster.n
     secretKeyRef:
       name: {{ .Values.secretKey.existingSecret }}
       key: {{ .Values.secretKey.key }}
+- name: EXRADIUS_SECRET_KEY_PREVIOUS
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.secretKey.existingSecret }}
+      key: {{ .Values.secretKey.previousKey }}
+      optional: true
 - name: EXRADIUS_PUBLIC_API_URL
   value: {{ .Values.publicApiUrl | quote }}
 - name: EXRADIUS_PUBLIC_BROKER_HOST

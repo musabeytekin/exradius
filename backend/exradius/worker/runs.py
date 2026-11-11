@@ -130,7 +130,7 @@ class RunManager:
         self.store = store
         self.cluster = cluster
         self.emit = emit
-        self.box = SecretBox(settings.secret_key)
+        self.box = SecretBox(settings.secret_key, settings.previous_secret_keys)
         self.builder = ImageBuilder(settings, sessions, store, cluster)
         self.image_configs = ImageConfigs(
             settings.insecure_registry_hosts,

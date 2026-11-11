@@ -32,6 +32,7 @@ cd backend && uv sync                       # installs the dev group (runner dep
 cd backend && uv run pytest                 # unit tests: SQLite, in-memory object store, a fake Kubernetes API, local bare git repos
 cd backend && uv run pytest tests/test_intake.py -k rejects   # one file / one test
 cd backend && uv run exradius generate-key  # a Fernet EXRADIUS_SECRET_KEY
+cd backend && uv run exradius rotate-key    # re-encrypt every *_encrypted column with the primary key (kubernetes.md §10.1)
 cd backend && uv run exradius migrate       # alembic upgrade head under an advisory lock (the pods' init containers run it)
 ```
 
@@ -276,7 +277,9 @@ root's `.claude-plugin/marketplace.json` publishes it, so it installs with
 ## Conventions worth knowing
 
 - Secrets and provider credentials are write-only through the API and encrypted at rest
-  with `EXRADIUS_SECRET_KEY` (`crypto.py`). Never log or return their values.
+  with `EXRADIUS_SECRET_KEY` (`crypto.py`; `EXRADIUS_SECRET_KEY_PREVIOUS` only decrypts). Never
+  log or return their values. An encrypted column's name ends in `_encrypted`: `rotate-key`
+  finds them by that suffix.
 - The worker does the harness's job only: it does not commit, push, open pull requests or
   otherwise act on behalf of the agent. Delivery problems become warnings in the result.
 - Unknown keys in `exradius.yaml` are errors, not warnings; keep validators strict.
