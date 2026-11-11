@@ -63,7 +63,7 @@ async def build(session: AsyncSession, backends: SecretBackends | None = None) -
     entries = []
     for project in (await session.scalars(select(Project))).all():
         snapshot = cached(project) or ProjectConfigSnapshot.unreadable("the config has not been read yet")
-        health = await assess(session, project, snapshot, backends)
+        health = await assess(session, project, snapshot, backends, retry=False)
         config = snapshot.config
         entries.append({
             "slug": project.slug,

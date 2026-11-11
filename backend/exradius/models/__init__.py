@@ -109,6 +109,10 @@ class SecretStore(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(63), unique=True)
     kind: Mapped[str] = mapped_column(String(20), default="internal")
+    """Which backend holds the values (``exradius.secret_backends``): ``internal`` or an
+    external one."""
+    settings: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    """Where an external store's values are, validated per kind; never a credential."""
     created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
 
     entries: Mapped[list[SecretStoreEntry]] = relationship(

@@ -159,9 +159,11 @@ export const api = {
   },
   stores: {
     list: () => get<T.SecretStore[]>("/stores"),
-    create: (name: string, allowed_projects: string[] = []) => post<T.SecretStore>("/stores", { name, allowed_projects }),
-    /** Replaces the projects allowed to use the store. */
-    update: (id: string, b: { allowed_projects?: string[] }) => patch<T.SecretStore>(`/stores/${id}`, b),
+    create: (b: T.StoreIn) => post<T.SecretStore>("/stores", b),
+    /** Replaces the allowed projects, or the kind and settings (leaving internal deletes its values). */
+    update: (id: string, b: { allowed_projects?: string[]; kind?: string; settings?: Record<string, unknown> }) =>
+      patch<T.SecretStore>(`/stores/${id}`, b),
+    kinds: () => get<T.StoreKind[]>("/store-kinds"),
     remove: (id: string) => del(`/stores/${id}`),
     /** The store's change log, newest first. */
     changes: (id: string) => get<T.StoreChange[]>(`/stores/${id}/changes`),

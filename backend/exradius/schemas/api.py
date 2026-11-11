@@ -232,6 +232,10 @@ class GitCredentialOut(_Out):
 
 class StoreIn(BaseModel):
     name: StoreName
+    kind: str = "internal"
+    """``internal`` (values set here) or an external kind of ``GET /api/store-kinds``."""
+    settings: dict[str, Any] = Field(default_factory=dict)
+    """Where an external store's values are, as its kind defines; never a credential."""
     allowed_projects: list[str] = Field(default_factory=list)
     """Slugs of the projects that may use the store; none by default."""
 
@@ -239,18 +243,49 @@ class StoreIn(BaseModel):
 class StoreUpdate(BaseModel):
     allowed_projects: list[str] | None = None
     """Replaces the list when given."""
+    kind: str | None = None
+    """A new kind moves the store: leaving ``internal`` deletes the values kept here."""
+    settings: dict[str, Any] | None = None
+    """Replaces the settings when given (validated against the kind)."""
 
 
 class StoreOut(BaseModel):
     id: uuid.UUID
     name: str
     kind: str
+    settings: dict[str, Any] = Field(default_factory=dict)
+    where: str = ""
+    """Where an external store's values are (``secret/data/team/bank``); empty for internal."""
+    external: bool = False
+    """Its values are set in the backend itself: key writes are refused here (409)."""
     created_at: datetime
     keys: list[str]
+    """Key names; for an external store, as its backend lists them."""
+    error: str | None = None
+    """Why the backend could not list them (``secret store X is unreachable: ...``)."""
     used_by: list[str]
     """Slugs of the projects whose config names this store."""
     allowed_projects: list[str] = Field(default_factory=list)
     """Slugs of the projects the admin allowed to use it (§7)."""
+
+
+class StoreKindFieldOut(BaseModel):
+    name: str
+    label: str
+    description: str
+    default: Any = None
+    required: bool
+
+
+class StoreKindOut(BaseModel):
+    kind: str
+    label: str
+    external: bool
+    available: bool
+    """Whether this install can use it (Vault needs its address in the install's values)."""
+    reason: str | None = None
+    """Why it is not available."""
+    fields: list[StoreKindFieldOut]
 
 
 class StoreChangeOut(_Out):
@@ -268,7 +303,8 @@ class StoreChangeOut(_Out):
 
 class StoreKeyOut(BaseModel):
     key: str
-    updated_at: datetime
+    updated_at: datetime | None = None
+    """When it was last set; ``null`` for an external store's keys."""
 
 
 class StoreValueIn(BaseModel):

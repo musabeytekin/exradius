@@ -7,7 +7,7 @@ import { api, ApiError } from "@/lib/api";
 import { buttonClass } from "@/lib/buttonStyles";
 import { keyName, requiredKeys, storeNameOf } from "@/lib/projectConfig";
 import { useConfirm } from "@/lib/confirm";
-import { qk, useStoreKeys, useStores } from "@/lib/queries";
+import { qk, useStoreKeys, useStoreKinds, useStores } from "@/lib/queries";
 import { toast } from "@/lib/toast";
 import type { Project, SecretStore } from "@/lib/types";
 
@@ -42,6 +42,8 @@ export function SecretsTab({ project }: { project: Project }) {
     return <StoreNotAllowed project={project} store={store} />;
   }
 
+  if (store.external) return <ExternalStoreKeys project={project} store={store} />;
+
   const storeKeys = keys.data?.map(keyName);
   const req = requiredKeys(project, storeKeys);
   const missing = req.filter((k) => !k.present).length;
@@ -73,6 +75,58 @@ export function SecretsTab({ project }: { project: Project }) {
               </tbody>
             </Table.Root>
           )}
+        </>
+      )}
+    </Card>
+  );
+}
+
+/** A store whose values live in an external backend: key presence, read-only; set them there. */
+function ExternalStoreKeys({ project, store }: { project: Project; store: SecretStore }) {
+  const qc = useQueryClient();
+  const kinds = useStoreKinds();
+  const keys = useStoreKeys(store.id);
+  const label = kinds.data?.find((k) => k.kind === store.kind)?.label ?? store.kind ?? "the backend";
+  const error = store.error ?? (keys.isError ? (keys.error as Error).message : null);
+  const req = requiredKeys(project, error || !keys.data ? undefined : keys.data.map(keyName));
+  const missing = req.filter((k) => !k.present).length;
+  const where = store.where ? <> at <Mono className="text-xs">{store.where}</Mono></> : null;
+  return (
+    <Card>
+      <CardHeader
+        title={<span className="flex items-center gap-2">Store <Mono>{store.name}</Mono><Chip>{label}</Chip></span>}
+        description={
+          error ? "Its keys are unknown while it cannot be reached."
+            : req.length ? (missing ? `${missing} of ${req.length} required keys missing` : `All ${req.length} required keys present`)
+              : "The file references no secrets."
+        }
+        actions={<Link to="/stores/$storeId" params={{ storeId: store.id }} className={buttonClass("ghost", "sm")}>Open store</Link>}
+      />
+      {error ? (
+        <div className="px-4 py-4">
+          <Banner
+            tone="err"
+            title={`${label} cannot be reached`}
+            action={<Button size="sm" variant="secondary" icon="refresh" onClick={() => { qc.invalidateQueries({ queryKey: qk.stores }); qc.invalidateQueries({ queryKey: qk.project(project.id) }); }}>Try again</Button>}
+          >
+            <span className="font-mono text-xs">{error}</span>
+          </Banner>
+        </div>
+      ) : keys.isLoading ? (
+        <div className="p-4"><Skeleton className="h-24" /></div>
+      ) : req.length === 0 ? null : (
+        <>
+          <p className="border-b border-border px-4 py-3 text-xs text-muted">Values are read from {label}{where} when a run starts; set or change them there.</p>
+          <Table.Root>
+            <tbody>
+              {req.map((k) => (
+                <Table.Row key={k.key}>
+                  <Table.Td><Mono className="font-medium">{k.key}</Mono></Table.Td>
+                  <Table.Td className="text-right">{k.present ? <Chip tone="ok" dot>present</Chip> : <Chip tone="warn" dot>missing</Chip>}</Table.Td>
+                </Table.Row>
+              ))}
+            </tbody>
+          </Table.Root>
         </>
       )}
     </Card>
@@ -129,7 +183,7 @@ function MissingStore({ project, name }: { project: Project; name: string }) {
   const req = requiredKeys(project, null);
   const create = useMutation({
     // Created from this project's page: it allows this project.
-    mutationFn: () => api.stores.create(name, [project.slug]),
+    mutationFn: () => api.stores.create({ name, allowed_projects: [project.slug] }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.stores });
       qc.invalidateQueries({ queryKey: qk.projects });

@@ -179,9 +179,10 @@ def slug_errors(project: Project, snapshot: ProjectConfigSnapshot) -> list[str]:
 
 
 async def assess(session: AsyncSession, project: Project, snapshot: ProjectConfigSnapshot,
-                 backends: SecretBackends) -> Health:
+                 backends: SecretBackends, *, retry: bool = True) -> Health:
     """The project's health against its store. The backend is asked for key names only when
-    the config references any and the store allows the project."""
+    the config references any and the store allows the project; ``retry=False`` for views
+    (the panel, the directory), which ask an external backend once."""
     store = await find_store(session, snapshot.store)
     allowed = store is not None and await store_allows(session, store.id, project.id)
     keys: set[str] = set()
@@ -189,7 +190,7 @@ async def assess(session: AsyncSession, project: Project, snapshot: ProjectConfi
     # A store that does not allow the project tells it nothing about its keys.
     if store is not None and allowed and snapshot.required_keys:
         try:
-            keys = await backends.of(session, store).keys()
+            keys = await backends.of(session, store, retry=retry).keys()
         except StoreUnreachable as exc:
             error = str(exc)
     return Health(

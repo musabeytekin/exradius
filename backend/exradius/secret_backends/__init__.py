@@ -52,12 +52,19 @@ class SecretBackends:
         self.box = box
         """Decrypts internal values; ``None`` gives backends that can only list key names."""
 
-    def of(self, session: AsyncSession, store: SecretStore) -> SecretBackend:
+    def unavailable(self, kind: str) -> str | None:
+        """Why this install cannot use stores of ``kind``, or ``None`` when it can."""
+        return None if kind == "internal" else f"this version does not know the store kind {kind!r}"
+
+    def of(self, session: AsyncSession, store: SecretStore, *, retry: bool = True) -> SecretBackend:
+        """The store's backend. ``retry``: an external backend tries again for a few
+        seconds before it gives up (intake, ``preparing``, Verify, the run spec); the panel
+        and the directory ask once."""
         from exradius.secret_backends.internal import InternalBackend
 
         if store.kind == "internal":
             return InternalBackend(session, self.box, store.id)
-        raise StoreUnreachable(store.name, f"this version does not know its kind ({store.kind})")
+        raise StoreUnreachable(store.name, self.unavailable(store.kind) or store.kind)
 
 
 __all__ = ["SecretBackend", "SecretBackends", "StoreUnreachable"]

@@ -84,7 +84,7 @@ export function missingKeys(p: Project, storeKeys?: string[] | null): string[] {
   return requiredKeys(p, storeKeys).filter((k) => !k.present).map((k) => k.key);
 }
 
-export type Health = "ok" | "config_errors" | "store_not_allowed" | "missing_secrets" | "unreadable";
+export type Health = "ok" | "config_errors" | "store_not_allowed" | "store_unreachable" | "missing_secrets" | "unreadable";
 export interface HealthInfo { health: Health; label: string; tone: Tone; detail: string | null }
 
 export function projectHealth(p: Project, storeKeys?: string[] | null): HealthInfo {
@@ -105,6 +105,10 @@ export function projectHealth(p: Project, storeKeys?: string[] | null): HealthIn
   // The store's own key list says nothing to a project it does not allow.
   if (p.store_allowed === false && store && requiredKeys(p, null).length) {
     return { health: "store_not_allowed", label: "store not allowed", tone: "err", detail: `Secret store ${store} is not allowed for this project.` };
+  }
+  // Unknown, not missing: the store's backend could not be asked.
+  if (storeKeys === undefined && p.health === "store_unreachable") {
+    return { health: "store_unreachable", label: "store unreachable", tone: "warn", detail: p.store_error ?? p.reason ?? null };
   }
   const missing = missingKeys(p, storeKeys);
   if (missing.length) {

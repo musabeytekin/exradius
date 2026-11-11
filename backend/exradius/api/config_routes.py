@@ -39,6 +39,7 @@ from exradius.providers import provider_problem, resolve_provider
 from exradius.resolve import connection_view
 from exradius.schemas import api as s
 from exradius.schemas.project_config import NAME_PATTERN, SECRET_REF
+from exradius.secret_backends import StoreUnreachable, kinds
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -83,7 +84,7 @@ async def check_directory(state: AppState) -> None:
 async def _project_out(session, state: AppState, project: Project) -> s.ProjectOut:
     snapshot = cached(project) or ProjectConfigSnapshot.unreadable("the config has not been read yet")
     latest = await _latest_verification(session, project.id)
-    health = await assess(session, project, snapshot, state.secrets)
+    health = await assess(session, project, snapshot, state.secrets, retry=False)
     config = snapshot.config
     store = await find_store(session, snapshot.store)
     return s.ProjectOut(
@@ -347,7 +348,8 @@ async def delete_git_credential(credential_id: uuid.UUID, session: DB, _: Admin)
 #
 # The admin allows each store to the projects that may use it, and every change to a store is
 # appended to its log (``secret_store_changes``): who, when, what, the key or project it
-# concerns. Never a value.
+# concerns. Never a value. An external store (``kinds.KINDS``) lists its key names from its
+# backend, and its values are set there only: key writes are refused with 409.
 
 
 def log_change(session, admin: AdminUser, store: SecretStore, action: str, *, key: str | None = None,
@@ -370,21 +372,43 @@ async def _allowed(session, store_id: uuid.UUID) -> list[Project]:
     )).all())
 
 
-async def _store_out(session, store: SecretStore) -> s.StoreOut:
-    keys = (await session.scalars(
-        select(SecretStoreEntry.key).where(SecretStoreEntry.store_id == store.id).order_by(SecretStoreEntry.key)
-    )).all()
+def _external(store: SecretStore) -> bool:
+    found = kinds.KINDS.get(store.kind)
+    return found.external if found else True
+
+
+async def _store_out(session, state: AppState, store: SecretStore) -> s.StoreOut:
+    keys: list[str] = []
+    error = None
+    try:
+        keys = sorted(await state.secrets.of(session, store, retry=False).keys())
+    except StoreUnreachable as exc:
+        error = str(exc)
     return s.StoreOut(
-        id=store.id, name=store.name, kind=store.kind, created_at=store.created_at,
-        keys=list(keys), used_by=await _store_users(session, store.name),
+        id=store.id, name=store.name, kind=store.kind, settings=store.settings or {},
+        where=kinds.where(store.kind, store.settings or {}), external=_external(store),
+        created_at=store.created_at, keys=keys, error=error, used_by=await _store_users(session, store.name),
         allowed_projects=[p.slug for p in await _allowed(session, store.id)],
     )
 
 
+@router.get("/store-kinds", response_model=list[s.StoreKindOut])
+async def list_store_kinds(state: State, _: Admin):
+    """The kinds a store can have, whether this install can use each, and their settings."""
+    out = []
+    for kind in kinds.KINDS.values():
+        reason = state.secrets.unavailable(kind.name)
+        out.append(s.StoreKindOut(
+            kind=kind.name, label=kind.label, external=kind.external, available=reason is None, reason=reason,
+            fields=[s.StoreKindFieldOut(**f) for f in kinds.fields(kind.name)],
+        ))
+    return out
+
+
 @router.get("/stores", response_model=list[s.StoreOut])
-async def list_stores(session: DB, _: Admin):
+async def list_stores(session: DB, state: State, _: Admin):
     stores = (await session.scalars(select(SecretStore).order_by(SecretStore.name))).all()
-    return [await _store_out(session, store) for store in stores]
+    return [await _store_out(session, state, store) for store in stores]
 
 
 async def _verify_after_keys(session, state, name: str) -> None:
@@ -396,7 +420,7 @@ async def _verify_after_keys(session, state, name: str) -> None:
         snapshot = cached(project)
         if snapshot is None or snapshot.store != name or snapshot.commit is None:
             continue
-        health = await assess(session, project, snapshot, state.secrets)
+        health = await assess(session, project, snapshot, state.secrets, retry=False)
         if not health.runnable:
             continue
         latest = await _latest_verification(session, project.id)
@@ -431,37 +455,74 @@ async def _set_allowed(session, admin: AdminUser, store: SecretStore, slugs: lis
             log_change(session, admin, store, "project_removed", project=project.slug)
 
 
+def _settings(state: AppState, kind: str, settings: dict) -> dict:
+    """The settings as stored; 422 with every problem, or when the install cannot use the kind."""
+    try:
+        normalized = kinds.normalize(kind, settings)
+    except kinds.SettingsInvalid as exc:
+        raise HTTPException(422, exc.errors) from None
+    reason = state.secrets.unavailable(kind)
+    if reason is not None:
+        raise HTTPException(422, reason)
+    return normalized
+
+
 @router.post("/stores", response_model=s.StoreOut, status_code=201)
 async def create_store(body: s.StoreIn, session: DB, state: State, admin: Admin):
-    """A new store; it allows the projects in ``allowed_projects`` and no other."""
+    """A new store of ``kind`` with its ``settings``; it allows the projects in
+    ``allowed_projects`` and no other."""
     if await session.scalar(select(SecretStore.id).where(SecretStore.name == body.name)):
         raise HTTPException(409, f"store {body.name!r} already exists")
-    store = SecretStore(id=uuid.uuid4(), name=body.name, kind="internal", created_at=utcnow())
+    settings = _settings(state, body.kind, body.settings)
+    store = SecretStore(id=uuid.uuid4(), name=body.name, kind=body.kind, settings=settings, created_at=utcnow())
     session.add(store)
-    log_change(session, admin, store, "store_created", detail={"kind": store.kind})
+    log_change(session, admin, store, "store_created", detail={"kind": store.kind, "settings": settings})
     await _set_allowed(session, admin, store, body.allowed_projects)
     await session.commit()
     await _verify_after_keys(session, state, store.name)
     await check_directory(state)
-    return await _store_out(session, store)
+    return await _store_out(session, state, store)
 
 
 @router.get("/stores/{store_id}", response_model=s.StoreOut)
-async def get_store(store_id: uuid.UUID, session: DB, _: Admin):
-    return await _store_out(session, await get_or_404(session, SecretStore, store_id))
+async def get_store(store_id: uuid.UUID, session: DB, state: State, _: Admin):
+    return await _store_out(session, state, await get_or_404(session, SecretStore, store_id))
+
+
+async def _move(session, state: AppState, admin: AdminUser, store: SecretStore, kind: str, settings: dict) -> None:
+    """Give the store a new kind or new settings. Projects keep naming it: moving a project's
+    values to a vault needs no commit in its config repository. Leaving ``internal`` deletes
+    the values kept here (each one logged); the backend is then their only source."""
+    normalized = _settings(state, kind, settings)
+    if kind == store.kind and normalized == (store.settings or {}):
+        return
+    before = {"kind": store.kind, "settings": store.settings or {}}
+    if store.kind == "internal" and kind != "internal":
+        for entry in await _entries(session, store.id):
+            await session.delete(entry)
+            log_change(session, admin, store, "key_deleted", key=entry.key,
+                       detail={"reason": f"the store moved to {kinds.kind(kind).label}"})
+    store.kind, store.settings = kind, normalized
+    log_change(session, admin, store, "settings_changed",
+               detail={"before": before, "after": {"kind": kind, "settings": normalized}})
 
 
 @router.patch("/stores/{store_id}", response_model=s.StoreOut)
 async def update_store(store_id: uuid.UUID, body: s.StoreUpdate, session: DB, state: State, admin: Admin):
-    """Change the projects allowed to use the store. A project removed from it is not
-    runnable from then on; runs it already started keep what they resolved."""
+    """Change the projects allowed to use the store, or its kind and settings. A project
+    removed from it is not runnable from then on; runs it already started keep what they
+    resolved."""
     store = await get_or_404(session, SecretStore, store_id)
+    if body.kind is not None or body.settings is not None:
+        kind = body.kind or store.kind
+        settings = body.settings if body.settings is not None else ({} if kind != store.kind else store.settings or {})
+        await _move(session, state, admin, store, kind, settings)
     if body.allowed_projects is not None:
         await _set_allowed(session, admin, store, body.allowed_projects)
     await session.commit()
     await _verify_after_keys(session, state, store.name)
     await check_directory(state)
-    return await _store_out(session, store)
+    return await _store_out(session, state, store)
 
 
 @router.get("/stores/{store_id}/changes", response_model=list[s.StoreChangeOut])
@@ -489,9 +550,24 @@ async def delete_store(store_id: uuid.UUID, session: DB, state: State, admin: Ad
 
 
 @router.get("/stores/{store_id}/keys", response_model=list[s.StoreKeyOut])
-async def list_store_keys(store_id: uuid.UUID, session: DB, _: Admin):
-    await get_or_404(session, SecretStore, store_id)
-    return await _entries(session, store_id)
+async def list_store_keys(store_id: uuid.UUID, session: DB, state: State, _: Admin):
+    """Key names, never values; an external store's as its backend lists them (503 when it
+    cannot be reached)."""
+    store = await get_or_404(session, SecretStore, store_id)
+    if not _external(store):
+        return await _entries(session, store_id)
+    try:
+        names = await state.secrets.of(session, store, retry=False).keys()
+    except StoreUnreachable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return [s.StoreKeyOut(key=name) for name in sorted(names)]
+
+
+def _writable(store: SecretStore) -> None:
+    """409 for an external store: its backend is the only source of its values."""
+    if _external(store):
+        label = kinds.KINDS[store.kind].label if store.kind in kinds.KINDS else store.kind
+        raise HTTPException(409, f"store {store.name} reads its values from {label}; set and delete them there")
 
 
 async def _entries(session, store_id: uuid.UUID) -> list[SecretStoreEntry]:
@@ -507,6 +583,7 @@ KEY_RULE = "a key consists of letters, digits, '_', '.' and '-'"
 async def set_store_keys(store_id: uuid.UUID, body: s.StoreValuesIn, session: DB, state: State, admin: Admin):
     """Set or replace several values at once; nothing is written if any key name is invalid."""
     store = await get_or_404(session, SecretStore, store_id)
+    _writable(store)
     bad = sorted(k for k in body.values if not SECRET_KEY.match(k))
     if bad:
         raise HTTPException(422, f"{KEY_RULE}: {', '.join(map(repr, bad))}")
@@ -534,6 +611,7 @@ async def set_store_key(store_id: uuid.UUID, key: str, body: s.StoreValueIn, ses
                         admin: Admin):
     """Set or replace a value; keys are the ``NAME`` of ``${secret:NAME}``."""
     store = await get_or_404(session, SecretStore, store_id)
+    _writable(store)
     if not SECRET_KEY.match(key):
         raise HTTPException(422, KEY_RULE)
     entry = await session.scalar(
@@ -556,6 +634,7 @@ async def set_store_key(store_id: uuid.UUID, key: str, body: s.StoreValueIn, ses
 @router.delete("/stores/{store_id}/keys/{key}", status_code=NO_CONTENT)
 async def delete_store_key(store_id: uuid.UUID, key: str, session: DB, state: State, admin: Admin):
     store = await get_or_404(session, SecretStore, store_id)
+    _writable(store)
     entry = await session.scalar(
         select(SecretStoreEntry).where(SecretStoreEntry.store_id == store_id, SecretStoreEntry.key == key)
     )
