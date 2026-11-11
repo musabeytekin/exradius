@@ -207,7 +207,8 @@ export function StoreDetailPage() {
   const projects = useProjects();
   const kinds = useStoreKinds();
   const store = stores.data?.find((s) => s.id === storeId);
-  const keys = useStoreKeys(storeId);
+  // Not asked again while the store's backend is known to be out of reach.
+  const keys = useStoreKeys(store?.error ? null : storeId);
   const [refused, setRefused] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [pasting, setPasting] = useState(false);
@@ -317,10 +318,12 @@ export function StoreDetailPage() {
           title="Keys"
           description={external ? <>Read from {label}{store.where ? <> at <Mono className="text-xs">{store.where}</Mono></> : null}. Set and delete values there; Exradius never stores them.</> : "Values are write-only."}
         />
-        {keys.isLoading ? (
+        {unreachable ? (
+          <p className="px-4 py-6 text-center text-sm text-muted">Key names are unknown while {label} cannot be reached.</p>
+        ) : keys.isLoading ? (
           <SkeletonRows rows={3} />
         ) : keys.isError ? (
-          <p className="px-4 py-6 text-center text-sm text-err">{external ? "Key names unknown" : "Could not load keys"}: {(keys.error as Error).message}</p>
+          <p className="px-4 py-6 text-center text-sm text-err">Could not load keys: {(keys.error as Error).message}</p>
         ) : list.length === 0 ? (
           external
             ? <EmptyState compact icon="key" title="No keys">{label} holds no field at this path.</EmptyState>

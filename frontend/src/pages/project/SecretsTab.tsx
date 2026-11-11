@@ -85,7 +85,7 @@ export function SecretsTab({ project }: { project: Project }) {
 function ExternalStoreKeys({ project, store }: { project: Project; store: SecretStore }) {
   const qc = useQueryClient();
   const kinds = useStoreKinds();
-  const keys = useStoreKeys(store.id);
+  const keys = useStoreKeys(store.error ? null : store.id);
   const label = kinds.data?.find((k) => k.kind === store.kind)?.label ?? store.kind ?? "the backend";
   const error = store.error ?? (keys.isError ? (keys.error as Error).message : null);
   const req = requiredKeys(project, error || !keys.data ? undefined : keys.data.map(keyName));
