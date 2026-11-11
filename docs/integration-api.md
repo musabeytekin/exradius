@@ -76,8 +76,8 @@ The directory (§4) changes when one of these happens:
   changed, or newly broken). Reads happen on panel re-read and PATCH, the hook, task
   intake, `preparing` and Verify;
 - a project is added or deleted;
-- store keys are set or deleted, or a store is deleted, since that changes which projects
-  are runnable.
+- store keys are set or deleted, a store's allowed projects or settings change, or a store
+  is deleted, since that changes which projects are runnable.
 
 A commit that changes anything else does not change the directory, so nothing is sent.
 That covers a Dockerfile, a service, an agent's role, a repository's branch or the commit
@@ -162,8 +162,11 @@ that bridge's file, and only that file.
 - **Source.** The directory is built from the snapshots cached on `projects.snapshot`.
   Intake still reads the config afresh, so the directory serves the bridge's own
   decisions only. A task built from a stale directory is checked at intake like any other.
-- **`runnable`.** It is the project health's `runnable`: no config errors and no missing
-  secret keys. A project whose `exradius.yaml` has errors has no repositories or agents to
+- **`runnable`.** It is the project health's `runnable`: no config errors, a store that
+  allows the project, and no missing secret keys (config-repo.md §3). A store that cannot be
+  reached (an external one, config-repo.md §7.3) leaves it `true`: an outage is not the
+  project's configuration, and no write would publish the directory again once it is over;
+  intake rejects tasks with the reason while it lasts. A project whose `exradius.yaml` has errors has no repositories or agents to
   list, so it appears with `repositories: []` and `agents: []`; its bridge file is still
   read and passed (§6). A bridge sends tasks for an unrunnable project anyway: the
   rejection's reason says precisely why, and the bridge shows it to the person.

@@ -70,8 +70,8 @@ reset.
 
 | Component | Kind | Holds | May do in Kubernetes | May not |
 |---|---|---|---|---|
-| `api` | Deployment, `exradius-backend` image | master key, Postgres | create TokenReviews (to authenticate the egress proxy; `system:auth-delegator`) | touch Runs, pods or Secrets |
-| `worker` | Deployment, same image | master key, Postgres, broker | in `exradius-runs`: create, patch, delete and watch `Run`; create, patch and delete Secrets (no get or list); list and delete PVCs. In `exradius-builds`: create, get, watch and delete `Build`; create, patch and delete Secrets (the Build's token). Read the operator's Lease | create pods; read Secrets |
+| `api` | Deployment, `exradius-backend` image | master key, Postgres; signs in to the install's Vault, if any | create TokenReviews (to authenticate the egress proxy; `system:auth-delegator`) | touch Runs, pods or Secrets |
+| `worker` | Deployment, same image | master key, Postgres, broker; signs in to the install's Vault, if any | in `exradius-runs`: create, patch, delete and watch `Run`; create, patch and delete Secrets (no get or list); list and delete PVCs. In `exradius-builds`: create, get, watch and delete `Build`; create, patch and delete Secrets (the Build's token). Read the operator's Lease | create pods; read Secrets |
 | `operator` | Deployment, Go (controller-runtime) | nothing secret | in `exradius-runs`: create, watch and delete pods and PVCs; in `exradius-builds`: create, watch and delete pods. In both: read `pods/log`; update `runs/status` or `builds/status`; write Events. Its leader-election Lease | read Secrets; reach Postgres or the broker |
 | `egress` | Deployment, Go | decrypted credentials of active runs, in memory only | list and watch pods in `exradius-runs` and `exradius-builds` | anything else |
 | run pod | Pod per Run | the per-run Secret (§10) | nothing: `automountServiceAccountToken: false`, and NetworkPolicy blocks the API server | reach anything but the proxy, the api's internal port and DNS |
@@ -578,8 +578,26 @@ the only one NetworkPolicy lets a run pod reach. It uses the per-run token, as t
 
 ## 10. Secrets
 
-The master key and the stores never leave `exradius` and Postgres. What a run needs is
-decrypted by the worker at Run creation, or by the api when a component asks for it.
+The master key and the internal stores never leave `exradius` and Postgres; a store of kind
+`vault` stays in the install's Vault (config-repo.md §7.4). What a run needs is read from its
+store, internal values decrypted, by the worker at Run creation, or by the api when a
+component asks for it (the run spec, the verify spec, the egress proxy's policy). Nothing
+past that point knows where a value came from.
+
+- **Only the projects a store allows** get its values (config-repo.md §7.1). Every one of
+  those reads is `project_state.store_values` with the run's project, which refuses another
+  project's store: a config cannot pull a store into `env` by naming it.
+- **Only the names the config references** are read (its required keys), never the whole
+  store.
+- **Vault** is read by the api and the worker as their own ServiceAccounts (Vault's
+  Kubernetes auth method; with values `vault.audience`, a projected token only Vault
+  accepts). No Vault credential is stored, no value is cached (key names are, for 30
+  seconds), and no run pod ever reaches Vault: the per-run Secret and the proxy carry what
+  the run needs, as for an internal store.
+- **An unreachable store is not a missing key.** After about ten seconds of retries a task
+  is rejected, or the run fails in `preparing`, with `secret store S is unreachable: <why>`;
+  the run spec and the egress policy answer 503, so the runner retries and the proxy keeps
+  the policy it has.
 
 | Secret | Phases 1–3 | From phase 4 |
 |---|---|---|
@@ -661,7 +679,10 @@ waits up to 10 s for it, then is refused.
   probe's test provider), each repository with its credential and `push`, and each HTTP
   connection with secret headers. Verify Runs get no model route. It is cached in memory per
   pod for five minutes (a replaced credential takes effect then), dropped when the pod goes,
-  and never written. A failed refresh keeps the last one; an ended run gets none.
+  and never written. A failed refresh keeps the last one; an ended run gets none. The
+  credentials come from the run's secret store, so a store that no longer allows the run's
+  project is refused (409) and one that cannot be reached answers 503: either way the proxy
+  keeps what it has until the run ends (config-repo.md §7).
 
 **Policy:**
 
@@ -725,8 +746,13 @@ waits up to 10 s for it, then is refused.
 |---|---|
 | run pods (`exradius.dev/run`) | no ingress; egress only to the cluster DNS (values `networkPolicy.dns`), the egress pods on 3128 and 3129, and the api pods on 8001 |
 | build pods (`exradius.dev/purpose: build`) | no ingress; egress to the DNS, the api on 8001 and, with `builds.egress: proxy` (default), the egress pods on 3128; with `direct`, anywhere but `networkPolicy.clusterCIDRs` |
-| api | ingress on 8001 only from run, build and egress pods; on 8000 from the frontend and `networkPolicy.apiFrom` (an ingress controller) |
+| api | ingress on 8001 only from run, build and egress pods; on 8000 from the frontend and `networkPolicy.apiFrom` (an ingress controller); egress anywhere |
 | egress | ingress on 3128 and 3129 from run and build pods; egress anywhere |
+
+The api and the worker have no egress policy: they reach Postgres, RabbitMQ, the object
+store, the Kubernetes API, git hosts and the install's Vault (values `vault.address`)
+wherever those are. An install that adds egress policies of its own must let both reach
+Vault's address and port.
 
 A run therefore cannot reach the Kubernetes API, the stack's Postgres, RabbitMQ, other runs or
 the internet directly; this was checked from a run's shell on kind (kindnet's
@@ -1053,6 +1079,8 @@ builds: {registry: ..., builderImage: "", cache: true, insecureRegistries: [], r
 objectStore: {kind: s3, bucket: exradius, s3: {endpoint: ...}, gcs: {endpoint: ""},
               azure: {account: "", endpoint: "", existingSecret: ""}, inCluster: {seaweedfs: true}}
 identity: {app: {serviceAccountAnnotations: {}, podLabels: {}}, build: {serviceAccountAnnotations: {}, podLabels: {}}}
+vault: {address: "", authMount: kubernetes, role: exradius, namespace: "", caBundle: {configMap: "", key: ca.crt},
+        audience: ""}           # stores of kind vault (config-repo.md §7.4); empty address: none
 stack: {nodeSelector: {}, tolerations: []}
 postgres: {existingSecret: ..., inCluster: {cloudnativepg: true, storage: 10Gi}}
 rabbitmq: {existingSecret: ..., inCluster: {operator: true}}

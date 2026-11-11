@@ -25,7 +25,8 @@ repository on every run; changes take effect when they are pushed to `<branch>`.
 1. <Private repositories only:> in Settings, add a credential for `<host>` that can read
    this repository (for GitHub: a fine-grained token with Contents: read on it).
 2. Projects, Add: paste `<URL>`<, branch `<branch>` when not the default>.
-3. Stores: create `<store>` and fill the keys below.
+3. Stores: create `<store>`, allow project `<slug>` to use it, and fill the keys below
+   (or, for a store kept in Vault, put them as fields of the secret at its path).
 4. Open the project's Verify tab: every step should pass.
 
 ## Secret store `<store>`

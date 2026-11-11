@@ -11,8 +11,8 @@ Exradius runs agents (Claude Code) on a team's repositories in containers. A pro
 one file, `exradius.yaml`, in a git repository: the code repositories, the workstation
 image the agents work in, the services next to it (Postgres, Redis, ...), environment,
 notes, MCP connections, the agents, and the name of a **secret store** the Exradius admin
-fills. The admin pastes the config repository's URL and fills the store; the developers
-own everything else. You do the developers' part, on their machine, where a mistake costs
+fills. The admin pastes the config repository's URL, fills the store (or points it at a
+Vault path) and allows the project to use it; the developers own everything else. You do the developers' part, on their machine, where a mistake costs
 seconds instead of a commit, a push and a Verify on the server.
 
 This skill writes `exradius.yaml` **version 1**. If a file says another version, stop and

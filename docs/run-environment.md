@@ -181,11 +181,13 @@ makes them final, the environment section is not the place either; document the 
 
 ## 8. Verify after the keys arrive
 
-A verification that failed only because the store did not exist or keys were missing is
-not rerun when the keys arrive (the automatic trigger is a new config commit). After
-`POST /api/stores`, `PUT /api/stores/{id}/keys` and `PUT /api/stores/{id}/keys/{key}`, every
-project whose config names that store and whose required keys are now all present and
-whose freshness is not `current` gets a verification enqueued, under the one-open rule.
+A verification that failed only because the store did not exist, did not allow the project
+or lacked keys is not rerun when that is fixed (the automatic trigger is a new config
+commit). After `POST /api/stores`, `PATCH /api/stores/{id}` (allowed projects, kind and
+settings), `PUT /api/stores/{id}/keys` and `PUT /api/stores/{id}/keys/{key}`, every project
+whose config names that store, which is runnable now and whose freshness is not `current`
+gets a verification enqueued, under the one-open rule. A key added in Vault is not a write
+Exradius sees: re-run Verify, or wait for the next config commit.
 
 ## 9. The skill
 

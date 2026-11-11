@@ -14,7 +14,9 @@ workstation, services, environment, agents, connections, notes, and the name of 
 
 1. once: how Exradius reads config repositories (a credential per git host, §6);
 2. per project: paste the config repository URL;
-3. per store: create the secret store a config names, fill the keys the file references.
+3. per store: create the secret store a config names, allow the projects that may use it,
+   and fill the keys the file references, or point the store at the Vault path that holds
+   them (§7).
 
 Exradius reads the file from the configured branch every time it needs it: on every run
 (the run records the commit it used), on Verify, and on demand from the panel. The
@@ -205,10 +207,23 @@ The API stores the latest snapshot on the project (`projects.snapshot` JSON,
 `projects.snapshot_commit`, `projects.snapshot_read_at`) for the panel; the worker never
 uses that cache for a run: it reads afresh in `preparing` and records `runs.config_commit`.
 
-Missing keys: `required_keys` minus the keys present in the named store (or all of them
-when the store does not exist). A project with errors or missing keys is **not runnable**:
-tasks for it are rejected with the reason (`config error: ...` / `missing secret
-DB_PASSWORD in store bank-platform` / `secret store bank-platform does not exist`).
+Missing keys: `required_keys` minus the keys present in the named store (all of them when
+the store does not exist or does not allow the project; none is known while the store
+cannot be reached). A project with errors, a store it may not use or missing keys is **not
+runnable**: tasks for it are rejected with the reason, the first that applies of:
+
+| Reason | Panel health |
+|---|---|
+| `config error: <the first error>` (and what `capabilities.py` cannot run yet) | `config_errors` |
+| `secret store bank-platform does not exist` | `missing_secrets` |
+| `secret store bank-platform is not allowed for this project` (§7.1) | `store_not_allowed` |
+| `secret store bank-platform is unreachable: <why>` (§7.3) | `store_unreachable` |
+| `missing secret DB_PASSWORD in store bank-platform` / `missing secrets A, B in store …` | `missing_secrets` |
+
+A config that names a store but references no secret needs neither the store nor its
+permission. The same reasons fail a run in `preparing` and Verify's "Read config" step; a
+missing key and an unreachable store never share words, so an operator can tell them apart
+in the rejection, the run's error and the status events alike.
 
 The project slug is the file's `project.slug`. The API refuses to add a config repository
 whose slug collides with another project's, and a later change of slug in the file is
@@ -275,15 +290,142 @@ they never fall back to the host credential.
 
 ## 7. Secret stores
 
-`secret_stores` (`id`, `name` unique `[a-z][a-z0-9-]*`, `kind` = `internal`, `created_at`)
-and `secret_store_entries` (`store_id`, `key`, `value_encrypted`, `updated_at`). Values are
-write-only. API: `GET/POST /api/stores`, `DELETE /api/stores/{id}` (refused while a
-project's config names it), `GET /api/stores/{id}/keys` (names only), `PUT
-/api/stores/{id}/keys/{key}` (set), `DELETE .../keys/{key}`. Each project's view reports
-`required_keys` with `present: bool` per key against its store.
+A store is a name the admin owns. A config names one (`secret_store`) and refers to its
+keys (`${secret:NAME}`); whether the values are kept in Exradius or in an external vault is
+the admin's knowledge only, so moving a project's values needs no commit in its config
+repository. Revised 2026-11-11: stores are bound to projects, read through pluggable
+backends, and the first external backend is HashiCorp Vault.
+
+Tables: `secret_stores` (`id`, `name` unique `[a-z][a-z0-9-]*`, `kind` `internal` | `vault`,
+`settings` JSON, `created_at`), `secret_store_entries` (an internal store's values:
+`store_id`, `key`, `value_encrypted`, `updated_at`), `secret_store_projects` (`store_id`,
+`project_id`, `allowed_at`) and `secret_store_changes` (§7.2). Values are write-only.
+
+API: `GET /api/stores`, `POST /api/stores {name, kind?, settings?, allowed_projects?}`,
+`GET /api/stores/{id}`, `PATCH /api/stores/{id} {allowed_projects?, kind?, settings?}`,
+`DELETE /api/stores/{id}` (refused while a project's config names it),
+`GET /api/stores/{id}/keys` (names only), `PUT /api/stores/{id}/keys` (several values),
+`PUT /api/stores/{id}/keys/{key}`, `DELETE .../keys/{key}`, `GET /api/stores/{id}/changes`
+and `GET /api/store-kinds`. Each project's view reports `required_keys` with `present` per
+key against its store (`null` while the store cannot be reached), `store_allowed` and
+`store_error`.
 
 Runs resolve every reference from the store named in the file at run start. Provider
-credentials are unchanged (providers.md); they are the admin's, not the project's.
+credentials and the git host credentials of §6 are unchanged (providers.md); they are the
+admin's, not a project's, and always internal.
+
+### 7.1 Who may use a store
+
+The admin lists, per store, the projects allowed to use it. Before this, whoever could
+commit to one project's config repository could name another team's store and bring its
+keys into `env`, and setup reaches any public host.
+
+- A new store allows no project (`allowed_projects` is empty unless given). "Create store"
+  on a project's Secrets tab allows that project; elsewhere the panel offers the known
+  projects to tick, never free text.
+- A config naming a store that does not allow its project is not runnable: `secret store S
+  is not allowed for this project`, health `store_not_allowed`. Such a project learns
+  nothing about the store's keys.
+- The check is wherever values are resolved, not only in the health:
+  `project_state.store_values(session, backends, project_id, config)` is the one way to get
+  values and always takes the project. Run creation fails, Verify fails, the run spec and
+  the verify spec answer 422 and the egress proxy's policy 409 for a store the project may
+  not use.
+- A project removed from a store cannot start runs from then on. A run already started
+  keeps what it resolved: its per-run Secret is written, and the egress proxy keeps the
+  policy it has when a refresh is refused (kubernetes.md §11).
+- Deleting a project removes it from every store, and each store's log says so.
+- Migration `0009` allowed each existing project for the store its cached snapshot named,
+  so no working install stopped running.
+
+### 7.2 The change log
+
+`secret_store_changes` is appended to and never updated: `at`, `actor` (the admin's user
+name; `migration` for what `0009` recorded), `store_id` (no foreign key, so the log outlives
+the store), `store` (its name then), `action` (`store_created`, `store_deleted`, `key_set`,
+`key_deleted`, `project_allowed`, `project_removed`, `settings_changed`), `key`, `project`
+(a slug) and `detail` (the kind and settings of a created store, the settings before and
+after a change, why a key or project went). Never a value. The store's page shows it,
+newest first (`GET /api/stores/{id}/changes`). Which keys a run resolved is not recorded:
+`runs.config` and `runs.config_commit` determine them.
+
+### 7.3 Backends
+
+Every read of a store goes through a backend (`exradius/secret_backends`) that answers two
+questions: which key names the store holds (`keys()`), and the values of some names
+(`values(names)`). `project_state` asks for names in the health and for the names the
+config references (its required keys, never the whole store) when values are resolved, and
+hands `StoreValues` on: `resolve.py`, the per-run Secret, the Run CRD and the egress proxy's
+injection do not know where a value came from.
+
+- **Kinds.** `internal` (values encrypted with the master key in `secret_store_entries`, set
+  through the API) and `vault` (§7.4). A store's `settings` say where an external store's
+  values are, never how to sign in; they are validated per kind with strict pydantic models
+  (`extra="forbid"`), as this file is (`settings.path: required`, `settings.mounts: unknown
+  key`). `GET /api/store-kinds` lists the kinds, whether this install can use each (Vault
+  needs its address in the values) and their settings fields, for the panel's forms.
+- **External stores are read-only here.** Their key names come from the backend, and
+  setting or deleting a key answers 409 (`store S reads its values from HashiCorp Vault; set
+  and delete them there`): the vault is the only source of its values.
+- **Moving a store.** `PATCH` with a new `kind` and `settings` changes the store in place,
+  so the projects naming it follow without a commit. Leaving `internal` deletes the values
+  kept here, each one logged as `key_deleted`; the panel asks for the store's name first.
+- **Unreachable is not missing.** A backend that cannot answer raises `StoreUnreachable`:
+  the reason is `secret store S is unreachable: <why>`, health `store_unreachable`, and the
+  keys are neither present nor missing. Intake, `preparing`, Verify, the run spec and the
+  egress policy let the backend try again for about ten seconds first; then the task is
+  rejected, or the run fails, with that reason. The run and verify specs answer 503 (the
+  runner retries), the egress policy 503 (the proxy keeps the policy it has). The panel and
+  the directory ask once; the directory counts an unreachable store as runnable, since an
+  outage is not the configuration and nothing would publish the directory again when it is
+  over (integration-api.md §4).
+
+### 7.4 HashiCorp Vault
+
+One Vault per install, read by the api and the worker; a store of kind `vault` is one
+secret of a KV version 2 engine, and the secret's fields are the store's keys.
+
+- **Install settings** (values `vault.*`, `EXRADIUS_VAULT_*`): `address`, `authMount`
+  (default `kubernetes`), `role` (default `exradius`), optionally `namespace` (Vault
+  Enterprise, HCP Vault), `caBundle` (a ConfigMap) and `audience` (below). Without an
+  address no store of kind `vault` can be made.
+- **Store settings:** `mount` (default `secret`) and `path`, segments of letters, digits,
+  `_`, `.`, `@` and `-`. The panel shows the store as `<mount>/<path>`.
+- **Sign-in.** The api and the worker sign in as their ServiceAccounts (`exradius-api`,
+  `exradius-worker`) through Vault's Kubernetes auth method, `POST
+  /v1/auth/<authMount>/login {role, jwt}`. Exradius stores no Vault credential. The
+  ServiceAccount token file is read again at every sign-in (the kubelet rotates it), and the
+  Vault token is kept until a minute before its lease ends; a `403` signs in once more before
+  it counts. With `vault.audience` set, the pods send a projected token for that audience
+  only, and the role must name the same audience; without it, their own token, which the
+  Kubernetes API accepts too.
+- **Key names** come from `GET /v1/<mount>/subkeys/<path>?depth=1`, which lists the fields
+  without reading a value (Vault 1.10 or later), and are kept 30 seconds so the panel and the
+  directory do not call Vault on every view. A path that holds no secret (`404`) is a store
+  with no keys.
+- **Values** come from `GET /v1/<mount>/data/<path>` when a run is created, a verification
+  runs, the run or verify spec is served, or the egress proxy refreshes a policy. They are
+  never cached. A field that is not a string fails with `secret store S: field N of
+  <mount>/<path> in Vault is a number, not a string`; it is never converted.
+- **Failures.** The network, a timeout (5 s a request), a 5xx (a sealed or standby Vault)
+  or a 429 is tried again with a growing pause (1, 2, 4 s) for about ten seconds by the
+  callers of §7.3 that retry; the panel's views try once and remember the failure for five
+  seconds. A refused sign-in (a wrong role, an audience the role does not accept), a refused
+  read (the policy) or a `404` that names an error (no KV version 2 at the mount, a Vault
+  before 1.10) is not tried again; each becomes the `<why>` of `secret store S is
+  unreachable: <why>`.
+- **Vault's side**, for the installer: the Kubernetes auth method enabled at `authMount`, a
+  role bound to both ServiceAccounts in the release namespace, and a policy that reads the
+  stores' paths:
+
+  ```hcl
+  path "secret/data/teams/*"    { capabilities = ["read"] }
+  path "secret/subkeys/teams/*" { capabilities = ["read"] }
+  ```
+
+- **Reach.** The api and the worker have no egress NetworkPolicy, so they reach Vault
+  wherever it is; run pods never do.
+- KV version 1 is not supported: its paths have no `data/` and `subkeys/`.
 
 ## 8. Data model changes
 
@@ -292,7 +434,8 @@ Dropped tables: `repositories`, `env_vars`, `secrets`, `connections`, `agents`,
 dependence on any of them. `projects` becomes: `id`, `slug`, `config_url`,
 `config_branch` (nullable: remote default), `config_path` (nullable: search order of §2),
 `snapshot`, `snapshot_commit`, `snapshot_read_at`, `created_at`. New: `git_credentials`,
-`secret_stores`, `secret_store_entries`, `image_builds`. `tasks`/`runs` keep `project_id`
+`secret_stores`, `secret_store_entries`, `image_builds`; later (§7) `secret_store_projects`
+and `secret_store_changes` (migration `0009`) and `secret_stores.settings` (`0010`). `tasks`/`runs` keep `project_id`
 and the agent **slug** (string), plus `runs.config_commit` and a `runs.agent_snapshot`
 JSON (name, model, provider, identity, connection names) for the transcript page.
 `providers` and `provider_tests` stay; `agents.provider_id` is replaced by the config's
@@ -319,14 +462,18 @@ steps: "Prepare workspace", "Clone …", "Start service …", "Setup: …", "Lis
 
 ## 10. Admin panel
 
-Pages: **Overview** (status strip; projects with their health: ok / config errors /
-missing secrets; stores), **Projects** (list: slug, name, config repository, commit,
+Pages: **Overview** (status strip; projects with their health: ok / config errors / store
+not allowed / store unreachable / missing secrets; stores), **Projects** (list: slug, name, config repository, commit,
 health; add = URL + optional branch and path; detail tabs: **Config** (the parsed file
 rendered read-only in sections: repositories, workstation, services, env with secret
 placeholders, connections, agents, notes; errors and warnings on top; the raw file in a
 collapsible monospace block; "Re-read" button), **Secrets** (the store it names, each
-required key present or missing, a fill control that writes to the store), **Verify**,
-**Tasks**), **Stores** (list; keys per store, add or replace a value, delete), **Providers**
+required key present or missing, a fill control that writes to an internal store; for an
+external one the same read-only, with where its values are; a store that does not allow the
+project, or cannot be reached, says so), **Verify**, **Tasks**), **Stores** (list with where
+each is kept, its keys, allowed projects and the projects naming it; per store: the allowed
+projects with what each still lacks, its keys, add or replace a value of an internal store,
+delete, its settings, and its change log; §7), **Providers**
 (unchanged), **Tasks** (unchanged; the send form's agent list comes from the project's
 snapshot), **Settings** (admin password; config repository access per host).
 
@@ -340,7 +487,8 @@ state and errors; it does not teach.
   the project with its snapshot (422 with the errors when the file cannot be read at all;
   a readable file with validation errors still creates the project so the panel can show
   them). `GET /api/projects`, `GET /api/projects/{id}` (with `required_keys`,
-  `missing_keys`, `runnable`, `errors`, `warnings`), `POST /api/projects/{id}/reread`,
+  `missing_keys`, `runnable`, `errors`, `warnings`, `store_allowed`, `store_error`),
+  `POST /api/projects/{id}/reread`,
   `PATCH /api/projects/{id}` (branch, path), `DELETE`.
 - `GET /api/projects/{id}/agents/{slug}/resolved` → environment text, connection specs
   with placeholders, model, provider, identity.
@@ -350,5 +498,6 @@ state and errors; it does not teach.
 
 ## 12. Out of scope
 
-Local runs and a CLI; migration of existing data; external store kinds; pinning a config
-to a commit with admin approval; a skill that writes the file (later, outside Exradius).
+Local runs and a CLI; migration of existing data; pinning a config to a commit with admin
+approval; a skill that writes the file (later, outside Exradius). External stores beyond
+Vault (the clouds' secret managers) are in `ideas.md`.
