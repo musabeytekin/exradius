@@ -216,11 +216,11 @@ class ProjectVerifier:
                 assert row is not None
                 snapshot = await read_config(session, self.runs.box, self.settings.cache_dir, row)
                 remember(row, snapshot)
-                health = await assess(session, row, snapshot)
+                health = await assess(session, row, snapshot, self.runs.backends)
                 secrets, refused = None, None
                 if health.runnable and snapshot.config is not None:
                     try:
-                        secrets = await store_values(session, self.runs.box, row.id, snapshot.config)
+                        secrets = await store_values(session, self.runs.backends, row.id, snapshot.config)
                     except StoreError as exc:
                         refused = str(exc)
                 verification = await session.get(ProjectVerification, verification_id)

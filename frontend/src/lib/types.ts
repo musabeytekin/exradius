@@ -69,7 +69,7 @@ export interface ProjectConfigSnapshot {
 }
 export interface RequiredKey { key: string; present: boolean }
 /** As the API sends it: `name` (current backend) or `key`. */
-export interface RequiredKeyIn { key?: string; name?: string; present?: boolean }
+export interface RequiredKeyIn { key?: string; name?: string; present?: boolean | null }
 /**
  * A project as `GET /api/projects[/{id}]` returns it. The current API puts the snapshot's fields
  * at the top level (`commit`, `read_at`, `config`, `raw`, `errors` ...); a nested `snapshot` is

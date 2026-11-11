@@ -18,7 +18,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from exradius import directory
-from exradius.api.deps import DB, Admin, get_or_404
+from exradius.api.deps import DB, Admin, State, get_or_404
 from exradius.crypto import hash_token, new_integration_token
 from exradius.models import BridgeStatus, IntegrationToken, utcnow
 from exradius.schemas import api as s
@@ -76,11 +76,11 @@ def _matches(if_none_match: str | None, etag: str) -> bool:
     response_class=Response,
     responses={200: {"model": s.DirectoryOut}, 304: {"description": "Not modified (If-None-Match)"}},
 )
-async def get_directory(request: Request, session: DB, token: Token):
+async def get_directory(request: Request, session: DB, state: State, token: Token):
     """The projects whose config has the token's bridge file, with that file, built from
     the latest read of each config. The ``ETag`` is the sha256 of the body;
     ``If-None-Match`` with it answers ``304``."""
-    body = directory.encode(directory.view(await directory.build(session), token.bridge))
+    body = directory.encode(directory.view(await directory.build(session, state.secrets), token.bridge))
     tag = directory.etag(body)
     headers = {"ETag": tag, "Cache-Control": "no-cache"}
     if _matches(request.headers.get("if-none-match"), tag):
@@ -165,10 +165,10 @@ async def bridge_problems(session: AsyncSession, slug: str) -> list[s.BridgeProb
 
 
 @bridges_router.get("", response_model=list[s.BridgeOut])
-async def list_bridges(session: DB, _: Admin):
+async def list_bridges(session: DB, state: State, _: Admin):
     """Every bridge Exradius knows of: from active tokens, bridge files and reports. For
     the New token form, the names found in configs are those with ``projects``."""
-    full = await directory.build(session)
+    full = await directory.build(session, state.secrets)
     tokens = (await session.scalars(select(IntegrationToken).where(IntegrationToken.revoked_at.is_(None)))).all()
     reports = {row.bridge: row for row in (await session.scalars(select(BridgeStatus))).all()}
     names = set(directory.bridge_names(full)) | {t.bridge for t in tokens} | set(reports)

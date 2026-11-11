@@ -77,13 +77,13 @@ def hook_url(state: AppState, project: Project) -> str:
 
 async def check_directory(state: AppState) -> None:
     """The directory check after a write that can change it (docs/integration-api.md §3)."""
-    await directory.check(state.sessions, state.broker.publish_directory)
+    await directory.check(state.sessions, state.broker.publish_directory, state.secrets)
 
 
 async def _project_out(session, state: AppState, project: Project) -> s.ProjectOut:
     snapshot = cached(project) or ProjectConfigSnapshot.unreadable("the config has not been read yet")
     latest = await _latest_verification(session, project.id)
-    health = await assess(session, project, snapshot)
+    health = await assess(session, project, snapshot, state.secrets)
     config = snapshot.config
     store = await find_store(session, snapshot.store)
     return s.ProjectOut(
@@ -107,7 +107,9 @@ async def _project_out(session, state: AppState, project: Project) -> s.ProjectO
         store_id=store.id if store else None,
         store_exists=health.store_exists,
         store_allowed=health.store_allowed,
-        required_keys=[s.RequiredKeyOut(name=k, present=k not in health.missing_keys) for k in snapshot.required_keys],
+        store_error=health.store_error,
+        required_keys=[s.RequiredKeyOut(name=k, present=None if health.store_error else k not in health.missing_keys)
+                       for k in snapshot.required_keys],
         missing_keys=health.missing_keys,
         agents=list(config.agents) if config else [],
         config=config.model_dump(mode="json") if config else None,
@@ -394,7 +396,7 @@ async def _verify_after_keys(session, state, name: str) -> None:
         snapshot = cached(project)
         if snapshot is None or snapshot.store != name or snapshot.commit is None:
             continue
-        health = await assess(session, project, snapshot)
+        health = await assess(session, project, snapshot, state.secrets)
         if not health.runnable:
             continue
         latest = await _latest_verification(session, project.id)

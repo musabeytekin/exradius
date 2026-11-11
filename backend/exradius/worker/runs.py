@@ -35,6 +35,7 @@ from exradius.project_state import assess, read_config, remember, store_values
 from exradius.providers import provider_problem, resolve_provider, runtime_environment
 from exradius.resolve import StoreError
 from exradius.runtimes import runtime_class
+from exradius.secret_backends import SecretBackends
 from exradius.schemas.messages import ArtifactRef, InfoRequestPayload, ResultPayload
 from exradius.schemas.project_config import ProjectConfig
 from exradius.states import State, can_transition, is_terminal
@@ -132,6 +133,8 @@ class RunManager:
         self.cluster = cluster
         self.emit = emit
         self.box = SecretBox(settings.secret_key)
+        self.backends = SecretBackends(self.box)
+        """Where stores' values live (exradius.secret_backends), shared by intake and Verify."""
         self.builder = ImageBuilder(settings, sessions, store, cluster)
         self.image_configs = ImageConfigs(
             settings.insecure_registry_hosts,
@@ -233,7 +236,7 @@ class RunManager:
             assert project is not None
             snapshot = await read_config(session, self.box, self.settings.cache_dir, project)
             remember(project, snapshot)
-            health = await assess(session, project, snapshot)
+            health = await assess(session, project, snapshot, self.backends)
             await session.commit()
         await self.check_directory()
         if health.reason is not None:
@@ -301,7 +304,7 @@ class RunManager:
         # Resolved before the run row is locked, for the task's project only (§7).
         async with self.sessions() as session:
             try:
-                secrets = await store_values(session, self.box, task.project_id, config)
+                secrets = await store_values(session, self.backends, task.project_id, config)
             except StoreError as exc:
                 raise PreparationError(str(exc)) from exc
         async with self.sessions() as session:

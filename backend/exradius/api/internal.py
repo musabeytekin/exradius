@@ -47,6 +47,7 @@ from exradius.network import route_connection
 from exradius.resolve import StoreError, connection_spec
 from exradius.schemas import internal as i
 from exradius.schemas.project_config import ProjectConfig
+from exradius.secret_backends import StoreUnreachable
 from exradius.states import State as RunState
 from exradius.states import is_terminal
 from exradius.storage import ObjectNotFound
@@ -125,8 +126,10 @@ async def run_spec(run: RunDep, session: DB, state: State):
         raise HTTPException(409, "the run has no config yet")
     config = ProjectConfig.model_validate(run.config, strict=False)
     try:
-        secrets = await store_values(session, state.box, task.project_id, config)
+        secrets = await store_values(session, state.secrets, task.project_id, config)
         connections = _pod_connections(config, config.agents[task.agent].connections, secrets, state)
+    except StoreUnreachable as exc:  # the runner retries a 5xx
+        raise HTTPException(503, str(exc)) from exc
     except StoreError as exc:
         raise HTTPException(422, str(exc)) from exc
     agent = config.agents[task.agent]
@@ -307,8 +310,10 @@ async def verify_spec(verification: VerificationDep, session: DB, state: State):
     config = snapshot.config
     used = [name for name in config.connections if any(name in a.connections for a in config.agents.values())]
     try:
-        secrets = await store_values(session, state.box, verification.project_id, config)
+        secrets = await store_values(session, state.secrets, verification.project_id, config)
         specs = _pod_connections(config, used, secrets, state)
+    except StoreUnreachable as exc:  # the runner retries a 5xx
+        raise HTTPException(503, str(exc)) from exc
     except StoreError as exc:
         raise HTTPException(422, str(exc)) from exc
     return i.VerifySpec(connections=[i.ConnectionSpecModel.model_validate(c) for c in specs])

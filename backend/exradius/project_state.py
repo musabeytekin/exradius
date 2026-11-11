@@ -4,6 +4,8 @@ credential, its secret store, and whether it can run (docs/config-repo.md ยง3, ย
 A store hands its keys and values only to the projects the admin allowed for it
 (``secret_store_projects``): ``assess`` reports a config naming another store as not
 runnable, and ``store_values``, the one way to resolve values, takes the project and refuses.
+Both ask the store's backend (``exradius.secret_backends``), and only for the names the
+config references.
 """
 
 from __future__ import annotations
@@ -19,9 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from exradius import capabilities, config_repo
 from exradius.config_repo import ConfigReadError, ProjectConfigSnapshot
 from exradius.crypto import SecretBox
-from exradius.models import GitCredential, Project, SecretStore, SecretStoreEntry, SecretStoreProject
+from exradius.models import GitCredential, Project, SecretStore, SecretStoreProject
 from exradius.resolve import StoreError, StoreValues
 from exradius.schemas.project_config import ProjectConfig
+from exradius.secret_backends import SecretBackends, StoreUnreachable
 
 
 async def host_auth(session: AsyncSession, box: SecretBox, url: str) -> str | None:
@@ -82,30 +85,25 @@ def no_store(store: str) -> str:
     return f"secret store {store} does not exist"
 
 
-async def store_keys(session: AsyncSession, store: SecretStore) -> set[str]:
-    """Key names in the store."""
-    return set(await session.scalars(select(SecretStoreEntry.key).where(SecretStoreEntry.store_id == store.id)))
-
-
-async def store_values(session: AsyncSession, box: SecretBox, project_id: uuid.UUID,
+async def store_values(session: AsyncSession, backends: SecretBackends, project_id: uuid.UUID,
                        config: ProjectConfig) -> StoreValues:
-    """The values of the store the config names, decrypted now, for ``project_id``: the one
-    way a run, a verification or the egress proxy gets secret values. A config that names
-    no store gets none; a store that does not exist or does not allow the project raises
-    ``StoreError`` with the reason. A config that references no secret needs no store."""
+    """The values the config references, from the store it names, read now for
+    ``project_id``: the one way a run, a verification or the egress proxy gets secret
+    values. A config that references no secret needs no store. A store that does not exist
+    or does not allow the project raises ``StoreError`` with the reason, a backend that
+    cannot answer ``StoreUnreachable``; a name the store lacks is left out, and resolving
+    it raises ``MissingSecret``."""
     name = config.secret_store
     values = StoreValues(store=name)
-    if not name or not config.secret_names():
+    names = config.secret_names()
+    if not name or not names:
         return values
     store = await find_store(session, name)
     if store is None:
         raise StoreError(no_store(name))
     if not await store_allows(session, store.id, project_id):
         raise StoreError(not_allowed(name))
-    rows = await session.execute(
-        select(SecretStoreEntry.key, SecretStoreEntry.value_encrypted).where(SecretStoreEntry.store_id == store.id)
-    )
-    values.values = {key: box.decrypt(value) for key, value in rows.all()}
+    values.values = await backends.of(session, store).values(names)
     return values
 
 
@@ -122,6 +120,9 @@ class Health:
     or does not allow the project)."""
     unsupported: list[str] = field(default_factory=list)
     """What the config needs that this version cannot run yet (``capabilities.py``)."""
+    store_error: str | None = None
+    """Why the store's backend could not say which keys it holds (``StoreUnreachable``);
+    the keys are then neither present nor missing."""
 
     @property
     def reason(self) -> str | None:
@@ -136,6 +137,8 @@ class Health:
             return no_store(self.store or "")
         if not self.store_allowed:
             return not_allowed(self.store or "")
+        if self.store_error is not None:
+            return self.store_error
         if self.missing_keys:
             plural = "s" if len(self.missing_keys) > 1 else ""
             return f"missing secret{plural} {', '.join(self.missing_keys)} in store {self.store}"
@@ -146,15 +149,23 @@ class Health:
         return self.reason is None
 
     @property
+    def store_unreachable(self) -> bool:
+        """Nothing but the store's backend being out of reach keeps the project from running."""
+        return self.store_error is not None and self.reason == self.store_error
+
+    @property
     def status(self) -> str:
-        """``ok``, ``config_errors``, ``store_not_allowed`` or ``missing_secrets``, for the
-        panel; a config this version cannot run counts as ``config_errors``."""
+        """``ok``, ``config_errors``, ``store_not_allowed``, ``store_unreachable`` or
+        ``missing_secrets``, for the panel; a config this version cannot run counts as
+        ``config_errors``."""
         if self.errors or self.unsupported:
             return "config_errors"
         if self.runnable:
             return "ok"
         if self.store_exists and not self.store_allowed:
             return "store_not_allowed"
+        if self.store_unreachable:
+            return "store_unreachable"
         return "missing_secrets"
 
 
@@ -167,19 +178,29 @@ def slug_errors(project: Project, snapshot: ProjectConfigSnapshot) -> list[str]:
     return []
 
 
-async def assess(session: AsyncSession, project: Project, snapshot: ProjectConfigSnapshot) -> Health:
+async def assess(session: AsyncSession, project: Project, snapshot: ProjectConfigSnapshot,
+                 backends: SecretBackends) -> Health:
+    """The project's health against its store. The backend is asked for key names only when
+    the config references any and the store allows the project."""
     store = await find_store(session, snapshot.store)
     allowed = store is not None and await store_allows(session, store.id, project.id)
+    keys: set[str] = set()
+    error = None
     # A store that does not allow the project tells it nothing about its keys.
-    keys = await store_keys(session, store) if store is not None and allowed else set()
+    if store is not None and allowed and snapshot.required_keys:
+        try:
+            keys = await backends.of(session, store).keys()
+        except StoreUnreachable as exc:
+            error = str(exc)
     return Health(
         errors=[*snapshot.errors, *slug_errors(project, snapshot)],
         store=snapshot.store,
         store_exists=store is not None,
         store_allowed=allowed,
         required_keys=list(snapshot.required_keys),
-        missing_keys=[k for k in snapshot.required_keys if k not in keys],
+        missing_keys=[] if error else [k for k in snapshot.required_keys if k not in keys],
         unsupported=capabilities.unsupported(snapshot.config),
+        store_error=error,
     )
 
 

@@ -26,6 +26,7 @@ from exradius.db import SessionFactory
 from exradius.models import DirectoryState, Project, utcnow
 from exradius.project_state import assess, cached
 from exradius.schemas.messages import DirectoryChangedPayload, DirectoryEvent
+from exradius.secret_backends import SecretBackends
 
 log = logging.getLogger(__name__)
 
@@ -50,19 +51,24 @@ def without_userinfo(url: str) -> str:
     return f"{scheme}://{authority.rsplit('@', 1)[1]}{rest[end:]}"
 
 
-async def build(session: AsyncSession) -> dict[str, Any]:
+async def build(session: AsyncSession, backends: SecretBackends | None = None) -> dict[str, Any]:
     """The full directory: projects by slug, each with its name, ``runnable`` (the project
     health's), its repositories in config order, its agents by slug (names and repository
-    URLs only) and every bridge file of its config. A bridge sees its ``view`` of it."""
+    URLs only) and every bridge file of its config. A bridge sees its ``view`` of it.
+
+    A store whose backend cannot be reached leaves ``runnable`` true: an outage is not the
+    project's configuration, and nothing would publish the directory again once it is over
+    (intake rejects tasks with the reason while it lasts)."""
+    backends = backends or SecretBackends()
     entries = []
     for project in (await session.scalars(select(Project))).all():
         snapshot = cached(project) or ProjectConfigSnapshot.unreadable("the config has not been read yet")
-        health = await assess(session, project, snapshot)
+        health = await assess(session, project, snapshot, backends)
         config = snapshot.config
         entries.append({
             "slug": project.slug,
             "name": config.project.display_name if config is not None else project.slug,
-            "runnable": health.runnable,
+            "runnable": health.runnable or health.store_unreachable,
             # A config with errors has no repositories or agents to list (§4).
             "repositories": [] if config is None else [
                 {"name": repo.name, "url": without_userinfo(repo.url)} for repo in config.repositories
@@ -135,7 +141,7 @@ async def _locked_state(session: AsyncSession) -> DirectoryState:
     return state
 
 
-async def check(sessions: SessionFactory, publish: Publish) -> bool:
+async def check(sessions: SessionFactory, publish: Publish, backends: SecretBackends | None = None) -> bool:
     """Compare the directory with the one last published, under the row lock, and when it
     differs publish the notice, then store the new directory. A failed publish stores
     nothing, so the next check publishes again. Never raises: the write that led here is
@@ -146,7 +152,7 @@ async def check(sessions: SessionFactory, publish: Publish) -> bool:
     try:
         async with sessions() as session:
             state = await _locked_state(session)
-            current = await build(session)
+            current = await build(session, backends)
             previous = state.directory or EMPTY
             if previous == current:
                 await session.commit()

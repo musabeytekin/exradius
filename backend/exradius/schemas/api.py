@@ -61,8 +61,8 @@ class ProjectUpdate(BaseModel):
 
 class RequiredKeyOut(BaseModel):
     name: str
-    present: bool
-    """Whether the project's store holds it."""
+    present: bool | None
+    """Whether the project's store holds it; ``null`` while its backend cannot be reached."""
 
 
 Freshness = Literal["current", "stale", "failed", "running", "never"]
@@ -94,7 +94,7 @@ class ProjectOut(BaseModel):
     """The branch read (``config_branch`` or the remote's default)."""
     path: str | None
     """The file read."""
-    health: Literal["ok", "config_errors", "store_not_allowed", "missing_secrets"]
+    health: Literal["ok", "config_errors", "store_not_allowed", "store_unreachable", "missing_secrets"]
     runnable: bool
     reason: str | None
     """Why tasks are refused, as the rejection says it."""
@@ -105,6 +105,8 @@ class ProjectOut(BaseModel):
     store_exists: bool
     store_allowed: bool = True
     """Whether the store lets this project use it (docs/config-repo.md §7)."""
+    store_error: str | None = None
+    """Why the store's backend could not list its keys (``secret store X is unreachable: ...``)."""
     required_keys: list[RequiredKeyOut]
     missing_keys: list[str]
     agents: list[str]

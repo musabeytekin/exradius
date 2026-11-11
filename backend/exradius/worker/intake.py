@@ -21,6 +21,7 @@ from exradius.models import Attachment, InfoRequest, Project, Run, Task, utcnow
 from exradius.project_state import assess, read_config, remember
 from exradius.providers import provider_problem, resolve_provider
 from exradius.schemas.messages import AnswerMessage, AttachmentIn, TaskMessage, status_payload
+from exradius.secret_backends import SecretBackends
 from exradius.states import State
 from exradius.storage import ObjectStore
 from exradius.worker.lifecycle import PendingEvent, make_event, transition
@@ -65,11 +66,13 @@ async def accept_task(
     box: SecretBox,
     cache_dir: Path,
     router: routing.Router | None = None,
+    backends: SecretBackends | None = None,
 ) -> TaskIntake:
     """Persist a valid task for a runnable project, or record its rejection. The project's
     config is read afresh (and cached on the project) to check the agent; a task that names
     no agent is routed to one (docs/agent-routing.md §4)."""
     router = router or routing.Router()
+    backends = backends or SecretBackends(box)
     try:
         raw = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -118,7 +121,7 @@ async def accept_task(
         snapshot = await read_config(session, box, cache_dir, project)
         remember(project, snapshot)
         config_read = True
-        health = await assess(session, project, snapshot)
+        health = await assess(session, project, snapshot, backends)
         if health.reason is not None:
             return await rejected(health.reason)
         assert snapshot.config is not None
