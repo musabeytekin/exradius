@@ -236,6 +236,12 @@ class ProjectConfig(_Model):
         given = agent.identity or IdentityDef()
         return (given.name or self.agent_name(slug), given.email or f"{slug}@{self.project.slug}.exradius.local")
 
+    def secret_names(self) -> list[str]:
+        """The secret names the config references (its required keys), sorted. A parsed
+        config has references only where they are allowed, so every string counts."""
+        dump = self.model_dump(mode="json")
+        return sorted({name for _, value in _strings(dump) for name in SECRET_REF.findall(value)})
+
     def connection_definition(self, name: str) -> dict[str, Any]:
         """The connection as ``transport``, ``command``, ``args``, ``url``, ``env`` and
         ``headers``; catalog connections expanded, secret references as written."""

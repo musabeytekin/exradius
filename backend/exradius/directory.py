@@ -4,7 +4,8 @@
 The directory is built from the snapshots cached on ``projects.snapshot``, so it is only
 for offering choices: intake still reads the config afresh. ``check`` runs after every
 write that can change it (a config read, a project added or deleted, store keys set or
-deleted, a store deleted), in whichever process made the write, and publishes
+deleted, a store's allowed projects changed, a store deleted), in whichever process made the
+write, and publishes
 ``directory.changed`` only when the directory differs from the one last published.
 """
 

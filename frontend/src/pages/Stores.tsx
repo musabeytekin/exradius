@@ -1,19 +1,19 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
-import { Table } from "@/components/ui/controls";
+import { Checkbox, PickList, Table } from "@/components/ui/controls";
 import { Icon } from "@/components/ui/icons";
 import { Dialog } from "@/components/ui/overlays";
-import { Banner, Button, Card, CardHeader, EmptyState, Field, Input, Mono, PageHeader, Skeleton, SkeletonRows, Textarea } from "@/components/ui/primitives";
+import { Banner, Button, Card, CardHeader, Chip, EmptyState, Field, Input, Mono, PageHeader, Skeleton, SkeletonRows, Textarea } from "@/components/ui/primitives";
 import { api, ApiError, refusal } from "@/lib/api";
 import { buttonClass } from "@/lib/buttonStyles";
 import { useConfirm } from "@/lib/confirm";
 import { parseDotenv } from "@/lib/dotenv";
-import { relativeTime } from "@/lib/format";
+import { absoluteTime, relativeTime } from "@/lib/format";
 import { SECRET_KEY_RE, STORE_NAME_RE, storeNameOf } from "@/lib/projectConfig";
-import { qk, useProjects, useStoreKeys, useStores } from "@/lib/queries";
+import { qk, useProjects, useStoreChanges, useStoreKeys, useStores } from "@/lib/queries";
 import { toast } from "@/lib/toast";
-import type { SecretStore, SecretStoreKey } from "@/lib/types";
+import type { Project, SecretStore, SecretStoreKey, StoreChange } from "@/lib/types";
 import { KeyValueSetter } from "./project/SecretsTab";
 
 const notAvailable = (e: unknown) => e instanceof ApiError && (e.status === 404 || e.status === 405);
@@ -51,7 +51,7 @@ export function StoresPage() {
         ) : (
           <Table.Root>
             <Table.Head>
-              <tr><Table.Th>Store</Table.Th><Table.Th>Keys</Table.Th><Table.Th>Used by</Table.Th><Table.Th className="text-right">Created</Table.Th></tr>
+              <tr><Table.Th>Store</Table.Th><Table.Th>Keys</Table.Th><Table.Th>Allowed projects</Table.Th><Table.Th>Named by</Table.Th><Table.Th className="text-right">Created</Table.Th></tr>
             </Table.Head>
             <tbody>
               {list.map((s) => <StoreRow key={s.id} store={s} usedBy={usedBy(s)} />)}
@@ -59,7 +59,7 @@ export function StoresPage() {
           </Table.Root>
         )}
       </Card>
-      {open && <CreateStoreDialog taken={list.map((s) => s.name)} onOpenChange={setDialog} />}
+      {open && <CreateStoreDialog taken={list.map((s) => s.name)} projects={projects.data ?? []} onOpenChange={setDialog} />}
     </>
   );
 }
@@ -73,21 +73,37 @@ function StoreRow({ store, usedBy }: { store: SecretStore; usedBy: string[] }) {
     <Table.Row onClick={() => navigate({ to: "/stores/$storeId", params: { storeId: store.id } })}>
       <Table.Td><Mono className="font-medium">{store.name}</Mono></Table.Td>
       <Table.Td className="tabular">{n ?? "—"}</Table.Td>
-      <Table.Td>{usedBy.length ? <Mono className="text-xs text-muted">{usedBy.join(", ")}</Mono> : <span className="text-xs text-subtle">—</span>}</Table.Td>
+      <Table.Td><SlugList slugs={store.allowed_projects ?? []} /></Table.Td>
+      <Table.Td><SlugList slugs={usedBy} flag={(slug) => !(store.allowed_projects ?? []).includes(slug)} /></Table.Td>
       <Table.Td className="text-right text-xs text-subtle">{store.created_at ? relativeTime(store.created_at) : ""}</Table.Td>
     </Table.Row>
   );
 }
 
-function CreateStoreDialog({ taken, onOpenChange }: { taken: string[]; onOpenChange: (o: boolean) => void }) {
+/** Project slugs; `flag` marks the ones a store does not allow. */
+function SlugList({ slugs, flag }: { slugs: string[]; flag?: (slug: string) => boolean }) {
+  if (!slugs.length) return <span className="text-xs text-subtle">—</span>;
+  return (
+    <span className="flex flex-wrap gap-x-1.5 font-mono text-xs text-muted">
+      {slugs.map((slug, i) => (
+        <span key={slug} className={flag?.(slug) ? "text-err" : undefined} title={flag?.(slug) ? "Names this store but is not allowed to use it" : undefined}>
+          {slug}{i < slugs.length - 1 ? "," : ""}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function CreateStoreDialog({ taken, projects, onOpenChange }: { taken: string[]; projects: Project[]; onOpenChange: (o: boolean) => void }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [name, setName] = useState("");
+  const [allowed, setAllowed] = useState<string[]>([]);
   const [serverError, setServerError] = useState<string | null>(null);
   const n = name.trim();
   const error = !n ? null : !STORE_NAME_RE.test(n) ? "Lowercase letters, digits and dashes, starting with a letter." : taken.includes(n) ? "A store with this name exists." : serverError;
   const create = useMutation({
-    mutationFn: () => api.stores.create(n),
+    mutationFn: () => api.stores.create(n, allowed),
     onSuccess: (s) => {
       qc.invalidateQueries({ queryKey: qk.stores });
       qc.invalidateQueries({ queryKey: qk.projects });
@@ -110,9 +126,14 @@ function CreateStoreDialog({ taken, onOpenChange }: { taken: string[]; onOpenCha
         </>
       }
     >
-      <Field label="Name" htmlFor="store-name" error={error}>
-        <Input id="store-name" mono autoFocus value={name} invalid={!!error} onChange={(e) => { setName(e.target.value.toLowerCase()); setServerError(null); }} placeholder="bank-platform" spellCheck={false} />
-      </Field>
+      <div className="flex flex-col gap-4">
+        <Field label="Name" htmlFor="store-name" error={error}>
+          <Input id="store-name" mono autoFocus value={name} invalid={!!error} onChange={(e) => { setName(e.target.value.toLowerCase()); setServerError(null); }} placeholder="bank-platform" spellCheck={false} />
+        </Field>
+        <Field label="Allowed projects" hint="Only these projects may use the store's values. None by default.">
+          <ProjectChecklist projects={projects} store={n} value={allowed} onChange={setAllowed} />
+        </Field>
+      </div>
     </Dialog>
   );
 }
@@ -207,7 +228,8 @@ export function StoreDetailPage() {
         }
       />
       {refused && <Banner tone="err" title="The store was not deleted" className="mb-4"><span className="font-mono text-xs">{refused}</span></Banner>}
-      <Card>
+      <AllowedProjects store={store} projects={projects.data ?? []} />
+      <Card className="mt-4">
         <CardHeader title="Keys" description="Values are write-only." />
         {keys.isLoading ? (
           <SkeletonRows rows={3} />
@@ -245,6 +267,7 @@ export function StoreDetailPage() {
           </Table.Root>
         )}
       </Card>
+      <ChangeLog storeId={store.id} />
       {adding && <AddKeyDialog store={store} taken={names} onOpenChange={setAdding} />}
       {pasting && <PasteEnvDialog store={store} onOpenChange={setPasting} />}
     </>
@@ -349,5 +372,175 @@ function PasteEnvDialog({ store, onOpenChange }: { store: SecretStore; onOpenCha
         />
       </Field>
     </Dialog>
+  );
+}
+
+/** Checkboxes for known projects; those whose config names `store` say so. */
+function ProjectChecklist({ projects, store, value, onChange }: {
+  projects: Project[]; store: string; value: string[]; onChange: (v: string[]) => void;
+}) {
+  if (!projects.length) return <p className="text-xs text-subtle">No projects yet.</p>;
+  return (
+    <div className="flex max-h-48 flex-col gap-1.5 overflow-y-auto">
+      {projects.map((p) => (
+        <label key={p.id} className="flex items-center gap-2 text-sm">
+          <Checkbox
+            checked={value.includes(p.slug)}
+            onChange={(on) => onChange(on ? [...value, p.slug] : value.filter((x) => x !== p.slug))}
+            aria-label={`Allow ${p.slug}`}
+          />
+          <Mono className="text-[12.5px]">{p.slug}</Mono>
+          {store && storeNameOf(p) === store && <span className="text-xs text-subtle">names this store</span>}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/** The projects allowed to use the store (config-repo.md §7), and those that name it without being allowed. */
+function AllowedProjects({ store, projects }: { store: SecretStore; projects: Project[] }) {
+  const qc = useQueryClient();
+  const confirm = useConfirm();
+  const allowed = store.allowed_projects ?? [];
+  const [adding, setAdding] = useState<string | null>(null);
+  const update = useMutation({
+    mutationFn: (next: string[]) => api.stores.update(store.id, { allowed_projects: next }),
+    onSuccess: () => {
+      setAdding(null);
+      qc.invalidateQueries({ queryKey: qk.stores });
+      qc.invalidateQueries({ queryKey: qk.projects });
+    },
+    onError: (e) => toast.err("Could not change the allowed projects", e),
+  });
+  const bySlug = new Map(projects.map((p) => [p.slug, p]));
+  const naming = projects.filter((p) => storeNameOf(p) === store.name && !allowed.includes(p.slug));
+  const offered = projects.filter((p) => !allowed.includes(p.slug));
+  const allow = async (slug: string) => {
+    const ok = await confirm({
+      title: `Allow ${slug} to use ${store.name}?`,
+      description: "Its config can then put any key of this store into its runs' environment.",
+      confirmLabel: "Allow",
+    });
+    if (ok) update.mutate([...allowed, slug]);
+  };
+  return (
+    <Card>
+      <CardHeader
+        title="Allowed projects"
+        description="Only these projects get this store's values. A config naming the store from another project is not runnable."
+      />
+      {naming.length > 0 && (
+        <div className="flex flex-col gap-2 border-b border-border px-4 py-3">
+          {naming.map((p) => (
+            <div key={p.id} className="flex items-center gap-3 text-sm">
+              <Chip tone="err" dot>not allowed</Chip>
+              <span className="min-w-0 flex-1 text-muted"><Mono>{p.slug}</Mono> names this store; its tasks are refused.</span>
+              <Button size="sm" variant="secondary" loading={update.isPending} onClick={() => allow(p.slug)}>Allow {p.slug}</Button>
+            </div>
+          ))}
+        </div>
+      )}
+      {allowed.length === 0 ? (
+        <p className="px-4 py-3 text-sm text-subtle">No project may use this store.</p>
+      ) : (
+        <Table.Root>
+          <tbody>
+            {allowed.map((slug) => {
+              const p = bySlug.get(slug);
+              return (
+                <Table.Row key={slug}>
+                  <Table.Td>
+                    {p ? (
+                      <Link to="/projects/$projectId" params={{ projectId: p.id }} search={{ tab: "secrets" }} className="font-mono text-[12.5px] hover:underline">{slug}</Link>
+                    ) : <Mono className="text-[12.5px]">{slug}</Mono>}
+                  </Table.Td>
+                  <Table.Td className="text-xs text-subtle">{p && storeNameOf(p) === store.name ? "names this store" : "does not name this store"}</Table.Td>
+                  <Table.Td className="w-12 text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      square
+                      icon="x"
+                      aria-label={`Remove ${slug}`}
+                      onClick={async () => {
+                        const ok = await confirm({
+                          title: `Remove ${slug} from ${store.name}?`,
+                          description: "Its tasks are refused from then on while its config names this store. Runs already started keep what they resolved.",
+                          confirmLabel: "Remove",
+                        });
+                        if (ok) update.mutate(allowed.filter((x) => x !== slug));
+                      }}
+                    />
+                  </Table.Td>
+                </Table.Row>
+              );
+            })}
+          </tbody>
+        </Table.Root>
+      )}
+      {offered.length > 0 && (
+        <div className="flex items-center gap-2 border-t border-border px-4 py-3">
+          <PickList
+            size="sm"
+            mono
+            className="max-w-xs"
+            aria-label="Project to allow"
+            placeholder="Allow a project…"
+            value={adding}
+            onChange={setAdding}
+            options={offered.map((p) => ({ value: p.slug, label: p.slug, description: storeNameOf(p) === store.name ? "names this store" : undefined }))}
+          />
+          <Button size="sm" variant="secondary" disabled={!adding} loading={update.isPending} onClick={() => adding && allow(adding)}>Allow</Button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function describeChange(c: StoreChange) {
+  const key = c.key ? <Mono className="text-[12.5px]">{c.key}</Mono> : null;
+  const project = c.project ? <Mono className="text-[12.5px]">{c.project}</Mono> : null;
+  switch (c.action) {
+    case "store_created": return <>created the store{c.detail?.kind && c.detail.kind !== "internal" ? <> ({String(c.detail.kind)})</> : null}</>;
+    case "store_deleted": return <>deleted the store</>;
+    case "key_set": return <>set {key}</>;
+    case "key_deleted": return <>deleted {key}</>;
+    case "project_allowed": return <>allowed {project}</>;
+    case "project_removed": return <>removed {project}{c.detail?.reason ? <> ({String(c.detail.reason)})</> : null}</>;
+    case "settings_changed": return <>changed the settings</>;
+    default: return <>{c.action}</>;
+  }
+}
+
+/** The store's append-only change log: who did what, never a value. */
+function ChangeLog({ storeId }: { storeId: string }) {
+  const changes = useStoreChanges(storeId);
+  const list = changes.data ?? [];
+  return (
+    <Card className="mt-4">
+      <CardHeader title="Changes" description="Every change to this store, newest first. Values are never recorded." />
+      {changes.isLoading ? (
+        <SkeletonRows rows={3} />
+      ) : changes.isError ? (
+        <p className="px-4 py-6 text-center text-sm text-err">Could not load the changes: {(changes.error as Error).message}</p>
+      ) : list.length === 0 ? (
+        <p className="px-4 py-3 text-sm text-subtle">No changes recorded.</p>
+      ) : (
+        <Table.Root>
+          <Table.Head>
+            <tr><Table.Th>When</Table.Th><Table.Th>Who</Table.Th><Table.Th>What</Table.Th></tr>
+          </Table.Head>
+          <tbody>
+            {list.map((c) => (
+              <Table.Row key={c.id}>
+                <Table.Td className="whitespace-nowrap text-xs text-subtle"><span title={absoluteTime(c.at)}>{relativeTime(c.at)}</span></Table.Td>
+                <Table.Td className="text-xs text-muted">{c.actor}</Table.Td>
+                <Table.Td className="text-sm">{describeChange(c)}</Table.Td>
+              </Table.Row>
+            ))}
+          </tbody>
+        </Table.Root>
+      )}
+    </Card>
   );
 }

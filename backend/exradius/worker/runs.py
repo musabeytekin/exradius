@@ -33,6 +33,7 @@ from exradius.db import SessionFactory
 from exradius.models import Artifact, InfoRequest, Project, Run, TranscriptChunk, utcnow
 from exradius.project_state import assess, read_config, remember, store_values
 from exradius.providers import provider_problem, resolve_provider, runtime_environment
+from exradius.resolve import StoreError
 from exradius.runtimes import runtime_class
 from exradius.schemas.messages import ArtifactRef, InfoRequestPayload, ResultPayload
 from exradius.schemas.project_config import ProjectConfig
@@ -297,6 +298,12 @@ class RunManager:
         await self._store_url_attachments(run.id)
         token = new_run_token()
         name = run_name("task", run.id)
+        # Resolved before the run row is locked, for the task's project only (§7).
+        async with self.sessions() as session:
+            try:
+                secrets = await store_values(session, self.box, task.project_id, config)
+            except StoreError as exc:
+                raise PreparationError(str(exc)) from exc
         async with self.sessions() as session:
             row = await self._lock(session, run.id)
             if row is None or row.state != State.PREPARING:
@@ -304,7 +311,6 @@ class RunManager:
             provider = await resolve_provider(session, agent.provider)
             if provider is None:
                 raise PreparationError(provider_problem(agent.provider))
-            secrets = await store_values(session, self.box, config.secret_store)
             # The pod gets a placeholder and the egress proxy's model route; the proxy reads
             # the credential of this provider (runs.provider_id) from the api.
             provider_env = runtime_environment(agent.runtime, provider, self.settings.egress_url)

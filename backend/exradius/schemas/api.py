@@ -94,7 +94,7 @@ class ProjectOut(BaseModel):
     """The branch read (``config_branch`` or the remote's default)."""
     path: str | None
     """The file read."""
-    health: Literal["ok", "config_errors", "missing_secrets"]
+    health: Literal["ok", "config_errors", "store_not_allowed", "missing_secrets"]
     runnable: bool
     reason: str | None
     """Why tasks are refused, as the rejection says it."""
@@ -103,6 +103,8 @@ class ProjectOut(BaseModel):
     store: str | None
     store_id: uuid.UUID | None
     store_exists: bool
+    store_allowed: bool = True
+    """Whether the store lets this project use it (docs/config-repo.md §7)."""
     required_keys: list[RequiredKeyOut]
     missing_keys: list[str]
     agents: list[str]
@@ -228,6 +230,13 @@ class GitCredentialOut(_Out):
 
 class StoreIn(BaseModel):
     name: StoreName
+    allowed_projects: list[str] = Field(default_factory=list)
+    """Slugs of the projects that may use the store; none by default."""
+
+
+class StoreUpdate(BaseModel):
+    allowed_projects: list[str] | None = None
+    """Replaces the list when given."""
 
 
 class StoreOut(BaseModel):
@@ -238,6 +247,21 @@ class StoreOut(BaseModel):
     keys: list[str]
     used_by: list[str]
     """Slugs of the projects whose config names this store."""
+    allowed_projects: list[str] = Field(default_factory=list)
+    """Slugs of the projects the admin allowed to use it (§7)."""
+
+
+class StoreChangeOut(_Out):
+    """One entry of a store's change log (§7); never a value."""
+
+    id: int
+    at: datetime
+    actor: str
+    action: Literal["store_created", "store_deleted", "key_set", "key_deleted", "project_allowed",
+                    "project_removed", "settings_changed"]
+    key: str | None
+    project: str | None
+    detail: dict[str, Any] | None
 
 
 class StoreKeyOut(BaseModel):

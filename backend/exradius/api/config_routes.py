@@ -13,7 +13,7 @@ import uuid
 
 import yaml
 from fastapi import APIRouter, HTTPException, Query, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from exradius import catalog, config_repo, directory
 from exradius.api import integration_routes
@@ -22,16 +22,19 @@ from exradius.config_repo import ProjectConfigSnapshot
 from exradius.crypto import new_hook_token
 from exradius.environment import config_environment_text, workstation_label
 from exradius.models import (
+    AdminUser,
     GitCredential,
     Project,
     ProjectVerification,
     Provider,
     SecretStore,
+    SecretStoreChange,
     SecretStoreEntry,
+    SecretStoreProject,
     Task,
     utcnow,
 )
-from exradius.project_state import assess, cached, read_config, remember, store_keys
+from exradius.project_state import assess, cached, find_store, read_config, remember
 from exradius.providers import provider_problem, resolve_provider
 from exradius.resolve import connection_view
 from exradius.schemas import api as s
@@ -82,11 +85,7 @@ async def _project_out(session, state: AppState, project: Project) -> s.ProjectO
     latest = await _latest_verification(session, project.id)
     health = await assess(session, project, snapshot)
     config = snapshot.config
-    keys = await store_keys(session, snapshot.store) or set()
-    store_id = (
-        await session.scalar(select(SecretStore.id).where(SecretStore.name == snapshot.store))
-        if snapshot.store else None
-    )
+    store = await find_store(session, snapshot.store)
     return s.ProjectOut(
         id=project.id,
         slug=project.slug,
@@ -105,9 +104,10 @@ async def _project_out(session, state: AppState, project: Project) -> s.ProjectO
         errors=[*health.errors, *health.unsupported],
         warnings=[*snapshot.warnings, *await _provider_warnings(session, snapshot)],
         store=snapshot.store,
-        store_id=store_id,
+        store_id=store.id if store else None,
         store_exists=health.store_exists,
-        required_keys=[s.RequiredKeyOut(name=k, present=k in keys) for k in snapshot.required_keys],
+        store_allowed=health.store_allowed,
+        required_keys=[s.RequiredKeyOut(name=k, present=k not in health.missing_keys) for k in snapshot.required_keys],
         missing_keys=health.missing_keys,
         agents=list(config.agents) if config else [],
         config=config.model_dump(mode="json") if config else None,
@@ -235,12 +235,19 @@ async def update_project(project_id: uuid.UUID, body: s.ProjectUpdate, session: 
 
 
 @router.delete("/projects/{project_id}", status_code=NO_CONTENT)
-async def delete_project(project_id: uuid.UUID, session: DB, state: State, _: Admin):
+async def delete_project(project_id: uuid.UUID, session: DB, state: State, admin: Admin):
     project = await get_or_404(session, Project, project_id)
     tasks = await session.scalar(select(func.count()).select_from(Task).where(Task.project_id == project.id))
     if tasks:
         raise HTTPException(409, f"the project has {tasks} task{'s' if tasks != 1 else ''}; it cannot be deleted")
     slug = project.slug
+    # The project leaves every store that allowed it; the stores' logs say so.
+    for store in (await session.scalars(
+        select(SecretStore).join(SecretStoreProject, SecretStoreProject.store_id == SecretStore.id)
+        .where(SecretStoreProject.project_id == project.id)
+    )).all():
+        log_change(session, admin, store, "project_removed", project=slug, detail={"reason": "project deleted"})
+    await session.execute(delete(SecretStoreProject).where(SecretStoreProject.project_id == project.id))
     await session.delete(project)
     await session.commit()
     await check_directory(state)
@@ -335,11 +342,30 @@ async def delete_git_credential(credential_id: uuid.UUID, session: DB, _: Admin)
 
 
 # Secret stores (§7) --------------------------------------------------------------------------
+#
+# The admin allows each store to the projects that may use it, and every change to a store is
+# appended to its log (``secret_store_changes``): who, when, what, the key or project it
+# concerns. Never a value.
+
+
+def log_change(session, admin: AdminUser, store: SecretStore, action: str, *, key: str | None = None,
+               project: str | None = None, detail: dict | None = None) -> None:
+    session.add(SecretStoreChange(
+        actor=admin.username, store_id=store.id, store=store.name, action=action, key=key, project=project,
+        detail=detail, at=utcnow(),
+    ))
 
 
 async def _store_users(session, name: str) -> list[str]:
     projects = (await session.scalars(select(Project).order_by(Project.slug))).all()
     return [p.slug for p in projects if (p.snapshot or {}).get("store") == name]
+
+
+async def _allowed(session, store_id: uuid.UUID) -> list[Project]:
+    return list((await session.scalars(
+        select(Project).join(SecretStoreProject, SecretStoreProject.project_id == Project.id)
+        .where(SecretStoreProject.store_id == store_id).order_by(Project.slug)
+    )).all())
 
 
 async def _store_out(session, store: SecretStore) -> s.StoreOut:
@@ -349,6 +375,7 @@ async def _store_out(session, store: SecretStore) -> s.StoreOut:
     return s.StoreOut(
         id=store.id, name=store.name, kind=store.kind, created_at=store.created_at,
         keys=list(keys), used_by=await _store_users(session, store.name),
+        allowed_projects=[p.slug for p in await _allowed(session, store.id)],
     )
 
 
@@ -359,9 +386,9 @@ async def list_stores(session: DB, _: Admin):
 
 
 async def _verify_after_keys(session, state, name: str) -> None:
-    """Projects naming the store whose required keys are now all present and whose
-    verification is not current get one (docs/run-environment.md §8): a failure for a
-    missing store or keys is not rerun by a new config commit, since there is none."""
+    """Projects naming the store that can now run and whose verification is not current
+    get one (docs/run-environment.md §8): a failure for a missing store or keys, or a store
+    that did not allow the project, is not rerun by a new config commit, since there is none."""
     projects = (await session.scalars(select(Project).order_by(Project.slug))).all()
     for project in projects:
         snapshot = cached(project)
@@ -376,12 +403,41 @@ async def _verify_after_keys(session, state, name: str) -> None:
         await _request_verification(session, state, project.id, strict=False)
 
 
+async def _projects_by_slug(session, slugs: list[str]) -> list[Project]:
+    """The projects named, in order; 422 for a slug that is no project."""
+    wanted = list(dict.fromkeys(slugs))
+    found = {p.slug: p for p in (await session.scalars(select(Project).where(Project.slug.in_(wanted)))).all()}
+    unknown = [slug for slug in wanted if slug not in found]
+    if unknown:
+        raise HTTPException(422, f"no project {', '.join(map(repr, unknown))}")
+    return [found[slug] for slug in wanted]
+
+
+async def _set_allowed(session, admin: AdminUser, store: SecretStore, slugs: list[str]) -> None:
+    """Make the store's allowed projects exactly ``slugs``, logging each one added or removed."""
+    wanted = await _projects_by_slug(session, slugs)
+    current = {p.id: p for p in await _allowed(session, store.id)}
+    for project in wanted:
+        if project.id not in current:
+            session.add(SecretStoreProject(store_id=store.id, project_id=project.id, allowed_at=utcnow()))
+            log_change(session, admin, store, "project_allowed", project=project.slug)
+    keep = {p.id for p in wanted}
+    for project_id, project in current.items():
+        if project_id not in keep:
+            await session.execute(delete(SecretStoreProject).where(
+                SecretStoreProject.store_id == store.id, SecretStoreProject.project_id == project_id))
+            log_change(session, admin, store, "project_removed", project=project.slug)
+
+
 @router.post("/stores", response_model=s.StoreOut, status_code=201)
-async def create_store(body: s.StoreIn, session: DB, state: State, _: Admin):
+async def create_store(body: s.StoreIn, session: DB, state: State, admin: Admin):
+    """A new store; it allows the projects in ``allowed_projects`` and no other."""
     if await session.scalar(select(SecretStore.id).where(SecretStore.name == body.name)):
         raise HTTPException(409, f"store {body.name!r} already exists")
-    store = SecretStore(name=body.name, kind="internal")
+    store = SecretStore(id=uuid.uuid4(), name=body.name, kind="internal", created_at=utcnow())
     session.add(store)
+    log_change(session, admin, store, "store_created", detail={"kind": store.kind})
+    await _set_allowed(session, admin, store, body.allowed_projects)
     await session.commit()
     await _verify_after_keys(session, state, store.name)
     await check_directory(state)
@@ -393,12 +449,37 @@ async def get_store(store_id: uuid.UUID, session: DB, _: Admin):
     return await _store_out(session, await get_or_404(session, SecretStore, store_id))
 
 
+@router.patch("/stores/{store_id}", response_model=s.StoreOut)
+async def update_store(store_id: uuid.UUID, body: s.StoreUpdate, session: DB, state: State, admin: Admin):
+    """Change the projects allowed to use the store. A project removed from it is not
+    runnable from then on; runs it already started keep what they resolved."""
+    store = await get_or_404(session, SecretStore, store_id)
+    if body.allowed_projects is not None:
+        await _set_allowed(session, admin, store, body.allowed_projects)
+    await session.commit()
+    await _verify_after_keys(session, state, store.name)
+    await check_directory(state)
+    return await _store_out(session, store)
+
+
+@router.get("/stores/{store_id}/changes", response_model=list[s.StoreChangeOut])
+async def list_store_changes(store_id: uuid.UUID, session: DB, _: Admin, limit: int = Query(200, ge=1, le=1000)):
+    """The store's change log, newest first."""
+    await get_or_404(session, SecretStore, store_id)
+    return (await session.scalars(
+        select(SecretStoreChange).where(SecretStoreChange.store_id == store_id)
+        .order_by(SecretStoreChange.at.desc(), SecretStoreChange.id.desc()).limit(limit)
+    )).all()
+
+
 @router.delete("/stores/{store_id}", status_code=NO_CONTENT)
-async def delete_store(store_id: uuid.UUID, session: DB, state: State, _: Admin):
+async def delete_store(store_id: uuid.UUID, session: DB, state: State, admin: Admin):
     store = await get_or_404(session, SecretStore, store_id)
     users = await _store_users(session, store.name)
     if users:
         raise HTTPException(409, f"the config of {', '.join(users)} names this store")
+    log_change(session, admin, store, "store_deleted")
+    await session.execute(delete(SecretStoreProject).where(SecretStoreProject.store_id == store.id))
     await session.delete(store)
     await session.commit()
     await check_directory(state)
@@ -421,9 +502,9 @@ KEY_RULE = "a key consists of letters, digits, '_', '.' and '-'"
 
 
 @router.put("/stores/{store_id}/keys", response_model=list[s.StoreKeyOut])
-async def set_store_keys(store_id: uuid.UUID, body: s.StoreValuesIn, session: DB, state: State, _: Admin):
+async def set_store_keys(store_id: uuid.UUID, body: s.StoreValuesIn, session: DB, state: State, admin: Admin):
     """Set or replace several values at once; nothing is written if any key name is invalid."""
-    await get_or_404(session, SecretStore, store_id)
+    store = await get_or_404(session, SecretStore, store_id)
     bad = sorted(k for k in body.values if not SECRET_KEY.match(k))
     if bad:
         raise HTTPException(422, f"{KEY_RULE}: {', '.join(map(repr, bad))}")
@@ -438,17 +519,19 @@ async def set_store_keys(store_id: uuid.UUID, body: s.StoreValuesIn, session: DB
             session.add(entry)
         entry.value_encrypted = state.box.encrypt(value)
         entry.updated_at = now
+        log_change(session, admin, store, "key_set", key=key)
+    name = store.name
     await session.commit()
-    store = await session.get(SecretStore, store_id)
-    await _verify_after_keys(session, state, store.name)
+    await _verify_after_keys(session, state, name)
     await check_directory(state)
     return await _entries(session, store_id)
 
 
 @router.put("/stores/{store_id}/keys/{key}", response_model=s.StoreKeyOut)
-async def set_store_key(store_id: uuid.UUID, key: str, body: s.StoreValueIn, session: DB, state: State, _: Admin):
+async def set_store_key(store_id: uuid.UUID, key: str, body: s.StoreValueIn, session: DB, state: State,
+                        admin: Admin):
     """Set or replace a value; keys are the ``NAME`` of ``${secret:NAME}``."""
-    await get_or_404(session, SecretStore, store_id)
+    store = await get_or_404(session, SecretStore, store_id)
     if not SECRET_KEY.match(key):
         raise HTTPException(422, KEY_RULE)
     entry = await session.scalar(
@@ -459,22 +542,25 @@ async def set_store_key(store_id: uuid.UUID, key: str, body: s.StoreValueIn, ses
         session.add(entry)
     entry.value_encrypted = state.box.encrypt(body.value)
     entry.updated_at = utcnow()
+    log_change(session, admin, store, "key_set", key=key)
+    name = store.name
     await session.commit()
-    store = await session.get(SecretStore, store_id)
-    await _verify_after_keys(session, state, store.name)
+    await _verify_after_keys(session, state, name)
     await check_directory(state)
     await session.refresh(entry)
     return entry
 
 
 @router.delete("/stores/{store_id}/keys/{key}", status_code=NO_CONTENT)
-async def delete_store_key(store_id: uuid.UUID, key: str, session: DB, state: State, _: Admin):
+async def delete_store_key(store_id: uuid.UUID, key: str, session: DB, state: State, admin: Admin):
+    store = await get_or_404(session, SecretStore, store_id)
     entry = await session.scalar(
         select(SecretStoreEntry).where(SecretStoreEntry.store_id == store_id, SecretStoreEntry.key == key)
     )
     if entry is None:
         raise HTTPException(404, "key not found")
     await session.delete(entry)
+    log_change(session, admin, store, "key_deleted", key=key)
     await session.commit()
     await check_directory(state)
     return Response(status_code=NO_CONTENT)

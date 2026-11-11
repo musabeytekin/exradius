@@ -6,6 +6,7 @@ import { Banner, Button, Card, CardHeader, Chip, Field, Input, Mono, Skeleton } 
 import { api, ApiError } from "@/lib/api";
 import { buttonClass } from "@/lib/buttonStyles";
 import { keyName, requiredKeys, storeNameOf } from "@/lib/projectConfig";
+import { useConfirm } from "@/lib/confirm";
 import { qk, useStoreKeys, useStores } from "@/lib/queries";
 import { toast } from "@/lib/toast";
 import type { Project, SecretStore } from "@/lib/types";
@@ -36,6 +37,10 @@ export function SecretsTab({ project }: { project: Project }) {
     );
   }
   if (!store) return <MissingStore project={project} name={storeName} />;
+  const notAllowed = project.store_allowed === false || (store.allowed_projects && !store.allowed_projects.includes(project.slug));
+  if (notAllowed && requiredKeys(project, null).length > 0) {
+    return <StoreNotAllowed project={project} store={store} />;
+  }
 
   const storeKeys = keys.data?.map(keyName);
   const req = requiredKeys(project, storeKeys);
@@ -74,15 +79,61 @@ export function SecretsTab({ project }: { project: Project }) {
   );
 }
 
+/** The store exists but does not let this project use it (config-repo.md §7). */
+function StoreNotAllowed({ project, store }: { project: Project; store: SecretStore }) {
+  const qc = useQueryClient();
+  const confirm = useConfirm();
+  const req = requiredKeys(project, null);
+  const allow = useMutation({
+    mutationFn: () => api.stores.update(store.id, { allowed_projects: [...(store.allowed_projects ?? []), project.slug] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.stores });
+      qc.invalidateQueries({ queryKey: qk.projects });
+      qc.invalidateQueries({ queryKey: qk.project(project.id) });
+      toast.ok(`${project.slug} may use ${store.name}`);
+    },
+    onError: (e) => toast.err("Could not allow the project", e),
+  });
+  return (
+    <Card>
+      <div className="flex items-center gap-4 px-4 py-4">
+        <div className="min-w-0 flex-1 text-sm">
+          <div className="font-medium text-fg">Store <Mono>{store.name}</Mono> is not allowed for this project</div>
+          <div className="mt-0.5 text-xs text-muted">
+            Tasks are refused until the store allows <Mono className="text-xs">{project.slug}</Mono>.
+            {req.length > 0 && <> The config references <Mono className="text-xs">{req.map((k) => k.key).join(", ")}</Mono>.</>}
+          </div>
+        </div>
+        <Link to="/stores/$storeId" params={{ storeId: store.id }} className={buttonClass("ghost", "sm")}>Open store</Link>
+        <Button
+          variant="secondary"
+          loading={allow.isPending}
+          onClick={async () => {
+            const ok = await confirm({
+              title: `Allow ${project.slug} to use ${store.name}?`,
+              description: "Its config can then put any key of this store into its runs' environment.",
+              confirmLabel: "Allow",
+            });
+            if (ok) allow.mutate();
+          }}
+        >
+          Allow {project.slug}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
 function MissingStore({ project, name }: { project: Project; name: string }) {
   const qc = useQueryClient();
   const req = requiredKeys(project, null);
   const create = useMutation({
-    mutationFn: () => api.stores.create(name),
+    // Created from this project's page: it allows this project.
+    mutationFn: () => api.stores.create(name, [project.slug]),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.stores });
       qc.invalidateQueries({ queryKey: qk.projects });
-      toast.ok(`Store ${name} created`);
+      toast.ok(`Store ${name} created for ${project.slug}`);
     },
     onError: (e) => toast.err("Could not create the store", e),
   });
@@ -91,6 +142,7 @@ function MissingStore({ project, name }: { project: Project; name: string }) {
       <div className="flex items-center gap-4 px-4 py-4">
         <div className="min-w-0 flex-1 text-sm">
           <div className="font-medium text-fg">Store <Mono>{name}</Mono> does not exist</div>
+          <div className="mt-0.5 text-xs text-muted">Creating it here allows this project to use it.</div>
           {req.length > 0 && <div className="mt-0.5 text-xs text-muted">Required: <Mono className="text-xs text-muted">{req.map((k) => k.key).join(", ")}</Mono></div>}
         </div>
         <Button variant="primary" icon="plus" loading={create.isPending} onClick={() => create.mutate()}>Create store {name}</Button>

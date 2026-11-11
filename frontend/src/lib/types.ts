@@ -94,6 +94,8 @@ export interface Project {
   store?: string | null; store_id?: Uuid | null;
   /** Whether the store the file names exists. */
   store_exists?: boolean | null;
+  /** Whether that store lets this project use it (config-repo.md §7). */
+  store_allowed?: boolean | null;
   required_keys?: (string | RequiredKeyIn)[] | null;
   missing_keys?: string[] | null;
   /** Agent slugs of the config. */
@@ -139,8 +141,17 @@ export interface SecretStore {
   key_count?: number | null; keys?: (string | SecretStoreKey)[] | null;
   /** Slugs of the projects whose config names it. */
   used_by?: string[] | null;
+  /** Slugs of the projects the admin allowed to use it; no other project gets its values. */
+  allowed_projects?: string[] | null;
 }
 export interface SecretStoreKey { key: string; updated_at?: string | null }
+export type StoreChangeAction =
+  | "store_created" | "store_deleted" | "key_set" | "key_deleted" | "project_allowed" | "project_removed" | "settings_changed";
+/** One entry of a store's change log; never a value. */
+export interface StoreChange {
+  id: number; at: string; actor: string; action: StoreChangeAction;
+  key: string | null; project: string | null; detail: Record<string, unknown> | null;
+}
 
 /** Config repository access per git host (§6). */
 export type GitCredentialKind = "token" | "basic";
