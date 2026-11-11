@@ -133,9 +133,27 @@ class Settings(BaseSettings):
     egress_audience: str = "exradius-api"
     """The audience that token is issued for, checked with a TokenReview."""
 
+    # HashiCorp Vault, for secret stores of kind ``vault`` (docs/config-repo.md §7): one per
+    # install, signed in to with the pod's ServiceAccount through Vault's Kubernetes auth
+    # method. Exradius stores no Vault credential. Values ``vault.*``.
+    vault_address: str | None = None
+    """``https://vault.example.com:8200``; ``None``: no Vault, stores of kind vault cannot be made."""
+    vault_auth_mount: str = "kubernetes"
+    """The path the Kubernetes auth method is enabled at."""
+    vault_role: str = "exradius"
+    """The Kubernetes auth role the api and the worker sign in as; its policy reads the stores' paths."""
+    vault_namespace: str | None = None
+    """A Vault Enterprise or HCP Vault namespace (``X-Vault-Namespace``)."""
+    vault_ca_file: Path | None = None
+    """A PEM bundle that verifies Vault's certificate; ``None``: the system's CAs."""
+    vault_token_file: Path = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
+    """The ServiceAccount token sent to Vault, read again at every sign-in (the kubelet
+    rotates it): the pod's own, or a projected one with Vault's audience (values ``vault.audience``)."""
+
     @field_validator(
         "s3_endpoint_url", "s3_access_key", "s3_secret_key", "broker_username", "broker_password", "kube_api_url",
-        "gcs_endpoint", "azure_account", "azure_endpoint", "azure_account_key",
+        "gcs_endpoint", "azure_account", "azure_endpoint", "azure_account_key", "vault_address", "vault_namespace",
+        "vault_ca_file",
         mode="before",
     )
     @classmethod

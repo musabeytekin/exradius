@@ -121,6 +121,9 @@ async def accept_task(
         snapshot = await read_config(session, box, cache_dir, project)
         remember(project, snapshot)
         config_read = True
+        # Stored first: an external store may take seconds to answer (or retry), and the
+        # project row stays unlocked meanwhile.
+        await session.commit()
         health = await assess(session, project, snapshot, backends)
         if health.reason is not None:
             return await rejected(health.reason)

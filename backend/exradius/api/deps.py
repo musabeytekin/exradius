@@ -33,7 +33,7 @@ class AppState:
 
     def __post_init__(self) -> None:
         if self.backends is None:
-            self.backends = SecretBackends(self.box)
+            self.backends = SecretBackends.from_settings(self.box, self.settings)
 
     @property
     def secrets(self) -> SecretBackends:

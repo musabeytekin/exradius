@@ -8,10 +8,11 @@ silently reads the wrong place.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
 class StoreSettings(BaseModel):
@@ -26,6 +27,32 @@ class InternalSettings(StoreSettings):
     """Nothing to set: the values are encrypted in Exradius's database."""
 
 
+_SEGMENT = re.compile(r"^[A-Za-z0-9_.@-]+$")
+PATH_RULE = "segments of letters, digits, '_', '.', '@' and '-', separated by '/' (no '.' or '..' segment)"
+
+
+def _vault_path(value: str) -> str:
+    segments = value.strip("/").split("/")
+    if not value.strip("/") or any(not _SEGMENT.match(s) or s in (".", "..") for s in segments):
+        raise ValueError(PATH_RULE)
+    return "/".join(segments)
+
+
+class VaultSettings(StoreSettings):
+    """A store whose values are the fields of one Vault KV version 2 secret."""
+
+    mount: Annotated[str, Field(title="KV mount", description="The mount path of a KV version 2 secrets engine.")] = "secret"
+    path: Annotated[str, Field(title="Path", description="The secret's path in the mount; its fields are the store's keys.")]
+
+    @field_validator("mount", "path")
+    @classmethod
+    def _segments(cls, value: str) -> str:
+        return _vault_path(value)
+
+    def where(self) -> str:
+        return f"{self.mount}/{self.path}"
+
+
 @dataclass(frozen=True)
 class Kind:
     name: str
@@ -37,7 +64,8 @@ class Kind:
 
 
 INTERNAL = Kind("internal", "Exradius", InternalSettings, external=False)
-KINDS: dict[str, Kind] = {INTERNAL.name: INTERNAL}
+VAULT = Kind("vault", "HashiCorp Vault", VaultSettings, external=True)
+KINDS: dict[str, Kind] = {kind.name: kind for kind in (INTERNAL, VAULT)}
 
 
 class SettingsInvalid(ValueError):

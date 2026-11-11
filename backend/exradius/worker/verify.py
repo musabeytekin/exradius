@@ -216,6 +216,7 @@ class ProjectVerifier:
                 assert row is not None
                 snapshot = await read_config(session, self.runs.box, self.settings.cache_dir, row)
                 remember(row, snapshot)
+                await session.commit()  # before an external store is asked: no row lock meanwhile
                 health = await assess(session, row, snapshot, self.runs.backends)
                 secrets, refused = None, None
                 if health.runnable and snapshot.config is not None:

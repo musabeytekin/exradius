@@ -113,6 +113,29 @@ objectStore:
     storageClass: ""
     resources: {}
 
+# HashiCorp Vault for secret stores of kind vault (docs/config-repo.md §7): one Vault per
+# install. The api and the worker sign in as their ServiceAccounts (exradius-api and
+# exradius-worker in the release namespace) with Vault's Kubernetes auth method; Exradius
+# keeps no Vault credential. Each store names a KV version 2 mount and a path, whose fields
+# are its keys; the role's policy reads <mount>/data/<path> and <mount>/subkeys/<path>
+# (Vault 1.10 or later). The api and the worker have no egress NetworkPolicy, so they reach
+# any address Vault is on.
+vault:
+  # https://vault.example.com:8200. Empty: no Vault, and no store of kind vault can be made.
+  address: ""
+  # Where the Kubernetes auth method is enabled, and the role both sign in as.
+  authMount: kubernetes
+  role: exradius
+  # A Vault Enterprise or HCP Vault namespace.
+  namespace: ""
+  # A ConfigMap in the release namespace with the CA bundle of Vault's certificate. Empty:
+  # the image's CAs.
+  caBundle: {configMap: "", key: ca.crt}
+  # The audience of the ServiceAccount token sent to Vault. Set it (for example vault) and
+  # the role's audience to match: the pods then send a projected token that only Vault
+  # accepts, instead of their own, which the Kubernetes API accepts too.
+  audience: ""
+
 # The cloud identities pods sign in with (EKS Pod Identity or IRSA, GKE and AKS Workload
 # Identity), so no cloud key is ever in a Secret. Each is ServiceAccount annotations and pod
 # labels: IRSA's eks.amazonaws.com/role-arn, GKE's iam.gke.io/gcp-service-account, AKS's

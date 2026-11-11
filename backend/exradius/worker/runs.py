@@ -133,7 +133,7 @@ class RunManager:
         self.cluster = cluster
         self.emit = emit
         self.box = SecretBox(settings.secret_key)
-        self.backends = SecretBackends(self.box)
+        self.backends = SecretBackends.from_settings(self.box, settings)
         """Where stores' values live (exradius.secret_backends), shared by intake and Verify."""
         self.builder = ImageBuilder(settings, sessions, store, cluster)
         self.image_configs = ImageConfigs(
@@ -236,8 +236,8 @@ class RunManager:
             assert project is not None
             snapshot = await read_config(session, self.box, self.settings.cache_dir, project)
             remember(project, snapshot)
+            await session.commit()  # before an external store is asked: no row lock meanwhile
             health = await assess(session, project, snapshot, self.backends)
-            await session.commit()
         await self.check_directory()
         if health.reason is not None:
             raise PreparationError(health.reason)

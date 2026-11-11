@@ -288,6 +288,7 @@ class Worker:
             sweeper.cancel()
         await self.heartbeat.stop()
         await self.presence.stop()
+        await self.runs.backends.aclose()
         await self.engine.dispose()
 
 
