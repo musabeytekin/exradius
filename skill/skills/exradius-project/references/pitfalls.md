@@ -27,10 +27,32 @@ RUN npm install -g corepack@latest \
  && chmod -R a+rX /opt/corepack
 ```
 
-Use `pnpm@<version>` the same way. The version comes from `packageManager` in the root
-`package.json` (`"packageManager": "yarn@4.18.0+sha512..."`). With npm only
-(`package-lock.json`), the image's npm must support the lockfile's `lockfileVersion`
-(3 needs npm 7 or later).
+pnpm up to version 11 works the same way (`corepack install -g pnpm@<version>`). The
+version comes from `packageManager` in the root `package.json`
+(`"packageManager": "yarn@4.18.0+sha512..."`). With npm only (`package-lock.json`), the
+image's npm must support the lockfile's `lockfileVersion` (3 needs npm 7 or later).
+
+## pnpm 12: "Could not download the pnpm binary"
+
+**Symptom:** the first setup command fails with `Could not download the pnpm 12.x binary`,
+followed by `EROFS: read-only file system, open '/opt/corepack/...'` or `fetch failed`.
+
+**Cause:** pnpm 12 is a native program. What corepack prepares is a small wrapper that
+downloads the real binary the first time `pnpm` runs: at run time the place it unpacks
+to is read-only, and it downloads with Node's own `fetch`, which ignores the proxy.
+
+**Fix:** install pnpm 12 and later with npm, at the exact version of `packageManager`, and
+run it once while the image is built:
+
+```dockerfile
+RUN npm install -g pnpm@12.18.0 && pnpm --version
+```
+
+npm brings the native binary as a dependency, and the first call puts it in place. In a
+run `pnpm` then warns once that it "cannot use the pnpm version this project pins" when
+it cannot ask the registry: harmless, the versions match. Corepack with a
+`pnpm --version` in the same `RUN` also works on a laptop; npm is the one that also
+passes a build behind the proxy.
 
 ## uv older than the lockfile's syntax
 
@@ -49,9 +71,13 @@ COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /uvx /usr/local/bin/
 ```
 
 Also check the `revision`/`version` line at the top of `uv.lock`, `requires-python`, and
-`.python-version`. When uv manages Python, install it in the image so runs never download
-it: `ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python` then
-`RUN uv python install 3.14 && chmod -R a+rX /opt/uv`.
+`.python-version`. When `.python-version` and CI disagree, take CI's version and set
+`UV_PYTHON` to it in `env`: CI's is the one the lockfile's wheels were tested with (a
+newer Python without wheels made one `uv sync` compile for 23 minutes). When uv manages
+Python, install it in the image so runs never download it:
+`ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python` then
+`RUN uv python install 3.14 && chmod -R a+rX /opt/uv`, with `UV_PYTHON_DOWNLOADS: never`
+in `env`.
 
 The same class of failure applies to Poetry (`poetry.lock` `lock-version`), pnpm
 (`lockfileVersion` in `pnpm-lock.yaml`), Bundler (`BUNDLED WITH`), Go (`go` and `toolchain`
@@ -102,32 +128,42 @@ download store is too.
 
 **Fix:** list the store under `workstation.cache` (schema.md). Exradius keeps the folder
 per project and mounts it into every run; the local check does the same from
-`.exradius-cache/` next to `exradius.yaml` (git-ignored; delete it to start cold). Declare
+`~/.cache/exradius-check/<slug>/` (delete it to start cold; `--cache-dir` moves it). Declare
 one entry per package manager the setup commands use, at the path the tool uses as uid
 1000 with `HOME=/home/runner`:
 
 | Tool | `cache` entry | Notes |
 |---|---|---|
-| pnpm | `~/.local/share/pnpm/store` | also set `pnpm_config_store_dir: /home/runner/.local/share/pnpm/store` in `env` (pnpm 11; `npm_config_store_dir` for pnpm 10 and older): when pnpm thinks it cannot hard-link from the home into `/work` it puts the store at `/work/.pnpm-store`, which is deleted with the run |
+| pnpm | `~/.local/share/pnpm/store` | also set `pnpm_config_store_dir: /home/runner/.local/share/pnpm/store` in `env` (pnpm 11 and 12; `npm_config_store_dir` for pnpm 10 and older): when pnpm thinks it cannot hard-link from the home into `/work` it puts the store at `/work/.pnpm-store`, which is deleted with the run |
 | Yarn Berry (2+) | `~/.yarn/berry/cache` | the global cache (`enableGlobalCache`, the default since Yarn 4). With `enableGlobalCache: false` the cache is `.yarn/cache` inside the repository: nothing to declare |
 | Yarn 1 | `~/.cache/yarn` | |
-| npm | `~/.npm` | `npm ci` still deletes and rewrites `node_modules`; the downloads come from the cache |
+| npm | `~/.npm` | `npm ci` still deletes and rewrites `node_modules`; the downloads come from the cache. Proof of a warm run: no `cache miss` in the newest log under `~/.npm/_logs` |
+| Bun | `~/.bun/install/cache` | a warm `bun ci` still copies the packages into `node_modules` |
 | uv | `~/.cache/uv` | uv warns "Failed to hardlink files; falling back to full copy": set `UV_LINK_MODE: copy` in `env` to silence it |
 | pip | `~/.cache/pip` | |
 | Poetry | `~/.cache/pypoetry` | |
-| Maven | `~/.m2/repository` | replaces copying a pre-fetched `/opt/m2` in setup |
+| Maven | `~/.m2/repository` | replaces copying a pre-fetched `/opt/m2` in setup; with `./mvnw` also `~/.m2/wrapper` (Maven itself). `-ntp` hides the downloads: drop it once to see a warm run |
 | Gradle | `~/.gradle/caches` | and `~/.gradle/wrapper` for the wrapper's distribution; Gradle reads the home from passwd, which the run sets to `/home/runner` |
 | Go | `~/.cache/go-build` (build cache) and the module cache | the `golang:*` images set `GOPATH=/go`, so the module cache is `/go/pkg/mod` (absolute, fine as an entry); elsewhere `~/go/pkg/mod` |
-| Cargo | `~/.cargo/registry` and `~/.cargo/git` | the `rust:*` images set `CARGO_HOME=/usr/local/cargo`, read-only at run time: set `CARGO_HOME: /home/runner/.cargo` in `env` (cargo stays on `PATH` from `/usr/local/cargo/bin`) |
+| Cargo | `~/.cargo/registry`, and `~/.cargo/git` only when `Cargo.lock` has a `source = "git+..."` | the `rust:*` images set `CARGO_HOME=/usr/local/cargo`, read-only at run time: set `CARGO_HOME: /home/runner/.cargo` in `env` (cargo stays on `PATH` from `/usr/local/cargo/bin`) |
+| Bundler | `~/.local/share/bundle/ruby/<abi version>/cache` | the `.gem` files below `BUNDLE_PATH` (stacks.md); the version is `ruby -e 'puts RbConfig::CONFIG["ruby_version"]'` (`4.0.0` for Ruby 4.0.9). Not `BUNDLE_GLOBAL_GEM_CACHE`: it also keeps compiled extensions, which broke a gem for the next run. Native extensions therefore compile in every run: a warm install is not faster |
+| Composer | `~/.cache/composer` | with `COMPOSER_CACHE_DIR: /home/runner/.cache/composer` in `env`. A warm install is not much faster: unpacking dominates |
+| NuGet | `~/.nuget/packages` | `dotnet nuget locals global-packages --list` confirms it; restore prints no download count, compare the durations |
+| Hex and Mix | `~/.hex/packages` | and `~/.cache/rustler_precompiled`, `~/.cache/elixir_make` when dependencies fetch precompiled native code |
+| Playwright's browsers | `~/.cache/ms-playwright` | when a setup command installs a browser (end-to-end tests, vitest's browser mode, the `playwright` connection) |
 
 Confirm a path in the built image when in doubt, as uid 1000 from `/work`: `pnpm store
 path`, `yarn config get cacheFolder`, `npm config get cache`, `uv cache dir`,
-`pip cache dir`, `go env GOCACHE GOMODCACHE`. Then check it the sure way: after the first
-local check, every folder under `.exradius-cache/` must have grown (the check prints the
-total in "Read config"), and the second check's install must report no downloads (pnpm:
-`reused N, downloaded 0`). An entry that stays empty is at the wrong path. Cache download stores only, not build
-output or `node_modules`: the folders are shared by concurrent runs of the project, and
-only package managers' stores are built for that. Hard links do not cross bind mounts,
+`pip cache dir`, `go env GOCACHE GOMODCACHE`, `composer config cache-dir`. Then check it
+the sure way: after the first local check the cache folders have grown (the check prints
+each one's size in "Read config"), and the second check's install must not download
+(pnpm: `reused N, downloaded 0`; otherwise the registry's host is no longer under
+`reached in setup`). An entry that stays empty although its tool downloaded is at the
+wrong path; one whose tool had nothing to keep (`~/.cargo/git` without git dependencies)
+may stay empty. Cache download stores only, not build output or `node_modules`: the
+folders are shared by concurrent runs of the project, and only package managers' stores
+are built for that. A warm install that is faster than skipped downloads explain is
+restoring build output: run the full suite once on the warm cache. Hard links do not cross bind mounts,
 so pnpm and uv copy from the cache into `/work` instead of linking: still no download,
 but the disk use in `/work` is a full copy. Nothing cleans the caches; tell the admin
 where they are (the admin README's resources line).
@@ -188,17 +224,28 @@ manager's own process memory remains (Outline's `yarn install` peaks around 2.3 
 parallel installs of several projects add up. On disk, a large JavaScript install takes
 about 0.8 GB in the home and as much again in `/tmp`.
 
-**Fix:** keep setup to what the agent needs; reduce parallelism where the tool allows it
-(`yarn config set networkConcurrency`, `pnpm --network-concurrency`, `-n 0` for
-pytest-xdist in tests, `MAVEN_OPTS=-Xmx...`); declare the peak in `resources.memory` (and
-a service's own in its `memory`), so Exradius places the run on a node with room for it
-(it waits as "waiting for cluster capacity" until one has). A declared memory is also the
-limit: a process over it is killed
-and the run fails with "exceeded its declared memory (6g)", so leave headroom over the
-measured peak (`docker stats` during the check). check.sh applies it the same way
-(`--memory` and `--memory-swap`) and says when a step went over it. Undeclared, the run
-has no limit and Docker Desktop's memory is what kills it locally; check.sh names it when
-a command is killed.
+**Fix:** keep setup to what the agent needs; reduce parallelism where the tool allows it:
+
+| Tool | Bound its memory with |
+|---|---|
+| Yarn, pnpm | `yarn config set networkConcurrency`, `pnpm --network-concurrency` |
+| Turbo, Nx | `--concurrency=2`; `NODE_OPTIONS=--max-old-space-size=<MB>` for one large type check or bundle |
+| vitest, jest | `--maxWorkers=2` (vitest's browser mode starts a browser per worker) |
+| pytest-xdist, Django | `-n 0` or `-n 2`; `manage.py test --parallel 2` |
+| Maven, Gradle | `MAVEN_OPTS=-Xmx...`, `org.gradle.jvmargs`, `--max-workers` |
+| Cargo | `CARGO_BUILD_JOBS: "4"` in `env`: the default is one rustc per core, and the linker comes on top |
+| .NET | `MSBUILDDISABLENODEREUSE: "1"`; build the configuration developers use (Debug) once as well as CI's: its peak can be higher |
+
+Declare the peak in `resources.memory` (and a service's own in its `memory`), so
+Exradius places the run on a node with room for it (it waits as "waiting for cluster
+capacity" until one has). A declared memory is also the limit: a process over it is
+killed and the run fails with "exceeded its declared memory (6g)". check.sh applies it
+the same way (`--memory` and `--memory-swap`), prints every step's peak and the highest
+in its Memory line, and says when a step, or one process inside a step that then exited
+with another code (a linker, a test worker), was killed for it. When the declaration is
+above what Docker has on this machine, a kill is the machine's: the check says which,
+and the declaration stays, since it is the cluster's number. Undeclared, the run has no
+limit and Docker's memory is what kills it locally.
 
 ## A service that needs a different command: `command`, not a Dockerfile
 
@@ -211,9 +258,11 @@ not do it.
 its `ENTRYPOINT`, like compose's `command:`. Prefer it to a service Dockerfile. When the
 compose file overrides the entrypoint with a shell script, check what the image's
 entrypoint does with a first argument of `/bin/sh` (`docker run --rm --entrypoint cat
-<image> <entrypoint path>`): most official entrypoints (Postgres, MinIO and its forks,
-Redis) run an unknown first argument as a command, so the script works as
-`command: [/bin/sh, -c, "..."]`. Plane's MinIO bootstrap, from its
+<image> <entrypoint path>`, or try it: `docker run --rm <image> /bin/sh -c 'echo ok'`).
+Postgres's, Redis's and the stock MinIO's run an unknown first argument as a command,
+so the script works as `command: [/bin/sh, -c, "..."]`; an entrypoint that puts its own
+binary in front of every argument does not ("'/bin/sh' is not a minio sub-command" from
+one MinIO fork) and needs a service Dockerfile. Plane's MinIO bootstrap, from its
 `docker-compose-test.yml`:
 
 ```yaml
@@ -259,6 +308,34 @@ developer's machine: two Postgres, or Postgres and something else on 5432, colli
 
 **Fix:** give the second one another port (Postgres: `command: [postgres, -p, "5433"]` and
 `PGPORT`, Redis: `command: [redis-server, --port, "6380"]`) and point the app at it.
+
+## A service that exits at start: an entrypoint that needs a capability
+
+**Symptom:** "Start service cache" fails at once: `service cache (redis:8) exited with
+code 127 before it was ready`, its log `setpriv: apply bounding set: Operation not
+permitted`; or another entrypoint fails on `chown`, `setcap` or `su`.
+
+**Cause:** services keep only CHOWN, SETUID, SETGID, FOWNER, DAC_OVERRIDE and
+NET_BIND_SERVICE. An entrypoint that drops privileges by changing its capability
+bounding set needs SETPCAP, which no service has. The Debian image of Redis 8 does this.
+
+**Fix:** the switch the image offers for it (`env: {SKIP_DROP_PRIVS: "1"}` for Redis 8),
+or a variant that does not (`redis:<version>-alpine`, Valkey). The local check gives
+services the same capabilities, so what starts there starts in a run.
+
+## A `ready` command that asks the proxy
+
+**Symptom:** a service runs, and its `ready` command keeps failing until the 120 seconds
+are over, with a `403` in "last check": `127.0.0.1 is a private or cluster-internal
+address`.
+
+**Cause:** services get the proxy variables too, so they can download during setup. An
+HTTP client in a `ready` command that obeys `http_proxy` and not `no_proxy` (busybox
+`wget` in Alpine images) sends its request for `127.0.0.1` to the proxy.
+
+**Fix:** the service's own client (`clickhouse-client --query "SELECT 1"`, `pg_isready`,
+`valkey-cli ping`), a `tcp` check, or the HTTP client told to skip the proxy
+(`wget -Y off`, `curl --noproxy '*'`).
 
 ## Files that are only local
 
@@ -322,7 +399,9 @@ find a valid Docker environment" (Testcontainers), or a script runs `docker comp
 the tests can be pointed at), and set the variables that make the suite use them instead
 of starting their own (many suites have a profile or an env var for an existing
 database). Tests that only work by starting containers stay
-for CI; say so in `notes`, with the command that runs the rest.
+for CI; say so in `notes`, with the command that runs the rest. Tests that skip
+themselves when Docker is missing (`@Testcontainers(disabledWithoutDocker = true)`) need
+no change, only that line.
 
 ## Architecture-specific downloads
 
@@ -376,6 +455,37 @@ variable rather than a fixed address: in a setup command
 `HTTPS_PROXY` itself in `env`. The local check reproduces this (its containers have no
 direct route either) and adds a hint when a command fails this way.
 
+Two cases with their own answer:
+
+- **Node's built-in `fetch`** (a tool written for Node 18 or later that downloads
+  something itself: "fetch failed") ignores the variables unless `NODE_USE_ENV_PROXY` is
+  set: `NODE_USE_ENV_PROXY: "1"` in `env`, for Node 24 and later.
+- **The project's own code**, not a tool: a fetcher that resolves the name itself and
+  connects to the address (protection against requests to internal hosts does this)
+  cannot be given a proxy. When what it fetches has a cache in the repository, download
+  it in a setup command into that path; otherwise the test cannot run here, and `notes`
+  say so. The application's own features that use the fetcher fail the same way when it
+  runs: `notes` name them.
+
+## The project's own network tests fail under the proxy variables
+
+**Symptom:** tests of the project's HTTP client or proxy support fail only here; or a
+test that starts a server and requests the address it printed gets a `403`, with
+`refused: 172.x.x.x` or `10.x.x.x` under the step.
+
+**Cause:** two different things. Every process has the proxy variables in upper and
+lower case, and a test that sets `HTTP_PROXY` for its own purpose still inherits
+`http_proxy`, which Go's and other clients read first. And `NO_PROXY` covers
+`localhost`, `127.0.0.1` and the services, not the run's own address: a request to it
+goes to the proxy, which refuses private addresses.
+
+**Fix:** for the first, the command in `notes` clears them for that suite:
+`env -u http_proxy -u https_proxy -u no_proxy go test ./internal/http/...`. For the
+second, the tests' server and client use `127.0.0.1`; where the test takes the address
+from the interfaces, the command extends the exception for itself:
+`NO_PROXY="$NO_PROXY,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" cargo test`. Both go
+into `notes` as part of the command, proved with `--run`.
+
 ## An internal registry or mirror on a private address
 
 **Symptom:** a build step or a setup command fails with "resolves to a private or
@@ -419,7 +529,24 @@ allowlisted network.
 would: `check.sh --run 'cd api && uv run pytest tests/unit -q -x' --run 'cd web && pnpm
 lint'`. Give the fast path (one test file, one package) as well as the full one, and the
 flag that keeps memory down when a suite starts parallel workers. A command that cannot
-work in a run is not in the notes; what replaces it is.
+work in a run is not in the notes; what replaces it is. The same holds for a statement:
+"X works without Y" is written after it was seen to. A command that starts something in
+the background must also stop it: run it twice in one `--run` to see that the second
+start finds the port and the database free.
+
+## Verify passes, the tests pass, and the application does not start
+
+**Symptom:** a task that had to reproduce a bug reports that the server exits at start
+(a missing program, `EAI_AGAIN redis`, a missing data folder), that it found no way to
+log in, or it spends its first half hour finding the start command.
+
+**Cause:** the setup was written for the checks. What only the running application
+needs (a queue the tests mock, ffmpeg, a development database, built assets) was never
+looked for, and `notes` are silent about starting it.
+
+**Fix:** running-the-app.md: find how developers start it, put what it needs into
+`services`, the Dockerfile and setup, prove the start with `--run-file`, and write the
+commands into `notes`.
 
 ## Checks that need generated code
 
@@ -430,7 +557,10 @@ on the developer's machine.
 **Cause:** the developer generated them long ago; a run starts from a clean clone.
 
 **Fix:** find the generating step in CI (it runs from a clean clone too) and add it to
-setup after the install, or say in `notes` which command must run first when it is slow
+setup after the install. When CI has none and a fresh clone still fails on a missing
+path, find what writes that path (a bundler's `outDir`, a generator's output folder):
+CI's job for one part may never build the other part it imports from. Or say in `notes`
+which command must run first when it is slow
 and only some checks need it (Plane: type checks need `pnpm turbo run build
 --filter=<package>...` first).
 

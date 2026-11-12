@@ -5,7 +5,9 @@ way they do. The first three failed Verify once before they passed; Plane, set u
 skill, passed first time. The files are brought up to this skill release: each declares
 `resources.memory`, a `workstation.cache` and a `network.allow`, the roles say which
 tickets an agent takes, and `model` is left to the install's default. The agents'
-identity email is replaced by `dev-bot@example.com`.
+identity email is replaced by `dev-bot@example.com`. They were written before this
+release asked `notes` to say how the application is started; for that part see
+running-the-app.md, whose two `notes` excerpts come from later projects.
 
 Read the one closest to the project at hand, not all four:
 
@@ -667,10 +669,10 @@ Choices:
 ## Patterns the four share
 
 - A Dockerfile per workstation, `FROM` the official image of the main language at the version the repository pins, Debian/Ubuntu variant.
-- Tool versions taken from the repository (`.nvmrc`, `packageManager`, `.python-version`, `requires-python`, the developer's uv), prepared in the image under `/opt` with `chmod -R a+rX` and an `ENV` that points at them.
+- Tool versions taken from CI first, then the repository (`.nvmrc`, `packageManager`, `.python-version`, `requires-python`, the developer's uv), prepared in the image under `/opt` with `chmod -R a+rX` and an `ENV` that points at them.
 - Setup commands that install dependencies with the lockfile frozen (`--immutable`, `--locked`, `--frozen-lockfile`) and prepare databases; nothing that needs root.
 - A `workstation.cache` entry for every package manager in setup, and `resources.memory` from the heaviest step.
 - Services from stock images (with a `command` where compose has one) and a TCP-based `ready` check; secrets only for values that are really secret, referenced the same way in the service and in `env`.
 - `network.allow` with the registries of the package managers in setup, plus whatever the check showed the build reaching first (a mirror); nothing listed "just in case".
 - `notes` that give each area's check commands as they work in a run, with the fast form for one file or package, and say what cannot run there.
-- `developer` (push, pull request, `github` connection) and `scout` (read-only) agents, each role opening with the tickets the agent takes and, for the developer, ending with when the work is done and how it is delivered.
+- `developer` (push, pull request, `github` connection) and `scout` (read-only) agents, each role opening with the tickets the agent takes and, for the developer, ending with when the work is done and how it is delivered. All four push; a project with `push: false` drops the `github` connection, the token and the role's delivery sentence, and a project without secrets has no `secret_store`.

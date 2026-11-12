@@ -489,3 +489,209 @@ def test_the_proxy_refuses_a_private_address_in_setup(proxy):
     (state / "policy.json").write_text(json.dumps({"allow": [], "repositories": [], "private": []}))
     head = _request(server.port, "GET http://127.0.0.1:9/ HTTP/1.1\r\nHost: 127.0.0.1:9\r\n\r\n")
     assert head.startswith(b"HTTP/1.1 403 127.0.0.1 is a private or cluster-internal address\r\n")
+
+
+# -- the check's report (no Docker) -------------------------------------------------------------
+
+
+def test_failure_lines_are_found_above_the_tail_once_with_log_numbers(check):
+    rows = ["ok"] * 10 + ["--- FAIL: TestA", "\x1b[31mFAILED\x1b[0m test_b", "--- FAIL: TestA"] + ["x"] * 5 + ["Error: last"]
+    numbers = [100 + i for i in range(len(rows))]
+    found = check.failure_lines("\n".join(rows), numbers, tail_lines=3)
+    assert found == [(110, "--- FAIL: TestA"), (111, "FAILED test_b")]
+    # Lines already in the tail are not repeated.
+    assert check.failure_lines("\n".join(rows), None, tail_lines=100) == []
+
+
+def test_failure_lines_keep_the_first_and_the_last(check):
+    rows = ["error: %d" % i for i in range(40)] + ["tail"]
+    found = check.failure_lines("\n".join(rows), None, tail_lines=1, limit=15)
+    assert len(found) == 16
+    assert found[0] == (1, "error: 0") and found[5] == (None, "... (25 more)") and found[-1] == (40, "error: 39")
+
+
+@pytest.mark.parametrize("marker", ["--- FAIL", "FAILED", "Failed!", "Caused by:", "[ERROR]", "Error:", "error:",
+                                    "panic:", "Traceback", "npm ERR!", "ELIFECYCLE", "Killed", "signal 9"])
+def test_each_failure_marker(check, marker):
+    assert check.failure_lines("a %s b\nend" % marker, None, tail_lines=1) == [(1, "a %s b" % marker)]
+
+
+def test_ansi_and_progress_bars_are_stripped(check):
+    assert check.strip_ansi("\x1b[1;32mPASS\x1b[0m 3 tests\n10%\r50%\r100%") == "PASS 3 tests\n100%"
+    assert check.last_lines("a\n\n\x1b[2Kb\n   \nc\n", 2) == ["b", "c"]
+    assert check.last_lines("", 10) == []
+
+
+@pytest.mark.parametrize(("command", "title"), [
+    ("pytest -q", "pytest -q"),
+    ("cd app &&\n  npm test", "cd app && ..."),
+    ("x" * 150, "x" * 97 + "..."),
+    ("\n\n  make check\n", "make check"),
+])
+def test_short_title(check, command, title):
+    assert check.short_title(command) == title
+
+
+@pytest.mark.parametrize(("size", "text"), [
+    (512, "1 KiB"), (5 * 1024 ** 2, "5 MiB"), (1024 ** 3, "1.0 GiB"), (int(1.3 * 1024 ** 3), "1.3 GiB"),
+])
+def test_memory_text(check, size, text):
+    assert check.memory_text(size) == text
+
+
+GIB = 1024 ** 3
+
+
+@pytest.mark.parametrize(("code", "declared", "host", "kills", "summary", "note"), [
+    (0, "4g", 8 * GIB, 0, "", ""),
+    (137, "4g", 8 * GIB, 1,
+     "exited with 137: exceeded its declared memory (4g); raise resources.memory or lower the step's parallelism", ""),
+    (137, "8g", int(7.7 * GIB), 1,
+     "exited with 137: killed: Docker has 7.7 GiB, less than the declared 8g; give Docker more memory or check on a "
+     "larger machine (a run's limit is the declared 8g)", ""),
+    (137, None, 8 * GIB, 1,
+     "exited with 137 (killed: usually out of memory; Docker has 8.0 GiB and resources.memory is not declared)", ""),
+    (101, "4g", 8 * GIB, 1, "", "a process in this step was killed for memory (limit: resources.memory 4g)"),
+    (0, "4g", 8 * GIB, 2, "", "a process in this step was killed for memory (limit: resources.memory 4g)"),
+    (1, None, 8 * GIB, 1, "",
+     "a process in this step was killed for memory (limit: Docker's 8.0 GiB; resources.memory is not declared)"),
+    (1, "8g", int(7.7 * GIB), 1, "",
+     "a process in this step was killed for memory (limit: Docker's 7.7 GiB, less than the declared 8g)"),
+])
+def test_memory_verdict(check, code, declared, host, kills, summary, note):
+    assert check.memory_verdict(code, declared, host, kills) == (summary, note)
+
+
+def test_memory_advice(check):
+    assert check.memory_advice(GIB, "Setup: a", "4g") == ['highest peak 1.0 GiB in "Setup: a"; resources.memory 4g']
+    tight = check.memory_advice(int(3.5 * GIB), "Setup: a", "4g")
+    assert tight[1].startswith("warning: that leaves less than 1 GiB of resources.memory (4g)")
+    assert tight[1].endswith("(5g)")
+    assert check.memory_advice(int(1.3 * GIB), "s", None) == [
+        'highest peak 1.3 GiB in "s"; resources.memory not declared',
+        "declare resources.memory: the peak plus about 1 GB for the agent, at least 4g (4g)"]
+
+
+def test_wrapper_report(check):
+    marker = "@@exradius-check-abc@@"
+    assert check.wrapper_report(["%s ws=1048576" % marker, "%s peak=2097152 oom_kill=1" % marker]) == {
+        "ws": 1048576, "peak": 2097152, "oom_kill": 1}
+    # cgroup v1: nothing to read, nothing reported.
+    assert check.wrapper_report(["%s peak= oom_kill=" % marker]) == {}
+
+
+@pytest.mark.parametrize(("host", "kind"), [
+    ("172.25.0.3", "own"), ("127.0.0.1", "loopback"), ("10.1.2.3", "private"), ("[fd00::1]", "private"),
+    ("feed.invalid", "fake"), ("db", "fake"), ("api.test", "fake"), ("x.example", "fake"), ("app.localhost", "fake"),
+    ("pypi.org", ""), ("93.184.215.14", ""),
+])
+def test_host_remark(check, host, kind):
+    assert check.host_remark(host, "172.25.0.3")[0] == kind
+
+
+def test_refusal_text(check):
+    reason = "172.25.0.3 is not on this task's network allowlist (network.allow)"
+    assert check.refusal_text("172.25.0.3", reason, "172.25.0.3") == (
+        "172.25.0.3: 172.25.0.3 is the run's own address: a request to it goes to the proxy, in a run too; use "
+        "127.0.0.1 or localhost")
+    assert "egress.allowPrivate" in check.refusal_text("10.0.0.5", "x", "172.25.0.3")
+    assert check.refusal_text("feed.invalid", "r", None) == (
+        "feed.invalid: r; not a real host: a test fixture or a script error")
+    assert check.refusal_text("example.com", "r", None) == "example.com: r"
+    assert check.proxy_error_line("repo.hex.pm", 3, "cannot resolve repo.hex.pm") == (
+        "could not reach (proxy error): repo.hex.pm (3): cannot resolve repo.hex.pm")
+
+
+@pytest.mark.parametrize("text", [
+    "couldn't resolve github.com (#<NoIPsError>)", "TypeError: fetch failed", "getaddrinfo EAI_AGAIN x",
+    "Temporary failure in name resolution", "Name or service not known", "No such host is known",
+])
+def test_direct_connection_hints(check, text):
+    assert check.NO_NAME.search(text)
+
+
+def test_host_fault(check):
+    assert "EAGAIN" in check.host_fault(-1, "[Errno 35] Resource temporarily unavailable")
+    assert "exit 125" in check.host_fault(125, "docker: Error response from daemon")
+    assert "error getting credentials" in check.host_fault(1, "error getting credentials - err: exit status 1")
+    assert check.host_fault(1, "Resource temporarily unavailable") == ""
+
+
+@pytest.mark.parametrize(("size", "empty", "text"), [
+    (0, True, "empty"), (4096, False, "4 KB"), (503_808, False, "504 KB"), (236_000_000, False, "236 MB"),
+    (3_100_000_000, False, "3.1 GB"),
+])
+def test_cache_sizes(check, size, empty, text):
+    assert check.size_text(size, empty) == text
+
+
+def test_cache_summary_tells_small_from_empty(check, tmp_path):
+    entries = [{"path": "~/.cache/a"}, {"path": "~/.cache/b"}]
+    (tmp_path / check.cache_folder(0, "~/.cache/a")).mkdir()
+    folder = tmp_path / check.cache_folder(1, "~/.cache/b")
+    folder.mkdir()
+    (folder / "f").write_bytes(b"x" * 300_000)
+    text, warm = check.cache_summary(str(tmp_path), entries)
+    assert text.startswith("~/.cache/a empty, ~/.cache/b ") and text.endswith(" KB")
+    assert warm is True
+
+
+def test_disk_text(check):
+    sizes = {"work": 1_600_000_000, "home": 700_000_000, "tmp": 100_000_000}
+    assert check.disk_text(sizes, 1_200_000_000) == "2.4 GB (/work 1.6 GB, home 700 MB, /tmp 100 MB); caches 1.2 GB"
+    assert check.disk_text({"work": 4096, "home": 0, "tmp": 4096}) == "8 KB (/work 4 KB, home 0 KB, /tmp 4 KB)"
+
+
+def test_log_path_and_pruning(check):
+    when = 1_700_000_000
+    path = check.default_log_path("demo", when, "/base")
+    assert path.startswith("/base/logs/demo-") and path.endswith(".log")
+    assert len(path.rsplit("/", 1)[1]) == len("demo-20231114-221320.log")
+    names = ["demo-202311%02d-120000.log" % d for d in range(1, 26)] + ["demo-x-20231101-120000.log", "other.txt"]
+    removed = check.logs_to_remove(names, "demo", keep=20)
+    assert removed == ["demo-202311%02d-120000.log" % d for d in range(1, 6)]
+
+
+def test_default_cache_dir(check, tmp_path):
+    config = tmp_path / "exradius.yaml"
+    config.write_text("version: 1\n")
+    assert check.default_cache_dir(str(config), "demo", "/base") == ("/base/demo", False)
+    (tmp_path / ".exradius-cache").mkdir()
+    assert check.default_cache_dir(str(config), "demo", "/base") == (str(tmp_path / ".exradius-cache"), True)
+
+
+@pytest.mark.parametrize(("first", "command"), [
+    ("#!/usr/bin/env bash", "/usr/bin/env bash /x/probe.sh"),
+    ("#!/bin/bash -eu\r", "/bin/bash -eu /x/probe.sh"),
+    ("echo hi", "/bin/sh /x/probe.sh"),
+    ("#!", "/bin/sh /x/probe.sh"),
+])
+def test_run_file_command(check, first, command):
+    assert check.run_file_command(first + "\necho body\n", "/x/probe.sh") == command
+
+
+def test_run_and_run_file_keep_their_order(check, tmp_path):
+    script = tmp_path / "probe.sh"
+    script.write_text("#!/bin/sh\n")
+    args = check.parse_args(["--run", "a", "--run-file", str(script), "--run", "b"])
+    assert args.runs == [("cmd", "a"), ("file", str(script)), ("cmd", "b")]
+    assert args.run == ["a", "b"]
+    with pytest.raises(SystemExit):
+        check.parse_args(["--run-file", str(tmp_path / "missing.sh")])
+
+
+def test_guess_slug(check, tmp_path):
+    config = tmp_path / "My Config" / "exradius.yaml"
+    config.parent.mkdir()
+    config.write_text("version: 1\nproject:\n  slug: demo\n")
+    assert check.guess_slug(str(config)) == "demo"
+    config.write_text("not: [valid\n")
+    assert check.guess_slug(str(config)) == "my-config"
+
+
+def test_a_refused_local_port_is_not_a_tool_ignoring_the_proxy(check):
+    refused = "curl: (7) Failed to connect to localhost port 8096 after 0 ms: Couldn't connect to server"
+    assert check.NO_PROXY_USED.search(refused)
+    assert check.LOCAL_TARGET.search(refused)
+    assert check.LOCAL_TARGET.search("connect ECONNREFUSED 127.0.0.1:5432")
+    assert not check.LOCAL_TARGET.search("curl: (6) Could not resolve host: jellyfin.org")

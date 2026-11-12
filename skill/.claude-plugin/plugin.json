@@ -1,6 +1,6 @@
 {
   "name": "exradius",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Set up a project for Exradius: write exradius.yaml, the workstation Dockerfile and the admin README, and prove locally with Docker that the setup and the project's own checks work under a run's conditions.",
   "author": {
     "name": "musabeytekin"

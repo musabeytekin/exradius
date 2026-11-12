@@ -5,18 +5,21 @@ A Claude Code plugin with one skill, `exradius-project`, that puts a codebase on
 agents on a team's repositories. On the developer's machine it:
 
 1. reads the code (languages, tool versions the lockfiles demand, package registries,
-   services from compose and CI, the checks as CI runs them, secret names from tracked env
-   examples), trusting CI over the README where they disagree;
+   services from compose and CI, the checks as CI runs them, how the application is
+   started in development, secret names from tracked env examples, and what the team's
+   own guide says to agents), trusting CI over the README where they disagree;
 2. asks the few things it cannot infer, in one round (other repositories, whether agents
-   push and open pull requests, where the config lives, where tickets come from), and
-   states the rest as assumptions;
+   push and open pull requests, where the config lives, where tickets come from, and
+   anything in the team's guide that forbids or restricts agents), and states the rest
+   as assumptions;
 3. writes `exradius.yaml` (config **version 1**) with notes and agent roles an agent can
    work from, `docker/workstation.Dockerfile` when the stock image is not enough, a
    bridge file when the team's tracker needs one, and a `README.md` for the Exradius admin
    listing every secret key with its format and where to get it, and what only the
    install can provide;
 4. checks it locally with Docker: the steps of Exradius's Verify, then the project's own
-   test and lint commands as an agent would run them, with the agent's network;
+   test and lint commands and the start of the application as an agent would run them,
+   with the agent's network, and measures the memory each step needs;
 5. creates the config repository (private by default) with `gh` or a git-host MCP server,
    or prints the commands, and ends with the hand-off for the admin.
 
@@ -87,7 +90,8 @@ names another image with Python).
 
 ```bash
 skills/exradius-project/scripts/check.sh --repo myapp=../myapp \
-  --run 'cd myapp && npm test -- src/health.test.ts' ../exradius-myapp
+  --run 'cd myapp && npm test -- src/health.test.ts' \
+  --run-file ../exradius-myapp/check/start-app.sh ../exradius-myapp
 ```
 
 Steps, in Verify's order:
@@ -99,20 +103,21 @@ Steps, in Verify's order:
 | Check workstation image | glibc (no Alpine/musl), `bash`, `git`, and the tools found on PATH, as uid 1000 on a read-only root |
 | Check connections | each stdio connection an agent lists has its command (`npx`, `uvx`, a custom one) in the workstation image, as Verify's "List tools" needs |
 | Start egress proxy | a Docker network without a route out, and a small proxy on it: the stand-in for Exradius's egress proxy, open during setup, limited to the agent's hosts afterwards (`--open-network` skips it) |
-| Prepare /work | a fresh clone of each local checkout (`--repo NAME=PATH`, `--repos-dir DIR`, or the config's own repository for `.exradius/`), else a clone from the URL; `--live` mounts the checkouts as they are |
+| Prepare /work | Docker volumes for `/work`, the home and `/tmp` (a Linux filesystem, as a run's disk), and in `/work` a fresh clone of each local checkout (`--repo NAME=PATH`, `--repos-dir DIR`, or the config's own repository for `.exradius/`), else a clone from the URL; `--live` mounts the checkouts as they are |
 | Start service *name* | in the run's network namespace, as a sidecar of the run's pod: a holder container owns it, with every service name as `127.0.0.1` in its `/etc/hosts`, and each service joins it (`--network container:`), with the operator's capabilities, its `command` and `memory`, and its `ready` check (`command`, `tcp` against the pod's own address, image HEALTHCHECK, or running), 120 s from its start |
-| Setup: *command* | `/bin/sh -c` in the workstation with `--user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges`, generated `/etc/passwd`/`/etc/group` (`runner`, home `/home/runner`), `/work`, home and `/tmp` as writable bind mounts, `HOME=/home/runner`, the project `env` with one throwaway value per `${secret:NAME}`, the proxy variables Exradius sets (`HTTPS_PROXY`, `YARN_HTTPS_PROXY`, `JAVA_TOOL_OPTIONS`, ...), in the same network namespace (services on `localhost` by name); `resources.memory` as `--memory` and `--memory-swap`; each `workstation.cache` folder mounted from `.exradius-cache/` next to `exradius.yaml` |
-| Agent phase: *command* | each `--run` command, after setup, in the same workstation conditions, with the network limited to `network.allow`, the connections' hosts and `--allow` hosts: the project's test and lint commands as an agent would run them |
+| Setup: *command* | `/bin/sh -c` in the workstation with `--user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges`, generated `/etc/passwd`/`/etc/group` (`runner`, home `/home/runner`), `/work`, home and `/tmp` writable, `HOME=/home/runner`, the project `env` with one throwaway value per `${secret:NAME}`, the proxy variables Exradius sets (`HTTPS_PROXY`, `YARN_HTTPS_PROXY`, `JAVA_TOOL_OPTIONS`, ...), in the same network namespace (services on `localhost` by name); `resources.memory` as `--memory` and `--memory-swap`; each `workstation.cache` folder mounted from `~/.cache/exradius-check/<slug>/`; the step's peak memory is printed |
+| Agent phase: *command* | each `--run` command and `--run-file` script, after setup, in the same workstation conditions, with the network limited to `network.allow`, the connections' hosts and `--allow` hosts: the project's test and lint commands and the start of the application, as an agent would run them. All of them run, also after one failed |
+| Memory, Disk | the highest peak of any step against `resources.memory`, and what the run left on its disk |
 | Network | from the proxy's records: `reached in setup`, `reached in setup only` (what the agent cannot reach), `refused in the agent phase`, repository hosts something other than git may have used, and private addresses the admin's install must allow |
-| Clean up | removes the containers, the network and the temporary folders (`--keep` keeps the folders); built images and `.exradius-cache/` stay |
+| Clean up | removes the containers, the network and the volumes (`--keep` keeps the volumes), also when the check is interrupted; built images and the cache folders stay |
 
-Exit status 0 when every step passed, 1 with the first failing step and its output
+Exit status 0 when every step passed, 1 with each failing step and its output
 otherwise, 2 for usage errors. `--validate` only reads the file (no Docker),
 `--platform linux/amd64` (or `arm64`) checks the cluster's architecture when it differs
 from the machine's, `--allow HOST` and `--allow-private HOST` stand for what the admin's
 install allows (`egress.allow`, `egress.allowPrivate`), `--cache-dir DIR` keeps the cache
-folders elsewhere (delete the folder to start cold), `-v` streams output, `--help` lists
-the rest. The skill adds `.exradius-cache/` to the config repository's `.gitignore`.
+folders elsewhere (delete the folder to start cold), `--log PATH` names the full log,
+`-v` streams output, `--help` lists the rest.
 
 Not covered locally: the agent runtime and the model, pushes and git's credential route,
 the connections' tool lists, and image builds' network (builds use Docker's own). A Verify
@@ -128,6 +133,10 @@ The skill's references are the developer documentation for Exradius projects:
   what a workstation image must survive;
 - [`references/network.md`](skills/exradius-project/references/network.md): what a run
   reaches in each phase, how to write `network.allow`, private registries, the proxy;
+- [`references/stacks.md`](skills/exradius-project/references/stacks.md): per language
+  and service, the image and tool choices that worked;
+- [`references/running-the-app.md`](skills/exradius-project/references/running-the-app.md):
+  what an application needs to start in a run, and how to prove it does;
 - [`references/pitfalls.md`](skills/exradius-project/references/pitfalls.md): failures
   seen on real projects and their fixes;
 - [`references/verify-failures.md`](skills/exradius-project/references/verify-failures.md):
@@ -141,12 +150,50 @@ The skill's references are the developer documentation for Exradius projects:
 
 | skill (plugin) | writes `exradius.yaml` |
 |---|---|
+| 0.5.0 | version 1; a setup in which the application starts, proven locally, with measured memory |
 | 0.4.0 | version 1, with `network.allow`; checked with the run's network and the project's own check commands |
 | 0.3.0 | version 1, checked the way Exradius 0.2.0 (on Kubernetes) runs it |
 | 0.2.0 | version 1, with `resources`, service `memory` and `command`, `workstation.cache` |
 | 0.1.0 | version 1 |
 
 A change of the file's schema in Exradius is followed by a release of this plugin.
+
+### 0.5.0
+
+From trials of 0.4.0 on thirteen open source projects (Rust, Java, Python, Go, Ruby, PHP,
+Elixir, .NET, Node monorepos): every setup passed its checks, two applications could not
+start, and no project's notes said how to start it.
+
+- **Running the application.** The skill reads how developers start the app, puts what
+  only its start needs into `services`, the Dockerfile and setup, proves the start with
+  the check (`--run-file check/start-app.sh`) and writes the commands, the port and the
+  login into `notes` (`references/running-the-app.md`). A test mode no longer goes into
+  `env`.
+- **The team's own rules.** A guide that forbids AI-written changes, a mirror where pull
+  requests are closed, or a delivery procedure that contradicts the chosen one becomes a
+  question to the developer instead of being worked around.
+- **`references/stacks.md`**: image and tool choices per language (Rust, Go, Ruby, PHP,
+  .NET, Elixir, Bun, pip, a second runtime) and per service, and cache and host rows for
+  them in `pitfalls.md` and `network.md`.
+- **Corrections.** pnpm 12 is installed with npm (the corepack recipe left a wrapper that
+  downloads at first use); Gradle's wrapper is fetched in setup instead of allowing a host
+  that redirects to GitHub; Yarn 1 and Composer hosts come from the lockfile; an
+  entrypoint is tried before it is assumed to run a shell command; Redis 8's image needs
+  `SKIP_DROP_PRIVS`; a `ready` command must not be an HTTP client that asks the proxy.
+- **The proxy variables and the project's own tests**: the run's own address is not in
+  `NO_PROXY`, lower-case variables override a test's own, Node's `fetch` needs
+  `NODE_USE_ENV_PROXY`; each with its symptom and the command prefix for `notes`.
+- **Memory** is measured, not guessed: one rule (the check's peak plus about 1 GB, at
+  least `4g`) and the flags that bound each tool's parallelism.
+- No secret store, and a role without a delivery sentence, for projects that need neither.
+- **The check**: `/work`, the home and `/tmp` are Docker volumes, so Unix sockets work as
+  in a run (on macOS they failed on the mounted folders); every step's peak memory, a
+  Memory and a Disk line; a process killed for memory inside a step is named; every
+  `--run` runs, also after a failure; `--run-file`; a passing command's last lines are
+  shown; failure output shows the lines that say why; proxy errors and the run's own
+  address are named in the Network lists; the cache folders moved to
+  `~/.cache/exradius-check/<slug>`; the full log has a stable place; an interrupted check
+  cleans up.
 
 ### 0.4.1
 
@@ -239,8 +286,8 @@ them means what it meant before):
 ../.claude-plugin/marketplace.json the repository root as a marketplace (name: exradius)
 skills/exradius-project/
   SKILL.md                        the flow
-  references/                     schema, run conditions, network, pitfalls, Verify failures,
-                                  examples, admin README
+  references/                     schema, run conditions, network, stacks, running the app,
+                                  pitfalls, Verify failures, examples, admin README
   scripts/check.sh                the local check (wraps exradius_check.py)
   scripts/exradius_check.py       standard-library Python: YAML reader, validator, Docker steps,
                                   the local egress proxy

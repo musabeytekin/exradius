@@ -5,7 +5,11 @@ the code. It is the only place that says what format each secret has and where t
 it: Exradius shows key names, never hints. It is also the only place that says what the
 project needs from the install itself (the cluster's architecture, a private address, a
 bridge). Fill every `<...>`; drop rows and sections that do not apply. No secret value
-ever goes into it, not even an example that looks real.
+ever goes into it, not even an example that looks real. A project whose file references
+no secret has no store: drop the store row, step 3 and the store section, and write
+"This project needs no secret store" in their place. Write only what was measured or
+read: the visibility is the one chosen for publishing (private by default), and a number
+nobody measured is written as "not measured".
 
 ````markdown
 # <Project name> on Exradius
@@ -32,7 +36,8 @@ repository on every run; changes take effect when they are pushed to `<branch>`.
    (or, for a store kept in Vault, put them as fields of the secret at its path).
 4. Open the project's Verify tab: it runs by itself and every step should pass. The local
    check passed on <date> for `linux/<arch>`<, with these commands run as the agent
-   would: <commands>>.
+   would: <commands>><, and the application started with `check/start-app.sh`>.
+   <Not proven locally: <command>, because <reason>.>
 
 <Only when something applies:>
 ## Ask the admin
@@ -75,8 +80,9 @@ DB_PASSWORD=
 - Resources: `resources.memory` is `<N>g`: each run needs a cluster node with that much
   memory free (it waits as "waiting for cluster capacity" until one has), and the
   workstation is killed if it goes over it
-  (<the heaviest step>)<; services: <name> `<N>m`, ...>. Disk: about <N> GB per run
-  (<the biggest install>).
+  (<the heaviest step and its measured peak>)<; services: <name> `<N>m`, ...>. Disk:
+  about <N> GB per run (the local check's Disk line). Setup takes about <N> minutes<, <N> once the caches are filled> (a cache saves
+  downloads, not compiling).
 - Caches: <the package managers' stores, e.g. the pnpm store and uv's cache> are kept
   between runs on the project's volume in the cluster (the PersistentVolumeClaim
   `exradius-project-<slug>` in the runs' namespace, about <N> GB after the first run),

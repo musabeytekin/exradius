@@ -94,6 +94,9 @@ the tests, call the model with a real ticket, or push. What shows up only in a t
 | the result says a download or an install was refused; the task page's Network tab lists a host | the agent phase's allowlist | add the host to `network.allow` when the agent should reach it |
 | the agent reports tests could not run ("Cannot connect to the Docker daemon") | tests that start containers | model what they start as `services`; say in `notes` which tests stay for CI |
 | the agent ran the wrong command, or none | `notes` do not say how to run the checks, or name a command that does not work in a run | prove each command with `check.sh --run '<command>'`, then write it into `notes` |
+| the agent could not start the application, or spent the task finding out how | the setup covers the tests only: a service, a program or the start commands are missing | running-the-app.md: add what the start needs, prove it with `--run-file`, write it into `notes` |
+| the agent refuses the task, or stops before delivering | the repository's own `CLAUDE.md` or `AGENTS.md` forbids AI-written changes or prescribes another delivery | the team's decision (SKILL.md, step 2); `notes` cannot overrule the repository's guide |
+| a request to the run's own address, or the project's proxy tests, get a `403` | the proxy variables (pitfalls.md, "The project's own network tests fail") | the command prefix given there, in `notes` |
 | "pushing to <url> is not allowed for this task (push: false)" | the repository has no `push: true` | set it (with a token that can write), or leave it: the agent attaches a patch instead |
 | the push is refused by the host | the token cannot write, or the branch is protected | the store key's permissions; agents push new branches, never the default one |
 | the task is rejected: `unknown agent 'x' in project 'y' (it defines ...)` | the task names an agent the file no longer has | whoever sends tasks names an agent from the list, or the agent goes back into the file |
@@ -106,7 +109,8 @@ the tests, call the model with a real ticket, or push. What shows up only in a t
 ```bash
 bash check.sh --repo <name>=<checkout> <config folder>               # every Verify step up to setup
 bash check.sh --repo <name>=<checkout> --run '<command>' <config folder>   # and a command as the agent would run it
-bash check.sh --repo <name>=<checkout> --keep -v <config folder>     # keep /work, the home and /tmp to look at
+bash check.sh --repo <name>=<checkout> --run-file check/start-app.sh <config folder>   # and the application's start
+bash check.sh --repo <name>=<checkout> --keep -v <config folder>     # keep the volumes of /work, the home and /tmp to look at
 ```
 
 `--platform` matters when the failure is in a build or a downloaded binary; `--live`

@@ -4,10 +4,12 @@
 # check the workstation image and the commands of the agents' stdio connections, start the
 # egress proxy and the services, run the setup commands in the workstation under the run's
 # conditions (uid 1000 named runner with home /home/runner, read-only root filesystem, no
-# capabilities, no-new-privileges, resources.memory as the memory limit, workstation.cache
-# mounted from .exradius-cache/ next to exradius.yaml), then each --run command the same way
-# in the agent phase, summarise the hosts the proxy allowed and refused, and clean up
-# everything but the cache.
+# capabilities, no-new-privileges, resources.memory as the memory limit, /work, the home,
+# /tmp and the state directory on Docker volumes, workstation.cache mounted from
+# ~/.cache/exradius-check/<slug>/), then each --run command and --run-file script the same way
+# in the agent phase, report each step's peak memory, the disk the run used and the hosts the
+# proxy allowed and refused, and clean up everything but the cache (--keep keeps the volumes).
+# The full log goes to ~/.cache/exradius-check/logs/ unless --log names a file.
 # Like a run's pod on Kubernetes, the services and the setup commands share one network
 # namespace: services are reached by name on localhost. That namespace sits on an internal
 # Docker network whose only way out is the proxy (open in setup, the agent phase's hosts

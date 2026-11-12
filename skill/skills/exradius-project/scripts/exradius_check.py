@@ -11,8 +11,11 @@ repositories under /work; start the egress proxy; start the services and wait un
 are ready; run every setup command in the workstation under the run's conditions (with
 ``resources.memory`` as its memory limit and ``workstation.cache`` mounted from a local
 cache directory that persists between checks); switch the proxy to the agent phase and run
-each ``--run`` command the same way; summarise what the proxy saw; stop and remove
-everything but the cache. The first failing step is printed with its output.
+each ``--run`` command and ``--run-file`` script the same way (all of them, once setup has
+passed); summarise each step's peak memory, the disk the run used and what the proxy saw;
+stop and remove everything but the cache. Failing steps are printed with their output.
+/work, the home, /tmp and the state directory are Docker volumes, a Linux filesystem as the
+run's PVC is (on macOS a host folder cannot hold Unix sockets).
 
 Like an Exradius run on Kubernetes, the check is one "pod": a holder container owns the
 network namespace, with every service name mapped to 127.0.0.1 in its /etc/hosts (the pod's
@@ -44,10 +47,13 @@ import platform
 import posixpath
 import re
 import secrets as _random
+import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -1858,7 +1864,7 @@ echo "arch: $(uname -m)"
 echo "id: $(id 2>&1)"
 echo "home: $HOME"
 echo "PATH: $PATH"
-for t in node npm npx corepack yarn pnpm bun python3 python pip uv uvx poetry java mvn gradle go cargo rustc ruby bundle php composer dotnet make gcc psql; do
+for t in node npm npx corepack yarn pnpm bun python3 python pip uv uvx poetry java mvn gradle go cargo rustc ruby bundle php composer dotnet mix make gcc psql curl wget tar ffmpeg; do
   p=$(command -v "$t" 2>/dev/null) && echo "tool: $t $p"
 done
 true
@@ -1886,9 +1892,41 @@ def run(cmd, env=None, timeout=None, input_text=None):
     return proc.returncode, proc.stdout.decode(errors="replace")
 
 
-def stream(cmd, log, verbose, env=None, input_text=None):
+class Log(object):
+    """The full log. It counts its lines, so a step's output can be cited by line number,
+    and it is written from the step's thread and the progress line's."""
+
+    def __init__(self, path):
+        self.path = path
+        self.handle = open(path, "w", encoding="utf-8", errors="replace")
+        self.lines = 0
+        self.lock = threading.Lock()
+        self.closed = False
+
+    def write(self, text):
+        """Write ``text``; returns the line number its first line has."""
+        with self.lock:
+            number = self.lines + 1
+            if not self.closed:
+                self.handle.write(text)
+                self.handle.flush()
+            self.lines += text.count("\n")
+        return number
+
+    def flush(self):
+        pass
+
+    def close(self):
+        with self.lock:
+            if not self.closed:
+                self.closed = True
+                self.handle.close()
+
+
+def stream(cmd, log, verbose, env=None, input_text=None, marker=None, hidden=None, numbers=None):
     """Run ``cmd``, writing its output to ``log`` (and the terminal with ``verbose``);
-    ``(exit code, output)``."""
+    ``(exit code, output)``. Text from ``marker`` on (the step wrapper's report) goes to
+    ``hidden`` instead of the output; ``numbers`` gets each output line's number in the log."""
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env or docker_env(),
                                 stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL)
@@ -1900,9 +1938,18 @@ def stream(cmd, log, verbose, env=None, input_text=None):
     chunks = []
     for raw in iter(proc.stdout.readline, b""):
         line = raw.decode(errors="replace")
+        if marker:
+            at = line.find(marker)
+            if at >= 0:
+                if hidden is not None:
+                    hidden.append(line[at:].strip())
+                line = line[:at] + "\n" if at else ""
+                if not line:
+                    continue
         chunks.append(line)
-        log.write(line)
-        log.flush()
+        number = log.write(line)
+        if numbers is not None:
+            numbers.append(number)
         if verbose:
             sys.stdout.write("      | " + line)
             sys.stdout.flush()
@@ -1910,18 +1957,107 @@ def stream(cmd, log, verbose, env=None, input_text=None):
     return proc.returncode, "".join(chunks)
 
 
+ANSI = re.compile(r"\x1b\[[0-9;?<=>]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+
+
+def strip_ansi(text):
+    """``text`` as a terminal would leave it: no escape sequences, and of a line rewritten
+    with carriage returns (a progress bar) only its last state."""
+    rows = []
+    for row in ANSI.sub("", text).split("\n"):
+        parts = [p for p in row.split("\r") if p]
+        rows.append(parts[-1] if parts else "")
+    return "\n".join(rows)
+
+
 def tail(text, lines=60):
-    rows = text.rstrip().splitlines()
+    rows = strip_ansi(text).rstrip().split("\n")
     if len(rows) <= lines:
         return "\n".join(rows)
     return "... (%d lines above)\n" % (len(rows) - lines) + "\n".join(rows[-lines:])
 
 
+def last_lines(text, count=10):
+    """The last ``count`` non-empty lines of ``text``, escape sequences stripped."""
+    return [row.rstrip()[:300] for row in strip_ansi(text).split("\n") if row.strip()][-count:]
+
+
+FAILURE_MARKERS = ("--- FAIL", "FAILED", "Failed!", "Caused by:", "[ERROR]", "Error:", "error:", "panic:",
+                   "Traceback", "npm ERR!", "ELIFECYCLE", "Killed", "signal 9")
+"""Words that start the report of a failure in common tools' output (go test, pytest, JUnit
+and Maven, .NET, Rust, Node, the kernel's OOM killer)."""
+
+
+def failure_lines(text, numbers=None, tail_lines=60, limit=15):
+    """The lines above a failed step's last ``tail_lines`` that carry a failure marker:
+    ``[(line number, text)]``, numbered as in the full log when ``numbers`` (one per line of
+    ``text``) is given, else from 1. Repeated texts are listed once; past ``limit``, the
+    first five and the last ones."""
+    rows = strip_ansi(text).rstrip().split("\n")
+    above = rows[:max(0, len(rows) - tail_lines)]
+    found = []
+    seen = set()
+    for index, row in enumerate(above):
+        if not any(marker in row for marker in FAILURE_MARKERS):
+            continue
+        key = row.strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        number = numbers[index] if numbers and index < len(numbers) else index + 1
+        found.append((number, row.rstrip()[:300]))
+    if len(found) > limit:
+        found = found[:5] + [(None, "... (%d more)" % (len(found) - limit))] + found[-(limit - 5):]
+    return found
+
+
+def short_title(command, limit=100):
+    """A command as a step title: its first line, cut to about ``limit`` characters."""
+    rows = [row.strip() for row in command.strip().split("\n") if row.strip()]
+    first = rows[0] if rows else command.strip()
+    if len(first) > limit:
+        return first[:limit - 3].rstrip() + "..."
+    if len(rows) > 1:
+        return first + " ..."
+    return first
+
+
 class StepFailed(Exception):
-    def __init__(self, summary, output=""):
+    """``numbers``: the output's line numbers in the full log (it was streamed there); None
+    when the output is not in the log yet. ``notes``: what the check adds (the proxy's view)."""
+
+    def __init__(self, summary, output="", notes="", numbers=None):
         super().__init__(summary)
         self.summary = summary
         self.output = output
+        self.notes = notes
+        self.numbers = numbers
+
+
+class Failure(object):
+    def __init__(self, name, summary, output="", notes="", numbers=None, log_line=None):
+        self.name = name
+        self.summary = summary
+        self.output = output
+        self.notes = notes
+        self.numbers = numbers
+        self.log_line = log_line
+
+
+def host_fault(code, output):
+    """Why a step failed because of this machine or its Docker rather than the project, or ""."""
+    text = output or ""
+    if "error getting credentials" in text:
+        return ("Docker could not read its registry credentials (error getting credentials): a fault of this "
+                "machine's Docker setup, not of the project")
+    if code not in (-1, 125):
+        return ""
+    if re.search(r"Resource temporarily unavailable|EAGAIN|\[Errno (?:11|35)\]", text):
+        return ("this machine could not start another process (EAGAIN: too many processes, or too little "
+                "memory): the host's fault, not the project's; run the check again when it is less loaded")
+    if code == -1:
+        return "the check could not start docker (%s): the host's fault, not the project's" % _one_line(text)
+    return "Docker could not start the container (exit 125): the host's fault, not the project's"
 
 
 # ---------------------------------------------------------------------------------------
@@ -1979,14 +2115,255 @@ def normalise_url(url):
     return url.lower()
 
 
+def check_home():
+    """Where the check keeps its caches and logs: ``~/.cache/exradius-check``."""
+    return os.path.join(os.path.expanduser("~"), ".cache", "exradius-check")
+
+
+def guess_slug(path):
+    """The project's slug from exradius.yaml before it is validated (for the log's name)."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = load_yaml(handle.read())
+        slug = raw["project"]["slug"]
+        if isinstance(slug, str) and NAME.match(slug):
+            return slug
+    except Exception:  # noqa: BLE001 - any unreadable file: the folder's name instead
+        pass
+    name = re.sub(r"[^a-z0-9-]+", "-", os.path.basename(os.path.dirname(os.path.abspath(path))).lower()).strip("-")
+    return name or "project"
+
+
+LOG_KEEP = 20
+"""Full logs kept per project slug in the default log folder."""
+
+
+def default_log_path(slug, when, base):
+    """``<base>/logs/<slug>-<YYYYmmdd-HHMMSS>.log``."""
+    return os.path.join(base, "logs", "%s-%s.log" % (slug, time.strftime("%Y%m%d-%H%M%S", time.localtime(when))))
+
+
+def logs_to_remove(names, slug, keep=LOG_KEEP):
+    """Of the file names in the log folder, this slug's logs beyond the newest ``keep``."""
+    pattern = re.compile(r"^%s-\d{8}-\d{6}(?:-[0-9a-f]+)?\.log$" % re.escape(slug))
+    mine = sorted(n for n in names if pattern.match(n))
+    return mine[:max(0, len(mine) - keep)]
+
+
+def default_cache_dir(config_path, slug, base):
+    """``(folder, kept)``: ``.exradius-cache`` next to exradius.yaml when it exists (where
+    earlier versions of the check put it), else ``<base>/<slug>``."""
+    legacy = os.path.join(os.path.dirname(config_path), CACHE_DIR_NAME)
+    if os.path.isdir(legacy):
+        return legacy, True
+    return os.path.join(base, slug), False
+
+
+HEARTBEAT = 300
+"""Seconds between the "still running" lines of a step (without -v)."""
+
+VOLUMES = (("work", WORK_DIR), ("home", HOME_DIR), ("tmp", "/tmp"), ("state", STATE_DIR))
+"""The run's directories that are subPaths of its workspace PVC (a Linux filesystem): Docker
+volumes here, so on Docker Desktop they live in its Linux VM and not on a macOS mount."""
+
+STEP_WRAPPER = r"""
+tok=$2
+sampler=
+if [ -r /sys/fs/cgroup/memory.current ] && [ -r /sys/fs/cgroup/memory.stat ]; then
+  (
+    trap 'echo "$tok ws=$max"; exit 0' TERM
+    max=0
+    while :; do
+      cur=0
+      inactive=0
+      read cur < /sys/fs/cgroup/memory.current
+      while read key value; do
+        if [ "$key" = inactive_file ]; then inactive=$value; fi
+      done < /sys/fs/cgroup/memory.stat
+      ws=$((cur - inactive))
+      if [ "$ws" -gt "$max" ]; then max=$ws; fi
+      sleep 0.2 2>/dev/null || sleep 1
+    done
+  ) </dev/null &
+  sampler=$!
+fi
+/bin/sh -c "$1" </dev/null
+code=$?
+if [ -n "$sampler" ]; then kill -TERM "$sampler" 2>/dev/null; wait "$sampler" 2>/dev/null; fi
+peak=
+kills=
+if [ -r /sys/fs/cgroup/memory.peak ]; then read peak < /sys/fs/cgroup/memory.peak; fi
+if [ -r /sys/fs/cgroup/memory.events ]; then
+  while read key value; do
+    if [ "$key" = oom_kill ]; then kills=$value; fi
+  done < /sys/fs/cgroup/memory.events
+fi
+echo "$tok peak=$peak oom_kill=$kills"
+exit $code
+"""
+"""Runs a setup or --run command as ``/bin/sh -c CMD`` (stdin from /dev/null, the same cwd
+and environment) and reports its container's memory afterwards from cgroup v2: the largest
+working set sampled every 0.2 s (memory.current less inactive_file, the kubelet's measure:
+memory.peak also counts page cache, which reaches the limit in any step that writes many
+files) and memory.events' oom_kill. Nothing is reported on cgroup v1."""
+
+
+def wrapper_report(lines):
+    """``{"ws": bytes, "peak": bytes, "oom_kill": n}`` from the wrapper's lines (keys absent
+    when unknown)."""
+    out = {}
+    for line in lines:
+        for key, value in re.findall(r"\b(ws|peak|oom_kill)=(\d+)", line):
+            out[key] = int(value)
+    return out
+
+
+GIB = 1024 ** 3
+
+
+def memory_text(size):
+    """A memory size as Docker's units count it: ``1.3 GiB``, ``312 MiB``."""
+    if size >= GIB:
+        return "%.1f GiB" % (size / GIB)
+    if size >= 1024 ** 2:
+        return "%d MiB" % round(size / 1024 ** 2)
+    return "%d KiB" % max(1, round(size / 1024))
+
+
+def memory_verdict(code, declared, host_total, oom_kills):
+    """What a step's exit code and its container's oom_kill count say about memory:
+    ``(summary of a failed step or "", note for a step whose top process survived or "")``."""
+    limit = memory_bytes(declared) if declared else None
+    host_small = bool(limit and host_total and limit > host_total)
+    if code == KILLED:
+        if host_small:
+            return ("exited with 137: killed: Docker has %s, less than the declared %s; give Docker more memory or "
+                    "check on a larger machine (a run's limit is the declared %s)"
+                    % (memory_text(host_total), declared, declared), "")
+        if declared:
+            # Verify's wording (worker/verify.py): exit 137 under a declared limit.
+            return ("exited with 137: exceeded its declared memory (%s); raise resources.memory or lower the step's "
+                    "parallelism" % declared, "")
+        return ("exited with 137 (killed: usually out of memory; Docker has %s and resources.memory is not declared)"
+                % (memory_text(host_total) if host_total else "an unknown amount of memory"), "")
+    if oom_kills:
+        if host_small:
+            where = "Docker's %s, less than the declared %s" % (memory_text(host_total), declared)
+        elif declared:
+            where = "resources.memory %s" % declared
+        else:
+            where = "Docker's %s; resources.memory is not declared" % (
+                memory_text(host_total) if host_total else "memory")
+        return "", "a process in this step was killed for memory (limit: %s)" % where
+    return "", ""
+
+
+def memory_advice(peak, step, declared):
+    """The final report's memory lines: the highest peak against ``resources.memory``, with
+    the skill's rule (the peak plus about 1 GB for the agent, which runs within the limit,
+    and never below 4g)."""
+    # At least 4g: the commands measured here are narrower than a real ticket's.
+    suggest = max(4, int(-(-(peak + GIB) // GIB)))
+    lines = ["highest peak %s in \"%s\"; resources.memory %s" % (memory_text(peak), step, declared or "not declared")]
+    limit = memory_bytes(declared) if declared else None
+    if limit is None:
+        lines.append("declare resources.memory: the peak plus about 1 GB for the agent, at least 4g (%dg)" % suggest)
+    elif limit - peak < GIB:
+        lines.append("warning: that leaves less than 1 GiB of resources.memory (%s) for the agent, which runs within "
+                     "the same limit: declare the peak plus about 1 GB, at least 4g (%dg)" % (declared, suggest))
+    return lines
+
+
+RESERVED_SUFFIXES = (".invalid", ".test", ".example", ".localhost")
+RESERVED_NAMES = ("invalid", "test", "example", "localhost")
+
+
+def host_remark(host, pod_ip=None):
+    """``(kind, text)`` about a host the proxy refused or could not reach: ``own`` (the
+    run's own address), ``loopback``, ``private`` (another literal private address),
+    ``fake`` (not a name a real host has) or ``""``."""
+    bare = (host or "").strip("[]")
+    if pod_ip and bare == pod_ip:
+        return "own", ("%s is the run's own address: a request to it goes to the proxy, in a run too; use 127.0.0.1 "
+                       "or localhost" % bare)
+    try:
+        literal = _unmap(ipaddress.ip_address(bare))
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if literal.is_loopback:
+            return "loopback", ("%s is the loopback address: a tool sent it to the proxy, ignoring NO_PROXY (in a run "
+                                "too)" % bare)
+        if internal_address(literal):
+            return "private", ("%s is a private address that only the install's egress.allowPrivate opens, not "
+                               "network.allow" % bare)
+        return "", ""
+    name = bare.rstrip(".").lower()
+    if "." not in name or name.endswith(RESERVED_SUFFIXES) or name in RESERVED_NAMES:
+        return "fake", "not a real host: a test fixture or a script error"
+    return "", ""
+
+
+def refusal_text(host, reason, pod_ip=None):
+    """One refused request for the step notes: ``host: reason``, with the remark that says
+    what the reason does not."""
+    kind, remark = host_remark(host, pod_ip)
+    if kind in ("own", "loopback", "private"):
+        return "%s: %s" % (host, remark)
+    if kind == "fake":
+        return "%s: %s; %s" % (host, reason, remark)
+    return "%s: %s" % (host, reason)
+
+
+def size_text(size, empty=False):
+    """A cache folder's size: ``empty`` only when it holds nothing."""
+    if empty:
+        return "empty"
+    if size < 1e6:
+        return "%d KB" % max(1, round(size / 1e3))
+    if size < 1e9:
+        return "%.0f MB" % (size / 1e6)
+    return "%.1f GB" % (size / 1e9)
+
+
+def disk_text(sizes, caches=None):
+    """The report's Disk line: ``2.4 GB (/work 1.6 GB, home 0.7 GB, /tmp 0.1 GB); caches 1.2 GB``."""
+    def size(n):
+        return "0 KB" if not n else size_text(n)
+
+    total = sum(sizes.values())
+    text = "%s (/work %s, home %s, /tmp %s)" % (size(total), size(sizes.get("work", 0)), size(sizes.get("home", 0)),
+                                               size(sizes.get("tmp", 0)))
+    if caches is not None:
+        text += "; caches %s" % size(caches)
+    return text
+
+
+def run_file_command(text, target):
+    """The command that runs a ``--run-file`` script copied to ``target``: its ``#!`` line
+    (the interpreter and one optional argument, as Linux reads it), or /bin/sh."""
+    first = text.split("\n", 1)[0].rstrip("\r")
+    argv = ["/bin/sh"]
+    if first.startswith("#!") and first[2:].strip():
+        parts = first[2:].strip().split(None, 1)
+        argv = parts[:1] + ([parts[1].strip()] if len(parts) > 1 else [])
+    return " ".join(shlex.quote(a) for a in argv + [target])
+
+
+def _raise_interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+
 class Check(object):
     def __init__(self, args):
         self.args = args
         self.id = _random.token_hex(4)
         self.label = "exradius-check=%s" % self.id
         self.steps = []  # (name, state, seconds, summary)
-        self.failure = None  # (name, summary, output)
+        self.failures = []  # Failure, in order; the first is the result's
+        self.stopped = False  # a failure that ends the check (all but a --run's)
         self.root = None
+        self.volumes = []
         self.pod = None  # the container that holds the shared network namespace
         self.pod_ip = None
         self.secrets = {}
@@ -1995,6 +2372,7 @@ class Check(object):
         self.verbose = args.verbose
         self.cleanup_image = None
         self.cache_dir = None
+        self.cache_warm = False
         self.emulate = not args.open_network
         self.network = None  # the internal Docker network the pod sits on
         self.proxy = None  # the egress proxy's container
@@ -2002,41 +2380,73 @@ class Check(object):
         self.egress_dir = None  # the proxy's state directory (phase, policy, records)
         self.agent_hosts = []
         self.repo_hosts = []
+        self.live_mounts = []
+        self.host_memory = None
+        self.peaks = []  # (step, bytes)
+        self.step_peak = None
+        self.images = {}
+        self.disk = None
 
     # -- reporting ----------------------------------------------------------------------
 
     def say(self, text=""):
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
+        if self.log is not None:
+            self.log.write(text + "\n")
 
-    def step(self, name, action, always=False):
-        """``always``: a step that runs after a failure too and never fails by itself (INFO)."""
-        if self.failure is not None and not always:
+    def heartbeat(self, name, started, done):
+        while not done.wait(HEARTBEAT):
+            self.say("....  still running: %s, %d min" % (name, round((time.time() - started) / 60)))
+
+    def step(self, name, action, always=False, keep_going=False, command=None):
+        """``always``: a step that runs after a failure too and never fails by itself (INFO).
+        ``keep_going``: its failure does not stop the steps after it (a --run's)."""
+        if self.stopped and not always:
             self.steps.append((name, "skipped", 0.0, ""))
             self.say("SKIP  %s" % name)
             return None
-        self.log.write("\n===== %s\n" % name)
-        self.log.flush()
+        log_line = self.log.write("\n===== %s\n" % name) + 1
+        if command is not None and command.strip() != name.split(": ", 1)[-1]:
+            self.log.write("command:\n%s\n" % command.rstrip("\n"))
         if self.verbose:
             self.say("....  %s" % name)
+        self.step_peak = None
         started = time.time()
+        done = threading.Event()
+        if not self.verbose and not always:
+            ticker = threading.Thread(target=self.heartbeat, args=(name, started, done))
+            ticker.daemon = True
+            ticker.start()
         try:
             summary = action()
             state = "passed"
         except StepFailed as exc:
             state = "failed"
             summary = exc.summary
-            self.failure = (name, exc.summary, exc.output)
-            self.log.write(exc.output + "\n" + exc.summary + "\n")
+            self.failures.append(Failure(name, exc.summary, exc.output, exc.notes, exc.numbers, log_line))
+            if not keep_going:
+                self.stopped = True
+            if exc.numbers is None and exc.output and exc.output.strip():
+                self.log.write(exc.output.rstrip("\n") + "\n")
+            if exc.notes:
+                self.log.write(exc.notes + "\n")
         except KeyboardInterrupt:
-            self.failure = (name, "interrupted", "")
+            self.failures.append(Failure(name, "interrupted", log_line=log_line))
+            self.stopped = True
             self.steps.append((name, "failed", time.time() - started, "interrupted"))
             raise
+        finally:
+            done.set()
         seconds = time.time() - started
         self.steps.append((name, state, seconds, summary or ""))
         mark = "INFO" if always else "PASS" if state == "passed" else "FAIL"
-        timing = " (%.1fs)" % seconds if seconds >= 0.5 else ""
-        self.say("%s  %s%s" % (mark, name, timing))
+        facts = []
+        if seconds >= 0.5:
+            facts.append("%.1fs" % seconds)
+        if self.step_peak:
+            facts.append("peak %s" % memory_text(self.step_peak))
+        self.say("%s  %s%s" % (mark, name, " (%s)" % ", ".join(facts) if facts else ""))
         if summary:
             for line in str(summary).splitlines():
                 self.say("      %s" % line)
@@ -2048,30 +2458,61 @@ class Check(object):
         args = self.args
         path, repo_root, config_dir = find_config(args.config)
         self.config_path, self.repo_root, self.config_dir = path, repo_root, config_dir
-        log_dir = tempfile.gettempdir()
-        self.log_path = os.path.join(log_dir, "exradius-check-%s.log" % self.id)
-        self.log = open(self.log_path, "w")
+        self.slug = guess_slug(path)
+        if args.log:
+            self.log_path = os.path.abspath(os.path.expanduser(args.log))
+        else:
+            self.log_path = default_log_path(self.slug, time.time(), check_home())
+            folder = os.path.dirname(self.log_path)
+            os.makedirs(folder, exist_ok=True)
+            if os.path.exists(self.log_path):
+                self.log_path = self.log_path[:-len(".log")] + "-%s.log" % self.id
+            for name in logs_to_remove(os.listdir(folder), self.slug, LOG_KEEP - 1):
+                try:
+                    os.remove(os.path.join(folder, name))
+                except OSError:
+                    pass
+        if os.path.dirname(self.log_path):
+            os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
+        self.log = Log(self.log_path)
         self.say("exradius check: %s" % path)
+        self.say("full log: %s" % self.log_path)
+        previous = {}
+        for name in ("SIGTERM", "SIGHUP"):
+            if hasattr(signal, name):
+                number = getattr(signal, name)
+                previous[number] = signal.signal(number, _raise_interrupt)
         try:
             self.run_steps()
+            self.disk = self.measure_disk()
         except KeyboardInterrupt:
             self.say("\ninterrupted; cleaning up")
         finally:
+            # A second signal must not stop the clean-up half way.
+            for number in previous:
+                signal.signal(number, signal.SIG_IGN)
             if not args.validate:
                 self.cleanup()
+            for number, handler in previous.items():
+                signal.signal(number, handler)
         return self.report()
 
     def run_steps(self):
         self.step("Read config", self.read_config)
-        if self.args.validate or self.failure:
+        if self.args.validate or self.failures:
             return
         code, out = run(["docker", "version", "--format", "{{.Server.Version}} {{.Server.Os}}/{{.Server.Arch}}"])
         if code != 0:
-            self.failure = ("Docker", "the Docker daemon is not reachable", out)
+            self.failures.append(Failure("Docker", "the Docker daemon is not reachable", out))
+            self.stopped = True
             return
         self.say("      docker %s" % out.strip())
+        code, out = run(["docker", "info", "--format", "{{.MemTotal}}"])
+        try:
+            self.host_memory = int(out.strip())
+        except ValueError:
+            self.host_memory = None
         self.check_budget()
-        self.images = {}
         self.prepare_images()
         self.step("Check workstation image", self.check_image)
         if used_connections(self.config):
@@ -2082,11 +2523,19 @@ class Check(object):
         for name in self.config.services:
             self.step("Start service %s" % name, lambda n=name: self.start_service(n))
         for command in self.config.workstation["setup"]:
-            self.step("Setup: %s" % command, lambda c=command: self.setup(c))
-        if self.args.run and self.emulate and self.failure is None:
+            title = "Setup: %s" % short_title(command)
+            self.step(title, lambda c=command, t=title: self.setup(c, title=t), command=command)
+        if self.args.runs and self.emulate and not self.stopped:
             self.set_phase("agent")
-        for command in self.args.run:
-            self.step("Agent phase: %s" % command, lambda c=command: self.setup(c, agent=True))
+        for index, (kind, value) in enumerate(self.args.runs):
+            if kind == "file":
+                title = "Agent phase: %s" % os.path.basename(value)
+                self.step(title, lambda p=value, t=title, i=index: self.setup(None, agent=True, title=t, run_file=(i, p)),
+                          keep_going=True, command="--run-file %s" % value)
+            else:
+                title = "Agent phase: %s" % short_title(value)
+                self.step(title, lambda c=value, t=title: self.setup(c, agent=True, title=t), keep_going=True,
+                          command=value)
         if self.emulate and self.egress_dir is not None:
             self.step("Network", self.network_summary, always=True)
 
@@ -2096,13 +2545,9 @@ class Check(object):
         cfg = self.config
         declared = [cfg.memory] + [s["memory"] for s in cfg.services.values()]
         reservation = sum(memory_bytes(m) for m in declared if m)
-        if not reservation:
+        if not reservation or not self.host_memory:
             return
-        code, out = run(["docker", "info", "--format", "{{.MemTotal}}"])
-        try:
-            total = int(out.strip())
-        except ValueError:
-            return
+        total = self.host_memory
         if reservation > total:
             self.say("      warning: the declared memory (%.1f GiB in all) is more than this Docker host has "
                      "(%.1f GiB): a cluster node needs at least that much free, or the run waits as \"waiting "
@@ -2110,15 +2555,26 @@ class Check(object):
 
     def report(self):
         self.say("")
-        if self.failure is None and self.args.validate:
+        if self.peaks:
+            step, peak = max(self.peaks, key=lambda item: item[1])
+            lines = memory_advice(peak, step, self.config.memory)
+            self.say("Memory: %s" % lines[0])
+            # After a setup failure the steps that would have used the most did not run.
+            for line in lines[1:] if not self.stopped else []:
+                self.say("  %s" % line)
+        if self.disk:
+            self.say("Disk: %s" % self.disk)
+        if not self.failures and self.args.validate:
             self.say("RESULT: the file is valid (only read and validated; no Docker steps ran).")
             code = 0
-        elif self.failure is None:
-            if self.args.run:
-                self.say("RESULT: passed. The setup commands and the agent-phase commands ran under the run's "
-                         "conditions.")
+        elif not self.failures:
+            what = "The setup commands and the agent-phase commands" if self.args.runs else "The setup commands"
+            if self.emulate:
+                self.say("RESULT: passed. %s ran under the run's conditions." % what)
             else:
-                self.say("RESULT: passed. The setup commands ran under the run's conditions.")
+                self.say("RESULT: passed. %s ran under the run's conditions except its network: with --open-network "
+                         "every container reached the network directly, so nothing here shows what the run's proxy "
+                         "would refuse." % what)
             parts = ["the agent runtime and model", "providers", "pushes and git's credential route",
                      "MCP connections' tool lists"]
             if not self.args.platform:
@@ -2129,23 +2585,47 @@ class Check(object):
                 parts.append("the install's egress.allow and egress.allowPrivate (--allow, --allow-private)")
             parts.append("image builds' network (Docker's own network here, the proxy in the cluster)")
             self.say("Not covered locally: %s." % ", ".join(parts))
-            if not self.emulate:
-                self.say("The network was not emulated (--open-network): every container reached the network "
-                         "directly.")
             code = 0
         else:
-            name, summary, output = self.failure
-            self.say("RESULT: failed at step \"%s\": %s" % (name, summary))
-            if output and output.strip():
-                self.say("")
-                self.say("Output of the failing step (last lines):")
-                self.say(tail(output, self.args.tail))
+            first = self.failures[0]
+            self.say("RESULT: failed at step \"%s\": %s" % (first.name, first.summary))
+            if len(self.failures) > 1:
+                self.say("Also failed: %s" % ", ".join("\"%s\"" % f.name for f in self.failures[1:]))
+            for failure in self.failures:
+                self.show_failure(failure, len(self.failures) > 1)
             code = 1
         if self.log is not None:
-            self.log.close()
             self.say("")
             self.say("Full log: %s" % self.log_path)
+            self.log.close()
         return code
+
+    def show_failure(self, failure, named):
+        title = "the failing step" if not named else "step \"%s\"" % failure.name
+        if failure.summary == "interrupted":
+            return
+        if named:
+            self.say("")
+            self.say("== %s: %s" % (failure.name, failure.summary))
+        output = failure.output or ""
+        if output.strip():
+            marked = failure_lines(output, failure.numbers, self.args.tail)
+            if marked:
+                self.say("")
+                where = "line numbers in the full log" if failure.numbers else "line numbers in the output"
+                self.say("Earlier lines of %s that look like a failure (%s):" % (title, where))
+                for number, text in marked:
+                    self.say("%7s  %s" % (number if number is not None else "", text))
+            self.say("")
+            self.say("Output of %s (last lines):" % title)
+            self.say(tail(output, self.args.tail))
+        else:
+            self.say("")
+            where = " (its part of the full log starts at line %d)" % failure.log_line if failure.log_line else ""
+            self.say("%s printed nothing%s: %s" % (title[0].upper() + title[1:], where, self.log_path))
+        if failure.notes:
+            self.say("")
+            self.say(failure.notes)
 
     # -- steps --------------------------------------------------------------------------
 
@@ -2158,10 +2638,20 @@ class Check(object):
             raise StepFailed("not valid YAML: %s" % exc)
         config, errors, warnings, required = validate(raw, self.config_dir, make_lookup(self.repo_root))
         lines = []
+        rel = os.path.relpath(self.config_path, self.repo_root)
+        code_top, _ = git(["rev-parse", "--show-toplevel"], self.repo_root)
         code, commit = git(["log", "-1", "--format=%h %s"], self.repo_root)
+        own_folder = os.path.dirname(os.path.realpath(self.config_path))
+        foreign = False
+        if code_top == 0 and self.config_dir and self.config_dir != ".exradius":
+            tracked, _ = git(["ls-files", "--error-unmatch", "--", rel], self.repo_root)
+            if tracked != 0:
+                foreign = True
+                warnings.append("%s is inside the git repository %s but not committed there: a config repository of "
+                                "its own needs `git init -b main` and a commit in %s" % (own_folder, self.repo_root,
+                                                                                         own_folder))
         if code == 0 and commit:
             lines.append("config repository %s, commit %s" % (self.repo_root, commit))
-            rel = os.path.relpath(self.config_path, self.repo_root)
             paths = [rel]
             if config is not None:
                 for item in [config.workstation] + list(config.services.values()):
@@ -2179,12 +2669,15 @@ class Check(object):
                         warnings.append("ignored files in a build context: a local build sees them, Exradius "
                                         "builds from the repository and does not:\n  " + "\n  ".join(shown[:10])
                                         + ("\n  ..." if len(shown) > 10 else ""))
-            if code == 0 and status:
+            if code == 0 and status and not foreign:
                 warnings.append("not committed yet (Exradius reads the pushed branch head):\n  "
                                 + status.replace("\n", "\n  "))
+        elif code_top == 0:
+            lines.append("%s is a git repository with no commit yet: commit exradius.yaml (Exradius reads the pushed "
+                         "branch head)" % self.repo_root)
         else:
             lines.append("%s is not in a git repository yet" % self.repo_root)
-        lines.append("file: %s" % (os.path.relpath(self.config_path, self.repo_root)))
+        lines.append("file: %s" % rel)
         if required:
             lines.append("secret store %s, required keys: %s" % (raw.get("secret_store") if isinstance(raw, dict) else None,
                                                                   ", ".join(required)))
@@ -2204,9 +2697,17 @@ class Check(object):
                          "connections' routes")
         self.secrets = {name: "chk" + _random.token_hex(10) for name in required}
         if config.workstation["cache"]:
-            self.cache_dir = os.path.realpath(self.args.cache_dir or os.path.join(os.path.dirname(self.config_path),
-                                                                                  CACHE_DIR_NAME))
-            lines.append("cache: %s: %s" % (self.cache_dir, cache_summary(self.cache_dir, config.workstation["cache"])))
+            kept = False
+            if self.args.cache_dir:
+                folder = self.args.cache_dir
+            else:
+                folder, kept = default_cache_dir(self.config_path, config.slug, check_home())
+            self.cache_dir = os.path.realpath(folder)
+            sizes, self.cache_warm = cache_summary(self.cache_dir, config.workstation["cache"])
+            lines.append("cache: %s: %s" % (self.cache_dir, sizes))
+            if kept:
+                lines.append("  (the .exradius-cache next to exradius.yaml exists, so the check keeps using it; the "
+                             "default is %s)" % os.path.join(check_home(), config.slug))
             for item in [config.workstation] + list(config.services.values()):
                 context = item.get("context")
                 if item.get("dockerfile") and context is not None:
@@ -2253,19 +2754,25 @@ class Check(object):
             cmd.append("--no-cache")
         cmd.append(context)
         env = docker_env({"DOCKER_BUILDKIT": "1"})
-        code, out = stream(cmd, self.log, self.verbose, env=env)
+        numbers = []
+        code, out = stream(cmd, self.log, self.verbose, env=env, numbers=numbers)
         if code != 0:
-            raise StepFailed("building %s from %s failed (exit %d)%s" % (
-                name, item["dockerfile"], code, failed_instruction(out)), out)
+            fault = host_fault(code, out)
+            raise StepFailed("building %s from %s failed (exit %d)%s%s" % (
+                name, item["dockerfile"], code, "; " + fault if fault else "", failed_instruction(out)), out,
+                numbers=numbers)
         self.images[name] = tag
         return "built %s from %s (context %s)" % (tag, item["dockerfile"], item["context"] or ".")
 
     def build_default(self):
         cmd = ["docker", "build", "-t", DEFAULT_IMAGE_TAG] + self.platform_args() + ["-"]
+        numbers = []
         code, out = stream(cmd, self.log, self.verbose, env=docker_env({"DOCKER_BUILDKIT": "1"}),
-                           input_text=DEFAULT_IMAGE_DOCKERFILE)
+                           input_text=DEFAULT_IMAGE_DOCKERFILE, numbers=numbers)
         if code != 0:
-            raise StepFailed("building the default workstation stand-in failed (exit %d)" % code, out)
+            fault = host_fault(code, out)
+            raise StepFailed("building the default workstation stand-in failed (exit %d)%s"
+                             % (code, "; " + fault if fault else ""), out, numbers=numbers)
         self.images["workstation"] = DEFAULT_IMAGE_TAG
         return "no workstation image or dockerfile: Ubuntu 24.04 with git, curl, ca-certificates, build-essential"
 
@@ -2274,11 +2781,16 @@ class Check(object):
         if code == 0 and not self.args.pull:
             self.images[name] = image
             return "%s is present locally" % image
-        code, out = stream(["docker", "pull"] + self.platform_args() + [image], self.log, self.verbose)
+        numbers = []
+        code, out = stream(["docker", "pull"] + self.platform_args() + [image], self.log, self.verbose, numbers=numbers)
         if code != 0:
-            raise StepFailed("could not pull %s" % image, out)
+            fault = host_fault(code, out)
+            raise StepFailed("could not pull %s%s" % (image, "; " + fault if fault else ""), out, numbers=numbers)
         self.images[name] = image
         return "pulled %s" % image
+
+    def volume(self, key):
+        return "exradius-check-%s-%s" % (self.id, key)
 
     def run_flags(self, extra_mounts=()):
         """The setup container's conditions (ContainerManager._create)."""
@@ -2290,12 +2802,11 @@ class Check(object):
             "--label", self.label,
             "--workdir", WORK_DIR,
         ]
+        for key, target in VOLUMES:
+            # nocopy: a PVC's subPath does not show what the image has at that path.
+            flags += ["--mount", "type=volume,source=%s,target=%s,volume-nocopy" % (self.volume(key), target)]
         mounts = [
-            (self.work, WORK_DIR, False),
-            (os.path.join(self.work, ".exradius", "attachments"), WORK_DIR + "/.exradius/attachments", True),
-            (self.state, STATE_DIR, False),
-            (self.home, HOME_DIR, False),
-            (self.tmp, "/tmp", False),
+            (self.attachments, WORK_DIR + "/.exradius/attachments", True),
             (self.passwd, "/etc/passwd", True),
             (self.group, "/etc/group", True),
         ] + self.cache_mounts() + list(extra_mounts)
@@ -2306,28 +2817,70 @@ class Check(object):
 
     def cache_mounts(self):
         """``workstation.cache``: one folder per entry under the local cache directory,
-        shared by every check of this config (in Exradius: the project volume's caches/)."""
+        shared by every check of this config (in Exradius: the project volume's caches/).
+        Their mount points inside the home are made by ``make_volumes``."""
         mounts = []
         for index, entry in enumerate(self.config.workstation["cache"]):
             source = os.path.join(self.cache_dir, cache_folder(index, entry["path"]))
             if not os.path.isdir(source):
                 os.makedirs(source)
                 os.chmod(source, 0o777)
-            target = entry["target"]
-            if target.startswith(HOME_DIR + "/"):
-                # Mount points inside the home are made for the run user first, as the
-                # worker does (caches.ensure): Docker would make ~/.cache root's for ~/.cache/uv.
-                current = self.home
-                for part in target[len(HOME_DIR) + 1:].split("/"):
-                    current = os.path.join(current, part)
-                    if not os.path.exists(current):
-                        os.mkdir(current)
-                        os.chmod(current, 0o777)
-            mounts.append((source, target, False))
+            mounts.append((source, entry["target"], False))
         return mounts
 
-    def check_image(self):
+    def make_root(self):
+        """The host folder for what stays on the host: /etc/passwd and /etc/group, the
+        empty attachments folder, the proxy's state, clones on their way into /work."""
+        if self.root is not None:
+            return
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="exradius-check-%s-" % self.id))
+        etc = os.path.join(self.root, "etc")
+        self.attachments = os.path.join(self.root, "attachments")
+        for d in (etc, self.attachments):
+            os.makedirs(d)
+        os.chmod(self.attachments, 0o755)
+        self.passwd = os.path.join(etc, "passwd")
+        self.group = os.path.join(etc, "group")
+        for target, text in ((self.passwd, PASSWD), (self.group, GROUP)):
+            with open(target, "w") as handle:
+                handle.write(text)
+            os.chmod(target, 0o644)
+
+    def make_volumes(self):
+        """/work, the home, /tmp and the state directory, which a run has on one PVC: Docker
+        volumes, prepared as root in a helper container of the workstation image (owned by
+        the run user, /tmp 1777, the cache mount points inside the home made for the run
+        user first, as the worker's caches.ensure does: Docker would make ~/.cache root's
+        for ~/.cache/uv)."""
+        if self.volumes:
+            return
         self.make_root()
+        for key, _ in VOLUMES:
+            name = self.volume(key)
+            code, out = run(["docker", "volume", "create", "--label", self.label, name])
+            if code != 0:
+                fault = host_fault(code, out)
+                raise StepFailed("could not create the Docker volume %s%s" % (name, "; " + fault if fault else ""), out)
+            self.volumes.append(name)
+        script = ["set -e", "mkdir -p /v/work/.exradius/attachments"]
+        for entry in self.config.workstation["cache"]:
+            target = entry["target"]
+            if target.startswith(HOME_DIR + "/"):
+                script.append("mkdir -p %s" % shlex.quote("/v/home/" + target[len(HOME_DIR) + 1:]))
+        script += ["chown -R %d:%d /v/work /v/home /v/state" % (RUN_UID, RUN_GID),
+                   "chmod 0777 /v/work /v/home /v/state", "chmod 0755 /v/work/.exradius", "chmod 1777 /v/tmp"]
+        cmd = ["docker", "run", "--rm", "--user", "0:0", "--network", "none", "--label", self.label]
+        for key, _ in VOLUMES:
+            cmd += ["--mount", "type=volume,source=%s,target=/v/%s,volume-nocopy" % (self.volume(key), key)]
+        cmd += self.platform_args() + ["--entrypoint", "/bin/sh", self.images["workstation"], "-c", "\n".join(script)]
+        code, out = run(cmd, timeout=300)
+        if code != 0:
+            fault = host_fault(code, out)
+            raise StepFailed("could not run /bin/sh as root in %s to prepare the run's volumes (exit %d)%s"
+                             % (self.images["workstation"], code, "; " + fault if fault else ""), out)
+
+    def check_image(self):
+        self.make_volumes()
         image = self.images["workstation"]
         cmd = ["docker", "run", "--rm"] + self.run_flags() + self.platform_args() + \
             ["--entrypoint", "/bin/sh", image, "-c", IMAGE_PROBE]
@@ -2335,7 +2888,7 @@ class Check(object):
         self.log.write(out)
         if code != 0:
             raise StepFailed("could not run /bin/sh in %s as uid %d with a read-only root filesystem (exit %d)"
-                             % (image, RUN_UID, code), out)
+                             % (image, RUN_UID, code), out, numbers=[])
         facts = {}
         tools = []
         for line in out.splitlines():
@@ -2356,7 +2909,7 @@ class Check(object):
                                            facts.get("git-version", "git ?"), facts.get("arch", "?"))
         detail = summary + "\nPATH=%s\ntools on PATH: %s" % (facts.get("PATH", "?"), " ".join(tools) or "none")
         if problems:
-            raise StepFailed("; ".join(problems), out)
+            raise StepFailed("; ".join(problems), out, numbers=[])
         return detail
 
     def check_connections(self):
@@ -2384,7 +2937,7 @@ class Check(object):
         code, out = run(cmd, timeout=120)
         self.log.write(out)
         if code != 0:
-            raise StepFailed("could not run /bin/sh in the workstation image (exit %d)" % code, out)
+            raise StepFailed("could not run /bin/sh in the workstation image (exit %d)" % code, out, numbers=[])
         found = {}
         for row in out.splitlines():
             key, _, value = row.partition(": ")
@@ -2413,9 +2966,10 @@ class Check(object):
         image = self.args.proxy_image
         code, _ = run(["docker", "image", "inspect", "--format", "{{.Id}}", image])
         if code != 0:
-            code, out = stream(["docker", "pull", image], self.log, self.verbose)
+            numbers = []
+            code, out = stream(["docker", "pull", image], self.log, self.verbose, numbers=numbers)
             if code != 0:
-                raise StepFailed("could not pull the proxy's image %s" % image, out)
+                raise StepFailed("could not pull the proxy's image %s" % image, out, numbers=numbers)
         self.egress_dir = os.path.join(self.root, "egress")
         script_dir = os.path.join(self.root, "egress-script")
         for d in (self.egress_dir, script_dir):
@@ -2517,30 +3071,6 @@ class Check(object):
             env["JAVA_TOOL_OPTIONS"] = options
         return env
 
-    def make_root(self):
-        if self.root is not None:
-            return
-        self.root = os.path.realpath(tempfile.mkdtemp(prefix="exradius-check-%s-" % self.id))
-        self.work = os.path.join(self.root, "work")
-        self.home = os.path.join(self.root, "home")
-        self.tmp = os.path.join(self.root, "tmp")
-        self.state = os.path.join(self.root, "state")
-        etc = os.path.join(self.root, "etc")
-        for d in (self.work, os.path.join(self.work, ".exradius", "attachments"), self.home, self.tmp,
-                  self.state, etc):
-            os.makedirs(d)
-        for d in (self.work, self.home, self.state):
-            os.chmod(d, 0o777)
-        os.chmod(self.tmp, 0o1777)
-        os.chmod(os.path.join(self.work, ".exradius"), 0o755)
-        self.passwd = os.path.join(etc, "passwd")
-        self.group = os.path.join(etc, "group")
-        for target, text in ((self.passwd, PASSWD), (self.group, GROUP)):
-            with open(target, "w") as handle:
-                handle.write(text)
-            os.chmod(target, 0o644)
-        self.live_mounts = []
-
     def source_for(self, repo):
         name = repo["name"]
         if name in self.args.repo_map:
@@ -2556,12 +3086,14 @@ class Check(object):
         return None
 
     def prepare_work(self):
-        self.make_root()
+        self.make_volumes()
+        clones = os.path.join(self.root, "clones")
+        os.makedirs(clones, exist_ok=True)
         lines = []
         warnings = []
         for repo in self.config.repositories:
             name = repo["name"]
-            dest = os.path.join(self.work, name)
+            dest = os.path.join(clones, name)
             source = self.source_for(repo)
             if source is not None:
                 source = os.path.abspath(source)
@@ -2573,14 +3105,11 @@ class Check(object):
                     warnings.append("%s: the checkout is on %s, the config names %s" % (name, head, repo["branch"]))
                 code, dirty = git(["status", "--porcelain", "--untracked-files=no"], source)
                 if self.args.live:
-                    os.makedirs(dest)
                     self.live_mounts.append((source, WORK_DIR + "/" + name, False))
-                    lines.append("%s: %s mounted as it is (%s, %s)" % (name, source, head, short))
+                    lines.append("%s: %s mounted as it is (%s, %s); a live checkout is a host mount (on macOS: no "
+                                 "Unix sockets in it, and slower)" % (name, source, head, short))
                     continue
-                # Hard links share the object files with the checkout; not where the copy's
-                # modes are changed below (Linux with a uid other than the run's).
-                links = [] if not self.must_open_up() else ["--no-hardlinks"]
-                code, out = git(["clone", "--quiet"] + links + [source, dest], None)
+                code, out = git(["clone", "--quiet", source, dest], None)
                 if code != 0:
                     raise StepFailed("could not copy %s" % source, out)
                 git(["remote", "set-url", "origin", repo["url"]], dest)
@@ -2597,15 +3126,46 @@ class Check(object):
                                      % (repo["url"], name), out)
                 code, short = git(["log", "-1", "--format=%h %s"], dest)
                 lines.append("%s: cloned %s (%s, %s)" % (name, repo["url"], repo["branch"] or "default branch", short))
-            if self.must_open_up():
-                # The run user (uid 1000) must be able to write the clone, as on the server.
-                run(["chmod", "-R", "a+rwX", dest])
+            self.copy_into_work(name, dest)
+            shutil.rmtree(dest, ignore_errors=True)
         if self.args.live and self.must_open_up():
             warnings.append("--live on Linux with uid %d: the run user (uid %d) may not be able to write the "
                             "mounted checkouts" % (os.getuid(), RUN_UID))
         if not self.config.repositories:
             lines.append("no repositories")
         return "\n".join(lines + ["warning: %s" % w for w in warnings])
+
+    def copy_into_work(self, name, folder):
+        """A clone into /work/<name> on the work volume, written by the run user from a tar
+        stream, so its files are uid 1000's on every host, as the run's clone containers'."""
+        cmd = ["docker", "run", "--rm", "-i", "--user", "%d:%d" % (RUN_UID, RUN_GID), "--network", "none",
+               "--label", self.label,
+               "--mount", "type=volume,source=%s,target=%s,volume-nocopy" % (self.volume("work"), WORK_DIR)]
+        cmd += self.platform_args() + ["--entrypoint", "tar", self.images["workstation"], "-xf", "-", "-C", WORK_DIR]
+        problem = ""
+        with tempfile.TemporaryFile() as output:
+            try:
+                proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=output, stderr=subprocess.STDOUT,
+                                        env=docker_env())
+            except OSError as exc:
+                raise StepFailed("could not copy %s into /work: %s" % (name, host_fault(-1, str(exc))), str(exc))
+            try:
+                with tarfile.open(fileobj=proc.stdin, mode="w|", format=tarfile.PAX_FORMAT) as archive:
+                    archive.add(folder, arcname=name)
+                proc.stdin.close()
+            except (OSError, tarfile.TarError) as exc:
+                problem = str(exc)
+            code = proc.wait()
+            output.seek(0)
+            text = output.read().decode(errors="replace")
+        if code != 0 or problem:
+            hint = ""
+            if re.search(r"executable file not found|\"tar\"|no such file", text, re.I):
+                hint = "; the check copies clones with tar, which the workstation image lacks"
+            elif host_fault(code, text):
+                hint = "; " + host_fault(code, text)
+            raise StepFailed("could not copy %s into /work as uid %d (exit %d)%s" % (name, RUN_UID, code, hint),
+                             text + ("\n" + problem if problem else ""))
 
     @staticmethod
     def must_open_up():
@@ -2742,9 +3302,9 @@ class Check(object):
         code, out = run(["docker", "logs", "--tail", "40", container])
         return out
 
-    def setup(self, command, agent=False):
-        """A setup command, or (``agent``) a ``--run`` command in the agent phase: the same
-        container, image, mounts, environment and limits."""
+    def setup(self, command, agent=False, title=None, run_file=None):
+        """A setup command, or (``agent``) a ``--run`` command or ``--run-file`` script in the
+        agent phase: the same container, image, mounts, environment and limits."""
         image = self.images["workstation"]
         if self.emulate:
             self.start_pod()
@@ -2752,56 +3312,113 @@ class Check(object):
         env.update({"HOME": HOME_DIR, "EXRADIUS_STATE_DIR": STATE_DIR, "EXRADIUS_WORK_DIR": WORK_DIR})
         env.update(GIT_ENV)
         env.update(self.proxy_env(java=True))
+        mounts = list(self.live_mounts)
+        if run_file is not None:
+            index, path = run_file
+            with open(path, "rb") as handle:
+                data = handle.read()
+            folder = os.path.join(self.root, "run-files", str(index))
+            os.makedirs(folder, exist_ok=True)
+            copy = os.path.join(folder, os.path.basename(path))
+            with open(copy, "wb") as handle:
+                handle.write(data)
+            os.chmod(copy, 0o755)
+            target = "/exradius/run-files/%d/%s" % (index, os.path.basename(path))
+            mounts.append((copy, target, True))
+            command = run_file_command(data.decode("utf-8", "replace"), target)
+            self.log.write("runs: %s\n" % command)
         container = "exradius-check-%s-%s-%s" % (self.id, "run" if agent else "setup", _random.token_hex(3))
-        cmd = ["docker", "run", "--name", container] + self.run_flags(self.live_mounts) + self.platform_args()
+        cmd = ["docker", "run", "--name", container] + self.run_flags(mounts) + self.platform_args()
         if self.pod:
             cmd += ["--network", "container:%s" % self.pod]
         for key, value in env.items():
             # Explicit values (throwaway secrets, the project env): passing them through the
             # docker CLI's own environment would also change its HOME and PATH.
             cmd += ["-e", "%s=%s" % (key, value)]
-        cmd += ["--entrypoint", "/bin/sh", image, "-c", command]
+        marker = "@@exradius-check-%s@@" % _random.token_hex(6)
+        cmd += ["--entrypoint", "/bin/sh", image, "-c", STEP_WRAPPER, "exradius-step", command, marker]
         offset = self.records_offset()
         started = time.time()
-        code, out = stream(cmd, self.log, self.verbose)
+        hidden, numbers = [], []
+        code, out = stream(cmd, self.log, self.verbose, marker=marker, hidden=hidden, numbers=numbers)
         seconds = time.time() - started
+        usage = wrapper_report(hidden)
+        if "oom_kill" not in usage:
+            _, killed = run(["docker", "inspect", "--format", "{{.State.OOMKilled}}", container])
+            if killed.strip() == "true":
+                usage["oom_kill"] = 1
         run(["docker", "rm", "-f", container])
-        if code == KILLED and self.config.memory:
-            # Verify's wording (worker/verify.py): exit 137 under a declared limit.
-            raise StepFailed("exited with 137: exceeded its declared memory (%s); raise resources.memory or "
-                             "lower the step's parallelism" % self.config.memory, out + self.network_notes(out, offset))
+        if usage.get("ws"):
+            self.step_peak = usage["ws"]
+            self.peaks.append((title or command, usage["ws"]))
+        if usage:
+            self.log.write("memory: working set peak %s, memory.peak %s (page cache included), oom_kill %s\n" % (
+                memory_text(usage["ws"]) if usage.get("ws") else "?",
+                memory_text(usage["peak"]) if usage.get("peak") else "?", usage.get("oom_kill", "?")))
+        verdict, note = memory_verdict(code, self.config.memory, self.host_memory, usage.get("oom_kill"))
         if code != 0:
-            hint = ""
-            if code == KILLED:
-                hint = " (killed: usually out of memory; Docker has %s)" % docker_memory()
-            elif code == 127:
-                hint = " (command not found: the workstation image lacks a tool this command runs)"
-            elif code == 125:
-                hint = " (docker could not start the container)"
-            raise StepFailed("exited with %d after %.0fs%s" % (code, seconds, hint), out + self.network_notes(out, offset))
-        last = [l for l in out.strip().splitlines() if l.strip()][-1:] if out.strip() else []
-        return ("last line: %s" % last[0][:200]) if last else ""
+            if verdict:
+                summary = verdict
+            else:
+                summary = "exited with %d after %.0fs" % (code, seconds)
+                fault = host_fault(code, out)
+                if fault:
+                    summary += " (%s)" % fault
+                elif code == 127:
+                    summary += " (command not found: the workstation image lacks a tool this command runs)"
+            if note:
+                summary += "; " + note
+            raise StepFailed(summary, out, self.network_notes(out, offset), numbers)
+        lines = ["warning: %s" % note] if note else []
+        if agent:
+            shown = last_lines(out, 10)
+            if shown:
+                lines += ["| %s" % row for row in shown]
+            else:
+                lines.append("no output")
+        else:
+            shown = last_lines(out, 1)
+            if shown:
+                lines.append("last line: %s" % shown[0][:200])
+        return "\n".join(lines)
 
     def network_notes(self, out, offset):
-        """What the proxy refused during a failed step, and the hint for a tool that ignored
-        the proxy (``diagnose._network`` in Exradius)."""
+        """What the proxy refused or could not reach during a failed step, and the hint for a
+        tool that ignored the proxy (``diagnose._network`` in Exradius)."""
         if not self.emulate:
             return ""
         notes = []
         records, _ = self.records(offset)
         refused = []
+        errors = {}
         for record in records:
+            host = record.get("host") or ""
             if not record.get("allowed"):
-                line = "refused: %s: %s" % (record.get("host"), record.get("reason"))
+                line = refusal_text(host, record.get("reason"), self.pod_ip)
                 if line not in refused:
                     refused.append(line)
-        notes += refused
-        if not ALLOWLIST_REFUSAL.search(out) and (NO_PROXY_USED.search(out) or NO_NAME.search(out)):
+            elif record.get("reason"):
+                count, reason = errors.get(host.lower(), (0, record.get("reason")))
+                errors[host.lower()] = (count + 1, reason)
+        if refused:
+            notes.append("refused during this step (may be unrelated to the failure):")
+            notes += ["  %s" % line for line in refused]
+        for host, (count, reason) in errors.items():
+            notes.append(proxy_error_line(host, count, reason, self.pod_ip))
+        # A refused connection to the run's own localhost is the application not listening
+        # (yet), not a tool that ignored the proxy.
+        scan = "\n".join(row for row in out.splitlines() if not LOCAL_TARGET.search(row))
+        if not ALLOWLIST_REFUSAL.search(out) and (NO_PROXY_USED.search(scan) or NO_NAME.search(scan)):
             notes.append("hint: the run reaches the network only through the proxy that HTTPS_PROXY, HTTP_PROXY and "
                          "JAVA_TOOL_OPTIONS name; this command (or a tool it runs) ignored them and tried a direct "
                          "connection, which a run's pod does not have. Configure the tool to use the proxy (Maven: a "
-                         "<proxy> in settings.xml).")
-        return ("\n" + "\n".join(notes)) if notes else ""
+                         "<proxy> in settings.xml); the project's own code that connects directly cannot be "
+                         "configured: fetch what it needs in a setup command, or leave that test to CI.")
+            if not records:
+                notes.append("nothing in this step went through the proxy: a tool or the project's own code "
+                             "connected, or resolved a name, directly. In a run public names do resolve, and the "
+                             "connection is then dropped.")
+        return "\n".join(notes)
 
     def network_summary(self):
         """What the proxy saw in the whole check (never fails)."""
@@ -2818,14 +3435,32 @@ class Check(object):
         def counted(counts):
             return ", ".join("%s (%d request%s)" % (h, n, "" if n == 1 else "s") for h, n in counts.items())
 
+        def remarks(counts):
+            out = []
+            for host in counts:
+                kind, text = host_remark(host, self.pod_ip)
+                if kind:
+                    out.append("  %s" % text if kind != "fake" else "  %s: %s" % (host, text))
+            return out
+
         setup = [r for r in records if r.get("phase") == "setup"]
         agent = [r for r in records if r.get("phase") == "agent"]
         refused_agent = hosts_of(r for r in agent if not r.get("allowed"))
         refused_setup = hosts_of(r for r in setup if not r.get("allowed"))
         if refused_agent:
             lines.append("refused in the agent phase: %s" % counted(refused_agent))
+            lines += remarks(refused_agent)
         if refused_setup:
             lines.append("refused in setup: %s" % counted(refused_setup))
+            lines += remarks(refused_setup)
+        errors = {}
+        for record in records:
+            if record.get("allowed") and record.get("reason"):
+                host = (record.get("host") or "").lower()
+                count, reason = errors.get(host, (0, record.get("reason")))
+                errors[host] = (count + 1, reason)
+        for host, (count, reason) in errors.items():
+            lines.append(proxy_error_line(host, count, reason, self.pod_ip))
         reached_setup = list(hosts_of(r for r in setup if r.get("allowed") and not r.get("reason")))
         if reached_setup:
             lines.append("reached in setup: %s" % ", ".join(reached_setup))
@@ -2847,42 +3482,108 @@ class Check(object):
         if private:
             lines.append("private addresses allowed by --allow-private: %s" % ", ".join(private))
             lines.append("  the install's egress.allowPrivate must list them")
-        if not records:
-            lines.append("no request went through the proxy")
+        if not lines:
+            lines.append("no host reached" + ("" if records else " (no request went through the proxy)"))
+        if self.cache_warm:
+            lines.append("the caches were warm: hosts whose downloads came from a cache are not listed")
         return "\n".join(lines)
 
+    def measure_disk(self):
+        """What the run left on its volume (/work, the home, /tmp; the caches are the
+        project volume's, counted apart): the admin's "disk per run". None when the volumes
+        were never prepared."""
+        if not self.volumes or not self.images.get("workstation"):
+            return None
+        keys = ("work", "home", "tmp")
+        cmd = ["docker", "run", "--rm", "--user", "0:0", "--network", "none", "--label", self.label]
+        for key in keys:
+            cmd += ["--mount", "type=volume,source=%s,target=/v/%s,readonly,volume-nocopy" % (self.volume(key), key)]
+        cmd += self.platform_args() + ["--entrypoint", "du", self.images["workstation"], "-sk"] + ["/v/" + k for k in keys]
+        code, out = run(cmd, timeout=600)
+        sizes = {}
+        for row in out.splitlines():
+            match = re.match(r"^(\d+)\s+/v/(\w+)$", row.strip())
+            if match:
+                sizes[match.group(2)] = int(match.group(1)) * 1024
+        if code != 0 or len(sizes) != len(keys):
+            self.log.write("disk: could not measure the volumes (exit %d):\n%s\n" % (code, out))
+            return None
+        caches = None
+        if self.cache_dir and os.path.isdir(self.cache_dir):
+            code, out = run(["du", "-sk", self.cache_dir], timeout=600)
+            first = out.split("\t")[0].strip()
+            if code == 0 and first.isdigit():
+                caches = int(first) * 1024
+        return disk_text(sizes, caches)
+
+    def leftovers(self):
+        """What the check's label still names: ``{kind: [names]}``, None for a kind Docker did
+        not answer for."""
+        out = {}
+        for kind, cmd in (("containers", ["docker", "ps", "-aq", "--filter", "label=" + self.label]),
+                          ("networks", ["docker", "network", "ls", "-q", "--filter", "label=" + self.label]),
+                          ("volumes", ["docker", "volume", "ls", "-q", "--filter", "label=" + self.label])):
+            code, text = run(cmd, timeout=60)
+            out[kind] = text.split() if code == 0 else None
+        return out
+
     def cleanup(self):
-        ids = run(["docker", "ps", "-aq", "--filter", "label=" + self.label])[1].split()
-        if ids:
-            run(["docker", "rm", "-f", "-v"] + ids)
-        networks = run(["docker", "network", "ls", "-q", "--filter", "label=" + self.label])[1].split()
-        if networks:
-            run(["docker", "network", "rm"] + networks)
-        if self.root and os.path.isdir(self.root):
-            if self.args.keep:
-                self.say("DONE  Clean up: kept %s (work, home, tmp) as asked" % self.root)
-                self.root = None
+        before = self.leftovers()
+        if before["containers"]:
+            run(["docker", "rm", "-f", "-v"] + before["containers"], timeout=120)
+        if before["networks"]:
+            run(["docker", "network", "rm"] + before["networks"], timeout=60)
+        if before["volumes"] and not self.args.keep:
+            run(["docker", "volume", "rm"] + before["volumes"], timeout=120)
+        removed_root = False
         if self.root and os.path.isdir(self.root):
             try:
                 shutil.rmtree(self.root)
             except OSError:
                 # Files the run user wrote may not be removable by this user (Linux): remove
                 # them as root in a throwaway container.
-                image = self.images.get("workstation") if hasattr(self, "images") else None
+                image = self.images.get("workstation")
                 if image:
                     run(["docker", "run", "--rm", "--user", "0:0", "--mount",
                          "type=bind,source=%s,target=/x" % self.root, "--entrypoint", "/bin/sh", image,
                          "-c", "rm -rf /x/* /x/.[!.]*"])
                 shutil.rmtree(self.root, ignore_errors=True)
+            removed_root = not os.path.isdir(self.root)
+        after = self.leftovers()
         removed = []
-        if ids:
-            removed.append("%d container%s" % (len(ids), "" if len(ids) == 1 else "s"))
-        if networks:
-            removed.append("the network %s" % self.network if self.network else "the network")
-        if self.root:
+        still = []
+        for kind in ("containers", "networks", "volumes"):
+            was, now = before[kind] or [], after[kind]
+            if now is None:
+                still.append("%s: Docker did not answer, check with docker %s ls --filter label=%s"
+                             % (kind, kind[:-1] if kind != "containers" else "container", self.label))
+                continue
+            gone = [n for n in was if n not in now]
+            if gone:
+                removed.append("%d %s" % (len(gone), kind if len(gone) != 1 else kind[:-1]))
+            if now and not (kind == "volumes" and self.args.keep):
+                still.append("%s %s" % (kind, " ".join(now)))
+        if removed_root:
             removed.append("the temporary folder")
         if removed:
             self.say("DONE  Clean up: removed %s" % ", ".join(removed))
+        if still:
+            self.say("WARN  Clean up: still there: %s" % "; ".join(still))
+            self.say("      remove them with docker rm -f, docker network rm and docker volume rm")
+        kept = after["volumes"] if self.args.keep else None
+        if kept:
+            mounts = dict(VOLUMES)
+            ordered = [self.volume(k) for k, _ in VOLUMES if self.volume(k) in kept]
+            self.say("DONE  Clean up: kept the volumes as asked: %s" % ", ".join(
+                "%s (%s)" % (self.volume(k), mounts[k]) for k, _ in VOLUMES if self.volume(k) in kept))
+            look = ["docker", "run", "--rm", "-it", "--user", "%d:%d" % (RUN_UID, RUN_GID), "-e", "HOME=" + HOME_DIR,
+                    "-w", WORK_DIR]
+            for key, target in VOLUMES:
+                if self.volume(key) in kept:
+                    look += ["-v", "%s:%s" % (self.volume(key), target)]
+            look += ["--entrypoint", "bash", self.images.get("workstation") or "<workstation image>"]
+            self.say("      look inside: %s" % " ".join(shlex.quote(a) for a in look))
+            self.say("      remove them: docker volume rm %s" % " ".join(ordered))
 
 
 ALLOWLIST_REFUSAL = re.compile(r"(\S+) is not on this task's network allowlist")
@@ -2890,13 +3591,27 @@ NO_PROXY_USED = re.compile(
     r"Connect(?:ion)? timed out|connect: connection timed out|ETIMEDOUT|Network is unreachable|ENETUNREACH"
     r"|connect to \S+ port \d+ (?:after \d+ ms: )?(?:Connection timed out|Couldn't connect)", re.I)
 """A tool that ignored the proxy (``diagnose.NO_PROXY_USED`` in Exradius)."""
-NO_NAME = re.compile(r"Could not resolve host|ENOTFOUND|EAI_AGAIN|Temporary failure in name resolution"
+NO_NAME = re.compile(r"Could not resolve host|couldn't resolve|getaddrinfo|ENOTFOUND|EAI_AGAIN|fetch failed|NoIPsError"
+                     r"|Temporary failure in name resolution|Name or service not known|No such host is known"
                      r"|Failed to connect to (?!localhost |127\.|::1 )\S+ port \d+|No route to host|EHOSTUNREACH")
 """A direct connection on the check's internal network: names do not resolve and addresses
-have no route (in a run's pod the connection times out instead, NO_PROXY_USED)."""
+have no route (in a run's pod public names resolve and the connection times out instead,
+NO_PROXY_USED). Ruby's resolver, Node's fetch and .NET word it their own ways."""
+
+
+LOCAL_TARGET = re.compile(r"\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)\b|\[::1\]", re.I)
+"""A line about a connection to the run's own loopback, which never goes to the proxy."""
+
+
+def proxy_error_line(host, count, reason, pod_ip=None):
+    """A request the proxy allowed but could not complete (no address, no connection)."""
+    kind, remark = host_remark(host, pod_ip)
+    return "could not reach (proxy error): %s (%d): %s%s" % (host, count, reason, "; " + remark if kind == "fake" else "")
+
 
 CACHE_DIR_NAME = ".exradius-cache"
-"""The local stand-in for the project volume's caches/, next to exradius.yaml (git-ignored)."""
+"""Where earlier versions kept the local stand-in for the project volume's caches/ (next to
+exradius.yaml); still used when it exists. The default is ~/.cache/exradius-check/<slug>."""
 
 
 def memory_flags(memory):
@@ -2905,17 +3620,26 @@ def memory_flags(memory):
 
 
 def cache_summary(cache_dir, entries):
-    """The size of each ``workstation.cache`` folder: ``~/.cache/uv 236 MB, ...``."""
+    """``(text, warm)``: the size of each ``workstation.cache`` folder (``~/.cache/uv 236 MB,
+    ...``), and whether any holds something."""
     parts = []
+    warm = False
     for index, entry in enumerate(entries):
         folder = os.path.join(cache_dir, cache_folder(index, entry["path"]))
         size = 0
+        empty = True
         if os.path.isdir(folder):
-            code, out = run(["du", "-sk", folder])
-            first = out.split("\t")[0].strip()
-            size = int(first) * 1024 if code == 0 and first.isdigit() else 0
-        parts.append("%s %s" % (entry["path"], "%.0f MB" % (size / 1e6) if size > 1e6 else "empty"))
-    return ", ".join(parts)
+            try:
+                empty = not os.listdir(folder)
+            except OSError:
+                empty = True
+            if not empty:
+                code, out = run(["du", "-sk", folder])
+                first = out.split("\t")[0].strip()
+                size = int(first) * 1024 if code == 0 and first.isdigit() else 0
+        warm = warm or not empty
+        parts.append("%s %s" % (entry["path"], size_text(size, empty)))
+    return ", ".join(parts), warm
 
 
 BUILDKIT_STEP = re.compile(r"^#\d+ \[[^\]]*\] ((?:RUN|COPY|ADD)\s.*)$")
@@ -2955,18 +3679,24 @@ def failed_instruction(output):
     return ":\n%s%s" % (step, "\n" + error if error else "")
 
 
-def docker_memory():
-    code, out = run(["docker", "info", "--format", "{{.MemTotal}}"])
-    try:
-        return "%.1f GB of memory" % (int(out.strip()) / 1e9)
-    except ValueError:
-        return "an unknown amount of memory"
+EPILOG = """\
+Each --run and --run-file runs in its own container once the setup commands have passed,
+even after an earlier one failed. Processes a command leaves in the background die with its
+container: nothing needs stopping or cleaning up after it for the check.
+
+/work, the home, /tmp and the state directory are Docker volumes (a Linux filesystem, as the
+run's volume is); --keep keeps them. Each setup and --run step shows its peak memory (the
+largest working set sampled in its container, page cache not counted); the summary compares
+the highest with resources.memory.
+"""
 
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         prog="check.sh",
-        description="Check an Exradius project config locally with Docker, the way Verify does.")
+        description="Check an Exradius project config locally with Docker, the way Verify does.",
+        epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.set_defaults(runs=[])
     parser.add_argument("config", nargs="?", default=".",
                         help="the config repository folder (with exradius.yaml or .exradius/exradius.yaml), "
                              "or the file itself; default: the current folder")
@@ -2976,11 +3706,17 @@ def parse_args(argv):
                         help="folder holding checkouts named like the config's repositories (repeatable)")
     parser.add_argument("--live", action="store_true",
                         help="mount the local checkouts as they are (uncommitted changes, existing "
-                             "node_modules or .venv included) instead of a fresh clone of them")
+                             "node_modules or .venv included) instead of a fresh clone of them; a host mount, "
+                             "so on macOS no Unix sockets in it, and slower")
     parser.add_argument("--validate", action="store_true", help="only read and validate the file; no Docker")
-    parser.add_argument("--run", action="append", default=[], metavar="CMD",
+    parser.add_argument("--run", action="append", dest="runs", type=lambda v: ("cmd", v), metavar="CMD",
                         help="after the setup commands, run CMD in the workstation in the agent phase, under the "
-                             "agent's network (repeatable): the test and lint commands the notes name")
+                             "agent's network (repeatable): the test and lint commands the notes name. CMD runs as "
+                             "/bin/sh -c CMD: bash syntax needs bash -c '...' or --run-file")
+    parser.add_argument("--run-file", action="append", dest="runs", type=lambda v: ("file", v), metavar="PATH",
+                        help="a script on this machine, copied into the run and executed from /work in the agent "
+                             "phase by its #! line (default /bin/sh); repeatable, in order with --run: for starting "
+                             "the application in the background, waiting for it and probing it")
     parser.add_argument("--allow", action="append", default=[], metavar="HOST",
                         help="a host of the install's egress.allow, which the agent phase may reach on top of "
                              "network.allow (repeatable)")
@@ -2996,10 +3732,16 @@ def parse_args(argv):
     parser.add_argument("--pull", action="store_true", help="pull images named with image: even when present locally")
     parser.add_argument("--no-cache", action="store_true", help="build without the Docker layer cache")
     parser.add_argument("--buildkit", action="store_true", help=argparse.SUPPRESS)  # builds always use BuildKit
-    parser.add_argument("--keep", action="store_true", help="keep the temporary work, home and tmp folders")
+    parser.add_argument("--keep", action="store_true",
+                        help="keep the Docker volumes of /work, the home, /tmp and the state directory, and print "
+                             "how to look inside and how to remove them")
     parser.add_argument("--cache-dir", metavar="DIR",
-                        help="where workstation.cache folders live between checks (default: .exradius-cache "
-                             "next to exradius.yaml; delete it to start cold)")
+                        help="where workstation.cache folders live between checks (default: "
+                             "~/.cache/exradius-check/<project slug>, or .exradius-cache next to exradius.yaml "
+                             "when that exists; delete it to start cold)")
+    parser.add_argument("--log", metavar="PATH",
+                        help="write the full log to PATH (default: ~/.cache/exradius-check/logs/"
+                             "<slug>-<date>-<time>.log, the newest %d per project kept)" % LOG_KEEP)
     parser.add_argument("-v", "--verbose", action="store_true", help="stream build and setup output")
     parser.add_argument("--tail", type=int, default=60, help="lines of output shown for the failing step")
     args = parser.parse_args(argv)
@@ -3012,6 +3754,15 @@ def parse_args(argv):
         if not os.path.isdir(path):
             parser.error("--repo %s: %s is not a folder" % (name, path))
         args.repo_map[name] = path
+    runs = []
+    for kind, value in args.runs:
+        if kind == "file":
+            value = os.path.abspath(os.path.expanduser(value))
+            if not os.path.isfile(value):
+                parser.error("--run-file: %s is not a file" % value)
+        runs.append((kind, value))
+    args.runs = runs
+    args.run = [value for kind, value in runs if kind == "cmd"]
     args.repos_dir = [os.path.expanduser(d) for d in args.repos_dir]
     args.allow = [h.strip() for item in args.allow for h in item.split(",") if h.strip()]
     args.allow_private = [h.strip() for item in args.allow_private for h in item.split(",") if h.strip()]

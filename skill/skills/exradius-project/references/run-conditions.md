@@ -77,7 +77,9 @@ agent's container are containers of that pod.
   - each `workstation.cache` folder (schema.md), mounted at its path from the project's
     volume, which outlives the run: the same folders in every run of the project,
     concurrent ones included.
-- `/work`, the home and `/tmp` are directories **on the run's disk volume, not in memory**:
+- `/work`, the home and `/tmp` are directories **on the run's disk volume, not in memory**
+  (an ordinary Linux filesystem: Unix sockets, hard links within one of them and file
+  locks work; the local check uses Docker volumes for them for the same reason):
   package manager caches (`~/.cache/yarn`, `~/.npm`, `~/.cache/uv`, `~/.m2`,
   `~/go/pkg/mod`), Yarn Berry's staging in `/tmp` and build output take disk space. They
   persist from the setup commands to the agent session and across a resumed session of
@@ -110,7 +112,8 @@ agent's container are containers of that pod.
 - The proxy variables Exradius adds after the project's own: `HTTP_PROXY`, `HTTPS_PROXY`,
   `NO_PROXY` (and lower case), `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`, and
   `JAVA_TOOL_OPTIONS` with Java's proxy properties (appended to the project's own value).
-  Do not set or unset them in `env`.
+  Do not set or unset them in `env`. `NO_PROXY` names `localhost`, `127.0.0.1`, `::1` and
+  the services, not the run's own address (network.md). Services get the same variables.
 - No model key, no repository credential, no token of Exradius: the egress proxy adds
   those outside the pod. The secrets in the environment are the ones `env` and the
   services' `env` reference, and the agent can read them.
@@ -139,7 +142,12 @@ agent's container are containers of that pod.
 - No ports are published and nothing outside reaches the run, no Docker daemon is
   available inside the workstation (the first limit above), and the run has no Kubernetes
   credentials.
-- Services start before the setup commands and stay up for the whole task.
+- Services start before the setup commands and stay up for the whole task. They run as
+  their image's user with a short list of capabilities (schema.md): an entrypoint that
+  needs more exits at start (pitfalls.md).
+- Public names resolve; a connection that does not go through the proxy is dropped.
+- Nothing starts the application. The agent does, in its own shell, when a task needs
+  it, with what setup and `notes` give it (running-the-app.md).
 
 ## The order of a run (and of Verify)
 
@@ -163,10 +171,13 @@ agent's container are containers of that pod.
 ## What the local check does not cover
 
 The check reproduces the image, the user, the filesystem, the memory limits, the services
-and the two network phases, and runs the commands given with `--run` as the agent would.
-It does not cover: the agent runtime and the model; pushing, and git's credential route;
+and the two network phases, and runs the commands given with `--run` and `--run-file` as
+the agent would. Each of those is its own container: what one leaves running does not
+reach the next, where in a run the agent's shell keeps it. It does not cover: the agent runtime and the model; pushing, and git's credential route;
 the connections' tool lists (it only checks that each launcher is in the image); the
 cluster's CPU architecture unless `--platform` is given; what the admin's install allows
 (`egress.allow`, `egress.allowPrivate`) unless given with `--allow` and
-`--allow-private`; image builds' network (they use Docker's own). Only a Verify in
-Exradius, then a real task, covers those.
+`--allow-private`; image builds' network (they use Docker's own); name resolution (the
+check resolves no public name, a run does); the cluster's disk (a storage class that is
+a network file share may not hold Unix sockets). Only a Verify in Exradius, then a real
+task, covers those.

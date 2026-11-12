@@ -201,8 +201,9 @@ Secrets are not allowed in `command`; put them in the service's `env` and refer 
 `$NAME` inside a `sh -c` command.
 
 Services run as their image's user with all capabilities dropped except CHOWN, SETUID,
-SETGID, FOWNER, DAC_OVERRIDE and NET_BIND_SERVICE, `no-new-privileges`, no mounts and no
-published ports. Service images may be Alpine; only the workstation must be glibc-based.
+SETGID, FOWNER, DAC_OVERRIDE and NET_BIND_SERVICE (not SETPCAP: an entrypoint that
+changes its capability bounding set exits), `no-new-privileges`, no mounts and no
+published ports. They get the proxy variables the workstation gets. Service images may be Alpine; only the workstation must be glibc-based.
 
 **Connections.** Exactly one of `catalog`, `command` or `url`. `config` goes only with
 `catalog`; `args` and `env` only with `command`; `headers` only with `url`. `type` is
