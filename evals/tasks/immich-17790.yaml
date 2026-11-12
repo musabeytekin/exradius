@@ -1,0 +1,31 @@
+id: immich-17790
+status: candidate
+project: immich
+issue:
+  upstream: immich-app/immich
+  number: 17790
+  title: "External library watching includes excluded folders"
+  author: francescobabbaro
+  opened: "2025-04-22"
+  sha256: 204203bd1fa1959d97a4ebebb2bca55c3cdb60e061ee19c07bdb29ef834c9cb8
+area: backend
+hint: symptom
+grading: tests
+fixes:
+  - repository: immich
+    pull: 31418
+    merged: "2026-09-28"
+    commit: 76c08fa230b8c9fc2fbdd99b839ed4a3d357df12
+    source_files:
+      - server/src/repositories/storage.repository.ts
+      - server/src/services/library.service.ts
+    test_files:
+      - server/src/repositories/storage.repository.spec.ts
+      - server/src/services/library.service.spec.ts
+      - server/test/medium/specs/repositories/storage.repository.spec.ts
+      - server/test/medium/specs/services/library.service.spec.ts
+    applies_on_base: clean
+validated: false
+notes: >-
+  Some of the fix's tests are medium tests (server/test/medium), which start a database with
+  Docker; grade with the unit specs.

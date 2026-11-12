@@ -1,0 +1,29 @@
+id: home-assistant-core-153988
+status: candidate
+project: home-assistant
+issue:
+  upstream: home-assistant/core
+  number: 153988
+  title: "Cannot add freebox Delta 6E"
+  author: lartx
+  opened: "2025-10-08"
+  sha256: a7434074fba899a2e9e844941bafbd11f7d4298db8a7c6c0b6084cf2cb120b24
+area: backend
+hint: location
+grading: tests+review
+fixes:
+  - repository: core
+    pull: 180699
+    merged: "2026-09-14"
+    commit: 8d1a584e8c660df0e82ecdd12187761a47f0f793
+    source_files:
+      - homeassistant/components/freebox/config_flow.py
+      - homeassistant/components/freebox/router.py
+    test_files:
+      - tests/components/freebox/test_config_flow.py
+      - tests/components/freebox/test_router.py
+    applies_on_base: clean
+validated: false
+notes: >-
+  A vague one: 'cannot add' a new router model, with a log line. Upstream cleared a stale app
+  token.

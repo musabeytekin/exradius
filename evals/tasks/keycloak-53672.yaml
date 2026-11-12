@@ -1,0 +1,28 @@
+id: keycloak-53672
+status: reserve
+project: keycloak
+issue:
+  upstream: keycloak/keycloak
+  number: 53672
+  title: "Improve null handling in XMLTimeUtil.parse() and parseAsDuration()"
+  author: ruchikajha95
+  opened: "2026-10-07"
+  sha256: a868fcff98dcf0fa4e6f1d5798f9fcc001a9f91af1984d85e8a54eb1309117bf
+area: backend
+hint: fix
+grading: tests
+fixes:
+  - repository: keycloak
+    pull: 53839
+    merged: "2026-10-29"
+    commit: 5843d14177913181814ecad447245ee3e18d17fc
+    source_files:
+      - saml-core/src/main/java/org/keycloak/saml/common/DefaultPicketLinkLogger.java
+      - saml-core/src/main/java/org/keycloak/saml/common/PicketLinkLogger.java
+      - saml-core/src/main/java/org/keycloak/saml/processing/core/saml/v2/util/XMLTimeUtil.java
+    test_files:
+      - saml-core/src/test/java/org/keycloak/saml/processing/core/saml/v2/util/XMLTimeUtilTest.java
+    applies_on_base: clean
+validated: false
+notes: >-
+  A plain unit test (saml-core).

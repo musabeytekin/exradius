@@ -20,3 +20,6 @@ deploy/.data/
 .DS_Store
 .idea/
 .vscode/
+
+# Evaluation tickets, fetched by evals/fetch_tickets.py
+evals/tickets/

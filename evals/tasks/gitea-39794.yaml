@@ -1,0 +1,27 @@
+id: gitea-39794
+status: candidate
+project: gitea
+issue:
+  upstream: go-gitea/gitea
+  number: 39794
+  title: "Code comment on an unchanged line shows the wrong code context"
+  author: cedric-roussel
+  opened: "2026-10-15"
+  sha256: 09e97cca4a96e03149ddd427f91e70b812b8973c1b16d8f98050b26eaf8c747a
+area: backend
+hint: symptom
+grading: tests
+fixes:
+  - repository: gitea
+    pull: 39799
+    merged: "2026-10-16"
+    commit: 217300fff76a35f07f95283feb60a50d75e44b7d
+    source_files:
+      - modules/git/fastimport.go
+      - services/pull/review.go
+    test_files:
+      - services/pull/review_test.go
+    applies_on_base: clean
+validated: false
+notes: >-
+  The report links pull 35662, an older change, not the fix.

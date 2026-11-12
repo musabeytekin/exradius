@@ -1,0 +1,28 @@
+id: home-assistant-core-182556
+status: reserve
+project: home-assistant
+issue:
+  upstream: home-assistant/core
+  number: 182556
+  title: "LevelControl MinLevel==MaxLevel Triggers ZeroDivisionError in Home Assistant Matter Integration"
+  author: steve123428
+  opened: "2026-09-18"
+  sha256: 63050fb5ec4c3ccf27411a8b1ed5f04cd62b03e2aa6c058910e42156a3f2be7f
+area: backend
+hint: location
+grading: tests
+fixes:
+  - repository: core
+    pull: 182645
+    merged: "2026-09-19"
+    commit: f31b3e256750109417e15b51b54692ace93bc6c8
+    source_files:
+      - homeassistant/components/matter/fan.py
+      - homeassistant/components/matter/light.py
+    test_files:
+      - tests/components/matter/test_fan.py
+      - tests/components/matter/test_light.py
+    applies_on_base: clean
+validated: false
+notes: >-
+  Written as a security report.

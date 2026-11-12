@@ -1,0 +1,28 @@
+id: plane-9159
+status: reserve
+project: plane
+issue:
+  upstream: makeplane/plane
+  number: 9159
+  title: "GitHub OAuth Callback Crashes for All Space App Users — base_host Variable Shadowing"
+  author: R0hit-Sriram
+  opened: "2026-05-28"
+  sha256: 203cb815c570679c44fa42cf9793dbd80df368fc1d79eb3ce0ae6b454c615fbc
+area: backend
+hint: fix
+grading: tests
+fixes:
+  - repository: plane
+    pull: 9922
+    merged: "2026-11-03"
+    commit: 618d0eb74658329a6f6e92434ac54231422c5b96
+    source_files:
+      - apps/api/plane/authentication/views/space/github.py
+      - apps/api/plane/authentication/views/space/gitlab.py
+      - apps/api/plane/authentication/views/space/google.py
+    test_files:
+      - apps/api/plane/tests/unit/views/test_oauth_callback_state_mismatch.py
+    applies_on_base: clean
+validated: false
+notes: >-
+  The report's title names the cause. Pull 9922 also closes issue 9164.

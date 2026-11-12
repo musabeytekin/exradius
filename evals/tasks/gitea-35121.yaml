@@ -1,0 +1,33 @@
+id: gitea-35121
+status: candidate
+project: gitea
+issue:
+  upstream: go-gitea/gitea
+  number: 35121
+  title: "API ignores branch protection rule for \"enable_force_push_allowlist\" upon creation"
+  author: HenrijsT
+  opened: "2025-07-18"
+  sha256: 73411fc99fc6542b16a0552f8348c2dbfdc2a46afcaaaedad94ed627d80a219b
+area: api
+hint: symptom
+grading: tests
+fixes:
+  - repository: gitea
+    pull: 39990
+    merged: "2026-11-07"
+    commit: b6c291f87a7d905a0ba701bb9a2550b4129fd309
+    source_files:
+      - modules/structs/repo_branch.go
+      - routers/api/v1/repo/branch.go
+      - templates/swagger/v1-openapi3.generated.json
+      - templates/swagger/v1-swagger.generated.json
+    test_files:
+      - modules/indexer/code/indexer_test.go
+      - tests/integration/api_branch_test.go
+    applies_on_base: conflict
+    conflicts:
+      - modules/indexer/code/indexer_test.go
+validated: false
+notes: >-
+  The fix regenerates the swagger files. Grade with tests/integration/api_branch_test.go; the
+  conflict is in an unrelated test the pull request also touched.

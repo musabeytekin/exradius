@@ -1,0 +1,28 @@
+id: keycloak-52574
+status: candidate
+project: keycloak
+issue:
+  upstream: keycloak/keycloak
+  number: 52574
+  title: "Regression in 26.7.0: DefaultClientSessionContext.getScopeString() no longer attaches \"openid\" scope on token refresh when the client omits it from the request"
+  author: MarS919
+  opened: "2026-09-09"
+  sha256: 6fb5508f899540d08d8f89ded1d7ad4f55d2e2eaf38bd1b4539c36acc213cbc0
+area: backend
+hint: location
+grading: tests
+fixes:
+  - repository: keycloak
+    pull: 52622
+    merged: "2026-09-16"
+    commit: 917d83b11957f91537f28d8630b5cd665434bb5b
+    source_files:
+      - services/src/main/java/org/keycloak/protocol/oidc/refresh/AbstractRefreshTokenProvider.java
+      - services/src/main/java/org/keycloak/services/util/DefaultClientSessionContext.java
+    test_files:
+      - tests/base/src/test/java/org/keycloak/tests/oauth/RefreshTokenTest.java
+    applies_on_base: clean
+validated: false
+notes: >-
+  A regression report with a Root cause section. The test is in tests/base, which starts a
+  Keycloak server: the heaviest environment in the set.

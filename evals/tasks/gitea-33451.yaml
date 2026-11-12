@@ -1,0 +1,33 @@
+id: gitea-33451
+status: candidate
+project: gitea
+issue:
+  upstream: go-gitea/gitea
+  number: 33451
+  title: "When I search for a term within a specific project, I receive incorrect results"
+  author: Raytle
+  opened: "2025-01-30"
+  sha256: 9958c7e9a613149a0e9c5e81816e4c7e66b76f7986e07fc48af9932e0bd47158
+area: backend
+hint: symptom
+grading: tests+review
+fixes:
+  - repository: gitea
+    pull: 40299
+    merged: "2026-11-10"
+    commit: d5ce1cad7fee5445e5fd40de97af27f7684af802
+    source_files:
+      - routers/api/v1/shared/project.go
+      - routers/web/org/projects.go
+      - routers/web/repo/projects.go
+      - services/indexer/notify.go
+      - services/projects/project.go
+    test_files:
+      - tests/integration/project_test.go
+    applies_on_base: conflict
+    conflicts:
+      - tests/integration/project_test.go
+validated: false
+notes: >-
+  A vague one: the report is two sentences and a screencast the agent cannot watch. The
+  integration test file changed after the base: take only this fix's added cases.

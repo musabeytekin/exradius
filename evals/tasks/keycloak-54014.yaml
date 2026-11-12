@@ -1,0 +1,30 @@
+id: keycloak-54014
+status: candidate
+project: keycloak
+issue:
+  upstream: keycloak/keycloak
+  number: 54014
+  title: "SessionExpirationPredicates uses seconds vs milliseconds, expired sessions linger in listings"
+  author: ahus1
+  opened: "2026-10-15"
+  sha256: 20c2901c2384aacae53581f6d7a7efa3b5628f67db69a42695a9ed39d3f8493c
+area: backend
+hint: fix
+grading: tests
+fixes:
+  - repository: keycloak
+    pull: 54020
+    merged: "2026-10-19"
+    commit: 9aacbc6f4c7bf458de32821cf028ff3ce693ab77
+    source_files:
+      - model/infinispan/src/main/java/org/keycloak/models/sessions/infinispan/InfinispanUserSessionProvider.java
+      - model/infinispan/src/main/java/org/keycloak/models/sessions/infinispan/PersistentUserSessionProvider.java
+      - model/infinispan/src/main/java/org/keycloak/models/sessions/infinispan/remote/RemoteUserSessionProvider.java
+      - model/infinispan/src/main/java/org/keycloak/models/sessions/infinispan/util/SessionExpirationPredicates.java
+    test_files:
+      - model/infinispan/src/test/java/org/keycloak/models/sessions/infinispan/util/SessionExpirationPredicatesTest.java
+    applies_on_base: clean
+validated: false
+notes: >-
+  Written by a maintainer; says the fix is straightforward. A plain unit test
+  (model/infinispan).

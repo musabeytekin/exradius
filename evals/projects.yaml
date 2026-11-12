@@ -1,0 +1,82 @@
+# The projects the dataset runs on and the commit each repository starts from.
+# configured: whether the project has a config repository on Exradius yet.
+# base: the parent of the earliest fix in the pool, so no fix is in the history.
+
+model: claude-opus-5-5
+fixes_merged_after: "2026-06-30"   # the model's training data ends in June 2026
+
+projects:
+  plane:
+    configured: true
+    repositories:
+      plane:
+        upstream: makeplane/plane
+        branch: preview
+        base: 1cd3d4dfd45f89e9c856f162a50bfa853c62a414
+        base_date: "2026-09-02"
+  saleor:
+    configured: true
+    repositories:
+      saleor:
+        upstream: saleor/saleor
+        branch: main
+        base: 697b9ec6ffb93199f62f783e7bf6c550cd3bcf7e
+        base_date: "2026-07-08"
+      saleor-dashboard:
+        upstream: saleor/saleor-dashboard
+        branch: main
+        base: 36f9b4339fdb752f319618de7af708055aa06871
+        base_date: "2026-08-20"
+  outline:
+    configured: true
+    repositories:
+      outline:
+        upstream: outline/outline
+        branch: main
+        base: 7741da7a2a585a4efc95ae77dfecca448c17d7f1
+        base_date: "2026-10-26"
+  gitea:
+    configured: false
+    repositories:
+      gitea:
+        upstream: go-gitea/gitea
+        branch: main
+        base: 70a5ff725c12374367af52487412be7398c00766
+        base_date: "2026-10-16"
+  ruff:
+    configured: false
+    repositories:
+      ruff:
+        upstream: astral-sh/ruff
+        branch: main
+        base: b6fec44b027d1c4ddbcd1862333f5310fa3d9969
+        base_date: "2026-09-07"
+  keycloak:
+    configured: false
+    repositories:
+      keycloak:
+        upstream: keycloak/keycloak
+        branch: main
+        base: 10d6f1c57afddde1f701dd557f1b69a0f04bd727
+        base_date: "2026-09-16"
+  immich:
+    configured: false
+    repositories:
+      immich:
+        upstream: immich-app/immich
+        branch: main
+        base: aa023378477fb1a65d24f4614de0940f6a769794
+        base_date: "2026-09-28"
+  home-assistant:
+    configured: false
+    repositories:
+      core:
+        upstream: home-assistant/core
+        branch: dev
+        base: d67179d9ae356d91f1c163100f0d0dfe54735131
+        base_date: "2026-09-14"
+      frontend:
+        upstream: home-assistant/frontend
+        branch: dev
+        base: e47a7c3a45bc25cc815ad94ec297d39c733c9ddb
+        base_date: "2026-10-08"

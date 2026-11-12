@@ -1,0 +1,28 @@
+id: plane-9497
+status: selected
+project: plane
+issue:
+  upstream: makeplane/plane
+  number: 9497
+  title: "Bug: Workspace invitation plain-text fallback link contains escaped query separators"
+  author: muemarco
+  opened: "2026-07-29"
+  sha256: 4a2f832f81130e934deeb0108b8ca001c387dd924606187722a46e69f4519bc1
+area: backend
+hint: symptom
+grading: tests
+fixes:
+  - repository: plane
+    pull: 9841
+    merged: "2026-09-16"
+    commit: 297c3fdf2a059208f33fa70d8e5f0135d17edc6c
+    source_files:
+      - apps/api/plane/db/management/commands/test_email.py
+      - apps/api/plane/utils/email.py
+    test_files:
+      - apps/api/plane/tests/unit/utils/test_email.py
+    applies_on_base: clean
+validated: false
+notes: >-
+  The fix also edits db/management/commands/test_email.py, a management command, not a test.
+  The report links pull 8535, an older change, not the fix.

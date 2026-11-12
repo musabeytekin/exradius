@@ -1,0 +1,26 @@
+id: saleor-19983
+status: selected
+project: saleor
+issue:
+  upstream: saleor/saleor
+  number: 19983
+  title: "Bug: update_discounted_prices_for_promotion(only_dirty_products=True) recalculates every listing: the dirty filter is discarded"
+  author: jeonghun917
+  opened: "2026-11-02"
+  sha256: c795e9902af3cb724422e1e469e7bbed60f5f0bb3f2267f5b81b87fd978b5ce9
+area: backend
+hint: fix
+grading: tests
+fixes:
+  - repository: saleor
+    pull: 19984
+    merged: "2026-11-04"
+    commit: 697574a4c4d9af3add0bbd21b07f86024c89a336
+    source_files:
+      - saleor/product/utils/variant_prices.py
+    test_files:
+      - saleor/product/tests/test_product_minimal_variant_price.py
+    applies_on_base: clean
+validated: false
+notes: >-
+  A one-line fix that the report all but states: the floor of the set.

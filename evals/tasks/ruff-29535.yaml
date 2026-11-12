@@ -1,0 +1,30 @@
+id: ruff-29535
+status: reserve
+project: ruff
+issue:
+  upstream: astral-sh/ruff
+  number: 29535
+  title: "Improve D417 missdetection for *args and **kwargs when backslash."
+  author: robinechuca
+  opened: "2026-10-20"
+  sha256: c976cd7fe411c8a3a2238fa72d96dd56f0eebb8d4fb3da56f4cf8de5659b01a2
+area: cli
+hint: symptom
+grading: tests+review
+fixes:
+  - repository: ruff
+    pull: 29536
+    merged: "2026-10-20"
+    commit: 8ebb34e5325e7d3bead073eeb8bd9b2d763e6a11
+    source_files:
+      - crates/ruff_linter/src/rules/pydocstyle/mod.rs
+      - crates/ruff_linter/src/rules/pydocstyle/rules/sections.rs
+    test_files:
+      - crates/ruff_linter/resources/test/fixtures/pydocstyle/D417.py
+      - crates/ruff_linter/src/rules/pydocstyle/snapshots/ruff_linter__rules__pydocstyle__tests__d417_google.snap
+      - crates/ruff_linter/src/rules/pydocstyle/snapshots/ruff_linter__rules__pydocstyle__tests__d417_google_ignore_var_parameters.snap
+      - crates/ruff_linter/src/rules/pydocstyle/snapshots/ruff_linter__rules__pydocstyle__tests__d417_numpy.snap
+      - crates/ruff_linter/src/rules/pydocstyle/snapshots/ruff_linter__rules__pydocstyle__tests__d417_unspecified.snap
+      - crates/ruff_linter/src/rules/pydocstyle/snapshots/ruff_linter__rules__pydocstyle__tests__d417_unspecified_ignore_var_parameters.snap
+    applies_on_base: clean
+validated: false

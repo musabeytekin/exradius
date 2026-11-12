@@ -1,0 +1,29 @@
+id: outline-14462
+status: selected
+project: outline
+issue:
+  upstream: outline/outline
+  number: 14462
+  title: "Typing three backticks inside a code block may delete the preceding character"
+  author: BenjaminMitchell-D0FB
+  opened: "2026-11-05"
+  sha256: 54ef4849997ff73ca09af523160d61fb1dbf8cec57f6ffdb3db46da620515112
+area: editor
+hint: symptom
+grading: tests
+fixes:
+  - repository: outline
+    pull: 14463
+    merged: "2026-11-06"
+    commit: 634d8d649330595c18d445db1304eefba72f3244
+    source_files:
+      - shared/editor/commands/codeFence.ts
+    test_files:
+      - shared/editor/commands/codeFence.test.ts
+    applies_on_base: conflict
+    conflicts:
+      - shared/editor/commands/codeFence.test.ts
+validated: false
+notes: >-
+  codeFence.test.ts does not merge cleanly on the base (pull 14388 added cases to the same file
+  in between): take only this fix's added cases.

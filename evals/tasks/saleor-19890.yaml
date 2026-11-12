@@ -1,0 +1,50 @@
+id: saleor-19890
+status: selected
+project: saleor
+issue:
+  upstream: saleor/saleor
+  number: 19890
+  title: "Bug: Saleor fails to start without dev dependencies"
+  author: Swmar23
+  opened: "2026-10-08"
+  sha256: eb09df0da1a99846ee23e4499c2e34101d507db2f7fcac67717be78bcd21e5c1
+area: backend
+hint: fix
+grading: tests+review
+fixes:
+  - repository: saleor
+    pull: 19923
+    merged: "2026-10-16"
+    commit: 0c0e2697cc72aa999f7786ae8aeda7665bd4285f
+    source_files:
+      - saleor/core/development/__init__.py
+      - saleor/core/development/random_data.py
+      - saleor/core/management/commands/populatedb.py
+      - saleor/core/utils/anonymization.py
+      - saleor/webhook/payloads.py
+    test_files:
+      - saleor/asgi/tests/checks/__init__.py
+      - saleor/asgi/tests/checks/check_uvicorn_starts.py
+      - saleor/asgi/tests/checks/test_check_uvicorn_starts.py
+      - saleor/core/development/tests/__init__.py
+      - saleor/core/development/tests/test_random_data.py
+      - saleor/core/tests/checks/__init__.py
+      - saleor/core/tests/checks/check_celery_starts.py
+      - saleor/core/tests/test_core.py
+    applies_on_base: conflict
+    conflicts:
+      - saleor/core/development/random_data.py
+      - saleor/core/tests/test_core.py
+runtime: >-
+  The HTTP server (uvicorn) and a Celery worker, in an environment without the dev dependency
+  group.
+validated: false
+notes: >-
+  A startup failure. The bug is on the base (saleor/core/utils/random_data.py imports test
+  fixtures, which import pytest), but the gold patch does not apply there: upstream moved that
+  module into a new package in this fix and the module changed after the base, so validation
+  needs the patch ported by hand. The grader is upstream's checks, new files that start uvicorn
+  and a Celery worker (saleor/asgi/tests/checks, saleor/core/tests/checks), run without the dev
+  dependency group. The report suggests lazy imports and upstream moved the module instead, so
+  a run is also reviewed. The workstation installs the dev group and the agent phase cannot
+  reach the package index: the agent has to stage an environment without pytest.

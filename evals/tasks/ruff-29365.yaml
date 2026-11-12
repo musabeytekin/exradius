@@ -1,0 +1,37 @@
+id: ruff-29365
+status: candidate
+project: ruff
+issue:
+  upstream: astral-sh/ruff
+  number: 29365
+  title: "PERF401/PERF403 fixes introduce a syntax error when the loop iterable is a ternary expression"
+  author: moylop260
+  opened: "2026-10-14"
+  sha256: 9ee65cd7ac9579ad5d82f32ec4b5a08e85d244739e25db38cb213d0e9dfe17f3
+area: cli
+hint: symptom
+grading: tests+review
+fixes:
+  - repository: ruff
+    pull: 29366
+    merged: "2026-10-14"
+    commit: 93526150df078af7dd8fc4226cdcc469539d2001
+    source_files:
+      - crates/ruff_linter/src/rules/perflint/rules/manual_dict_comprehension.rs
+      - crates/ruff_linter/src/rules/perflint/rules/manual_list_comprehension.rs
+      - crates/ruff_linter/src/rules/refurb/helpers.rs
+      - crates/ruff_linter/src/rules/refurb/mod.rs
+      - crates/ruff_linter/src/rules/refurb/rules/for_loop_set_mutations.rs
+      - crates/ruff_linter/src/rules/refurb/rules/for_loop_writes.rs
+    test_files:
+      - crates/ruff_linter/resources/test/fixtures/perflint/PERF401.py
+      - crates/ruff_linter/resources/test/fixtures/perflint/PERF403.py
+      - crates/ruff_linter/src/rules/perflint/snapshots/ruff_linter__rules__perflint__tests__manual-dict-comprehension_PERF403.py.snap
+      - crates/ruff_linter/src/rules/perflint/snapshots/ruff_linter__rules__perflint__tests__manual-list-comprehension_PERF401.py.snap
+      - crates/ruff_linter/src/rules/perflint/snapshots/ruff_linter__rules__perflint__tests__preview__manual-dict-comprehension_PERF403.py.snap
+      - crates/ruff_linter/src/rules/perflint/snapshots/ruff_linter__rules__perflint__tests__preview__manual-list-comprehension_PERF401.py.snap
+    applies_on_base: clean
+validated: false
+notes: >-
+  Linter fixes for two rules. Fixtures with snapshots, as above. The largest change in the Ruff
+  pool.

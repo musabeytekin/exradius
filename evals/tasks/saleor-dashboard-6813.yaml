@@ -1,0 +1,31 @@
+id: saleor-dashboard-6813
+status: selected
+project: saleor
+issue:
+  upstream: saleor/saleor-dashboard
+  number: 6813
+  title: "[Bug]: Selecting a fulfillment warehouse hides other order lines"
+  author: offx366
+  opened: "2026-08-08"
+  sha256: af717c2046dd7f18ddd89412bca6afd8846ebd3895a913761f4b0dbe9bf8751b
+area: frontend
+hint: location
+grading: tests
+fixes:
+  - repository: saleor-dashboard
+    pull: 6814
+    merged: "2026-08-20"
+    commit: 8924d0679b2acef6154efd4bfefe41e6d2e1d1f8
+    source_files:
+      - src/orders/components/OrderFulfillPage/OrderFulfillPage.tsx
+      - src/orders/urls.ts
+      - src/orders/views/OrderFulfill/OrderFulfill.tsx
+    test_files:
+      - src/orders/components/OrderFulfillPage/OrderFulfillPage.test.tsx
+      - src/orders/components/OrderFulfillPage/fixtures.ts
+      - src/utils/handlers/dialogActionHandlers.test.ts
+    applies_on_base: clean
+validated: false
+notes: >-
+  The new tests rely on the one-line change to OrderFulfillPage/fixtures.ts, listed with the
+  test files.

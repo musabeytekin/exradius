@@ -1,0 +1,27 @@
+id: plane-9674
+status: selected
+project: plane
+issue:
+  upstream: makeplane/plane
+  number: 9674
+  title: "[bug]: Issue link `metadata` is always overwritten on update — `crawl_work_item_link_title` runs unconditionally in `partial_update`"
+  author: 0x-Yang
+  opened: "2026-08-24"
+  sha256: 33095dc389f50702597ed84cfa77c66e9b635ca9050010788ebf10de6055ce34
+area: backend
+hint: fix
+grading: tests
+fixes:
+  - repository: plane
+    pull: 9763
+    merged: "2026-09-07"
+    commit: 1fec307f91003df96351557af32ce87891a3678a
+    source_files:
+      - apps/api/plane/api/views/issue.py
+      - apps/api/plane/app/views/issue/link.py
+    test_files:
+      - apps/api/plane/tests/unit/views/test_issue_link.py
+    applies_on_base: clean
+validated: false
+notes: >-
+  The report has Cause and Suggested fix sections.

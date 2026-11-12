@@ -1,0 +1,25 @@
+id: saleor-17899
+status: selected
+project: saleor
+issue:
+  upstream: saleor/saleor
+  number: 17899
+  title: "Bug: Internal Server Error during `productVariantBulkUpdate`"
+  author: KarolJagodzinski
+  opened: "2025-06-30"
+  sha256: 12a7fbf36d4b4b4e5e715bb7c4d0875d35a81d0b37cda291a26af2167c514302
+area: api
+hint: symptom
+grading: tests
+fixes:
+  - repository: saleor
+    pull: 19355
+    merged: "2026-07-30"
+    commit: 54b8326112fae64f344e710be700dd1965becd4f
+    source_files:
+      - saleor/graphql/product/bulk_mutations/product_variant_bulk_create.py
+      - saleor/graphql/product/bulk_mutations/product_variant_bulk_update.py
+    test_files:
+      - saleor/graphql/product/tests/mutations/test_product_variant_bulk_update.py
+    applies_on_base: clean
+validated: false

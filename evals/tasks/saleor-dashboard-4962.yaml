@@ -1,0 +1,26 @@
+id: saleor-dashboard-4962
+status: selected
+project: saleor
+issue:
+  upstream: saleor/saleor-dashboard
+  number: 4962
+  title: "[Bug]: Discount Rule Reward Value Decimal Not Supported"
+  author: simon-online
+  opened: "2024-06-13"
+  sha256: 4f735dcbc93ef6c8ab848e562a7428f2b48e7f53423f8e3f7c02b49e647e7efe
+area: frontend
+hint: symptom
+grading: tests
+fixes:
+  - repository: saleor-dashboard
+    pull: 6860
+    merged: "2026-08-24"
+    commit: 408bec4285b5eddf83da056e2ae97f7df85a076f
+    source_files:
+      - src/discounts/components/DiscountRules/componenets/RuleForm/components/RuleRewardValue/RuleRewardValue.tsx
+      - src/discounts/components/DiscountRules/componenets/RuleFormModal/validationSchema.ts
+    test_files:
+      - src/discounts/components/DiscountRules/componenets/RuleForm/components/RuleRewardValue/RuleRewardValue.test.tsx
+      - src/discounts/components/DiscountRules/componenets/RuleFormModal/validationSchema.test.ts
+    applies_on_base: clean
+validated: false

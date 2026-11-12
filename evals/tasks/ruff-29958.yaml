@@ -1,0 +1,32 @@
+id: ruff-29958
+status: candidate
+project: ruff
+issue:
+  upstream: astral-sh/ruff
+  number: 29958
+  title: "[Panic] ruff format --check crashes on files starting with a UTF-8 BOM"
+  author: jjgouveia
+  opened: "2026-11-03"
+  sha256: ec63070017e7b3bfceeb65656daf6c8719c109fd2bdf9df199891992a0e8ed13
+area: cli
+hint: location
+grading: tests
+fixes:
+  - repository: ruff
+    pull: 30017
+    merged: "2026-11-05"
+    commit: 818a60839912b332879b59e079bc3fcbce4a83d2
+    source_files:
+      - crates/ruff_db/src/diagnostic/render.rs
+      - crates/ruff_db/src/diagnostic/render/full.rs
+      - crates/ruff_text_size/src/range.rs
+      - hawk.toml
+    test_files:
+      - crates/ruff/tests/cli/format.rs
+    applies_on_base: conflict
+    conflicts:
+      - hawk.toml
+validated: false
+notes: >-
+  A panic; the report's stack trace names the renderer file. The test is a CLI test. The
+  conflict is in hawk.toml, a lint allowlist, and does not matter.

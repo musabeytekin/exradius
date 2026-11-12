@@ -1,0 +1,33 @@
+id: outline-14354
+status: selected
+project: outline
+issue:
+  upstream: outline/outline
+  number: 14354
+  title: "Export fails when the exported name is long"
+  author: tommoor
+  opened: "2026-10-27"
+  sha256: 9784bd3bc4d8d0b70bbcb3c07cbf24a3dd7281c9b3edf7db9536348c3d90bbc9
+area: backend
+hint: fix
+grading: tests+review
+fixes:
+  - repository: outline
+    pull: 14362
+    merged: "2026-10-27"
+    commit: 809fc0d86d2ab6e713608a429f6921e1b1e78fc7
+    source_files:
+      - server/migrations/20261026120000-increase-file-operations-key-length.js
+      - server/models/FileOperation.ts
+    test_files:
+      - server/models/FileOperation.test.ts
+    applies_on_base: clean
+runtime: >-
+  An export of an item with a long name, to its end: the worker, the object store and the
+  database, whose update fails.
+validated: false
+notes: >-
+  Written by the maintainer, with Cause and Proposed fix sections that offer two fixes;
+  upstream did both. The test fixes the name at 100 characters, upstream's number: a run that
+  fails only on that is reviewed. Upstream also widened both columns in a migration, and
+  whether the agent's migration runs is seen only against the database.

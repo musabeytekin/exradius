@@ -1,0 +1,34 @@
+id: home-assistant-core-186743
+status: candidate
+project: home-assistant
+issue:
+  upstream: home-assistant/core
+  number: 186743
+  title: "Startup blocked for ~130 s in automation setup: \"Error priming condition durations from history\" with purpose-specific conditions using \"for at least\""
+  author: oPixelHero
+  opened: "2026-10-15"
+  sha256: bdaf9d0c6c0f41fd63b2176216922a4af4a2eba660768f0bd2507e1c848c37c5
+area: backend
+hint: symptom
+grading: tests
+fixes:
+  - repository: core
+    pull: 187612
+    merged: "2026-10-21"
+    commit: a96f02d4408ed8369901362d5bc52bde9be450b6
+    source_files:
+      - homeassistant/components/recorder/core.py
+      - homeassistant/helpers/condition/entity_condition.py
+    test_files:
+      - tests/components/recorder/test_init.py
+      - tests/helpers/test_condition.py
+    applies_on_base: conflict
+    conflicts:
+      - tests/components/recorder/test_init.py
+      - tests/helpers/test_condition.py
+runtime: >-
+  Home Assistant, with a condition that relies on recorder history: the startup that hangs.
+validated: false
+notes: >-
+  The hardest in the set: a startup deadlock in the condition helpers, 400 lines upstream. Both
+  test files changed after the base: take only this fix's added cases.

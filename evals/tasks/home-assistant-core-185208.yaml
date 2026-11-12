@@ -1,0 +1,26 @@
+id: home-assistant-core-185208
+status: reserve
+project: home-assistant
+issue:
+  upstream: home-assistant/core
+  number: 185208
+  title: "Google Cast: AttributeError in new_connection_status when mz_mgr is None"
+  author: minimicro34
+  opened: "2026-10-09"
+  sha256: c94c4dc4275188c8ade579ff50439070674ce000d149021e5390de90d4838a1d
+area: backend
+hint: location
+grading: tests
+fixes:
+  - repository: core
+    pull: 185219
+    merged: "2026-10-11"
+    commit: 492a14fe5fd4f9102f4b40c57b9004df5501bfe7
+    source_files:
+      - homeassistant/components/cast/helpers.py
+      - homeassistant/components/cast/media_player.py
+    test_files:
+      - tests/components/cast/test_helpers.py
+      - tests/components/cast/test_media_player.py
+    applies_on_base: clean
+validated: false

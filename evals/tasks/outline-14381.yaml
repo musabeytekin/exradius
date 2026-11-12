@@ -1,0 +1,28 @@
+id: outline-14381
+status: reserve
+project: outline
+issue:
+  upstream: outline/outline
+  number: 14381
+  title: "Up/Down arrow keys can move the cursor into code block line numbers"
+  author: YiPrograms
+  opened: "2026-10-28"
+  sha256: a3ab67101aae89e21301cb90f5498ad4023cad126e6f673838ad9481ee58665b
+area: editor
+hint: symptom
+grading: review
+fixes:
+  - repository: outline
+    pull: 14388
+    merged: "2026-10-29"
+    commit: 77c7521d3b28409f214ee2eada13a1730378a73d
+    source_files:
+      - shared/editor/commands/codeFence.ts
+      - shared/editor/nodes/CodeFence.ts
+      - shared/editor/plugins/CodeHighlightingPlugin.ts
+    test_files:
+      - shared/editor/commands/codeFence.test.ts
+    applies_on_base: clean
+validated: false
+notes: >-
+  The upstream tests call a command the fix introduced.

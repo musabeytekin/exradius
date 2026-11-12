@@ -1,0 +1,31 @@
+id: keycloak-54455
+status: candidate
+project: keycloak
+issue:
+  upstream: keycloak/keycloak
+  number: 54455
+  title: "kc.sh build selects extensions from previously persisted features, not the new --features"
+  author: ibmchas
+  opened: "2026-10-29"
+  sha256: bf1f39fe756228c8c9b2e2d61b9ad1f666a3a7dcb4ca6cc4dd983c0d4ff91b66
+area: cli
+hint: symptom
+grading: tests
+fixes:
+  - repository: keycloak
+    pull: 54494
+    merged: "2026-11-02"
+    commit: a3d75dc6a7c5a4c56eb4f48ea3e52e340cb030f7
+    source_files:
+      - quarkus/runtime/src/main/java/org/keycloak/quarkus/runtime/configuration/mappers/PropertyMappers.java
+    test_files:
+      - quarkus/runtime/src/test/java/org/keycloak/quarkus/runtime/cli/PicocliTest.java
+    applies_on_base: clean
+runtime: >-
+  The server distribution, built; `kc.sh build` twice with different features; then the server,
+  and a call to the Admin API v2.
+validated: false
+notes: >-
+  The report reproduces it with a Dockerfile on the released image, which the workstation
+  cannot build; the same steps need the distribution built from source. The test is a CLI unit
+  test (PicocliTest) and starts nothing.

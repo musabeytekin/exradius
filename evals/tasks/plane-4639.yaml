@@ -1,0 +1,30 @@
+id: plane-4639
+status: reserve
+project: plane
+issue:
+  upstream: makeplane/plane
+  number: 4639
+  title: "[bug]: Plane API: expand query parameter does not work with \"updated_by\" on \"projects\""
+  author: Zebnastien
+  opened: "2024-05-29"
+  sha256: d799c4efa157004ac39b481d288005fb6d36319bc330fdc06908b11d55652014
+area: api
+hint: symptom
+grading: tests
+fixes:
+  - repository: plane
+    pull: 9717
+    merged: "2026-09-29"
+    commit: 4d3767910d6a797444afa571957b223fc75abcb8
+    source_files:
+      - apps/api/plane/api/serializers/base.py
+      - apps/api/plane/app/serializers/base.py
+      - apps/api/plane/utils/openapi/parameters.py
+    test_files:
+      - apps/api/plane/tests/contract/api/conftest.py
+      - apps/api/plane/tests/contract/api/test_projects.py
+      - apps/api/plane/tests/unit/serializers/test_expand.py
+    applies_on_base: clean
+validated: false
+notes: >-
+  The largest change in the Plane pool (six files).

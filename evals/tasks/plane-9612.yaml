@@ -1,0 +1,26 @@
+id: plane-9612
+status: selected
+project: plane
+issue:
+  upstream: makeplane/plane
+  number: 9612
+  title: "[bug]: Sub-item is not showing in ticket in local"
+  author: abhigk
+  opened: "2026-08-14"
+  sha256: 75f5b5902c5ab6de5c9c2c1a97e74bebd9845d55710035e67d908e9b6c62e9dc
+area: frontend
+hint: location
+grading: review
+fixes:
+  - repository: plane
+    pull: 9804
+    merged: "2026-09-17"
+    commit: b4940447688e40f2b888f2f175821d160f82e462
+    source_files:
+      - apps/web/core/components/issues/issue-detail-widgets/sub-issues/content.tsx
+    test_files: []
+    applies_on_base: clean
+validated: false
+notes: >-
+  Upstream added no test: graded by review against the upstream diff. Reproducing it needs a
+  browser, which the workstation does not have.

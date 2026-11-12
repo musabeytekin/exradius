@@ -1,0 +1,28 @@
+id: saleor-dashboard-3982
+status: reserve
+project: saleor
+issue:
+  upstream: saleor/saleor-dashboard
+  number: 3982
+  title: "[Bug]: Errors are not cleared after add shipping in Order draft details"
+  author: poulch
+  opened: "2023-07-24"
+  sha256: c17d112e2f7a55923a5a5980a145c958d4ac3a3cc4096c60afa0d8c6eb9b9377
+area: frontend
+hint: symptom
+grading: review
+fixes:
+  - repository: saleor-dashboard
+    pull: 6939
+    merged: "2026-10-02"
+    commit: f9093f26918a1e1e508b851e07e47594606491df
+    source_files:
+      - src/orders/views/OrderDetails/OrderDraftDetails/getUnresolvedFinalizeErrors.ts
+      - src/orders/views/OrderDetails/OrderDraftDetails/index.tsx
+    test_files:
+      - src/orders/views/OrderDetails/OrderDraftDetails/getUnresolvedFinalizeErrors.test.ts
+    applies_on_base: clean
+validated: false
+notes: >-
+  The upstream tests cover a module the fix introduced (getUnresolvedFinalizeErrors), so they
+  cannot grade another implementation.

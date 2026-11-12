@@ -1,0 +1,33 @@
+id: outline-14348
+status: selected
+project: outline
+issue:
+  upstream: outline/outline
+  number: 14348
+  title: "Slack says a document has been \"updated\" when a comment is added"
+  author: jdudley1123
+  opened: "2026-10-26"
+  sha256: 97a44ce790d81b712cb7220e30f9fef0ed66055e463e0e1a8ae63bf2eaa7e69d
+area: backend
+hint: symptom
+grading: tests+review
+fixes:
+  - repository: outline
+    pull: 14363
+    merged: "2026-10-27"
+    commit: 7f8231f6aad264958b7c92cbc19e3a25d4626302
+    source_files:
+      - server/models/helpers/DocumentHelper.tsx
+      - server/queues/processors/RevisionsProcessor.ts
+      - shared/utils/ProsemirrorHelper.ts
+    test_files:
+      - server/models/helpers/DocumentHelper.test.ts
+      - server/queues/processors/RevisionsProcessor.test.ts
+      - shared/utils/ProsemirrorHelper.test.ts
+    applies_on_base: clean
+validated: false
+notes: >-
+  The vague one. The reporter expects the Slack message to say 'commented on'; upstream instead
+  stopped creating a revision for comment-only changes. The hidden tests encode upstream's
+  choice, so a failing run is also reviewed. DocumentHelper.test.ts covers a helper the fix
+  introduced; only RevisionsProcessor.test.ts can be fail-to-pass.

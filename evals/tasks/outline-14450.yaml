@@ -1,0 +1,27 @@
+id: outline-14450
+status: reserve
+project: outline
+issue:
+  upstream: outline/outline
+  number: 14450
+  title: "Copied images retain expiring signed URLs in document content and eventually fail to load"
+  author: EZN7L2C3
+  opened: "2026-11-02"
+  sha256: 3465ee248c85164637a8e76a133cab61fc6a6ce7e9c513a187958ae2df3818f7
+area: frontend
+hint: fix
+grading: review
+fixes:
+  - repository: outline
+    pull: 14451
+    merged: "2026-11-03"
+    commit: 5901b1213c14080d6703f457322a250943abf9a7
+    source_files:
+      - app/editor/extensions/PasteHandler.tsx
+      - shared/utils/urls.ts
+    test_files:
+      - shared/utils/urls.test.ts
+    applies_on_base: clean
+validated: false
+notes: >-
+  The upstream tests cover helpers the fix introduced in shared/utils/urls.ts.

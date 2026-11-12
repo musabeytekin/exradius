@@ -1,0 +1,24 @@
+id: saleor-dashboard-3061
+status: reserve
+project: saleor
+issue:
+  upstream: saleor/saleor-dashboard
+  number: 3061
+  title: "[Feature] Remove doubled warning in order details"
+  author: Droniu
+  opened: "2023-01-27"
+  sha256: b51950ff010836a23a47f77b278225c8475b73d1e4570fa430764eec8f5e5fa6
+area: frontend
+hint: symptom
+grading: tests
+fixes:
+  - repository: saleor-dashboard
+    pull: 6941
+    merged: "2026-10-02"
+    commit: e215f8964034fc5a6c202cc6677ef2eb4fb6ff5b
+    source_files:
+      - src/orders/components/OrderDraftPage/OrderDraftAlert.tsx
+    test_files:
+      - src/orders/components/OrderDraftPage/OrderDraftAlert.test.tsx
+    applies_on_base: clean
+validated: false

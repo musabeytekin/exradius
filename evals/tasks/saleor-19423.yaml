@@ -1,0 +1,26 @@
+id: saleor-19423
+status: reserve
+project: saleor
+issue:
+  upstream: saleor/saleor
+  number: 19423
+  title: "Bug: account can be reactivated using accountConfirm mutation"
+  author: NyanKiyoshi
+  opened: "2026-07-06"
+  sha256: e06a4354df673c85355acbc1924a637ca29e488bf518b163741e14ded298d208
+area: api
+hint: fix
+grading: tests
+fixes:
+  - repository: saleor
+    pull: 19459
+    merged: "2026-07-13"
+    commit: 89801c0ba4d86fa4483c056c0e3db83a6b6de86a
+    source_files:
+      - saleor/graphql/account/mutations/account/confirm_account.py
+    test_files:
+      - saleor/graphql/account/tests/mutations/account/test_confirm_account.py
+    applies_on_base: clean
+validated: false
+notes: >-
+  Written by a maintainer; says what to change.

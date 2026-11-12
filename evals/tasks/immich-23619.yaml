@@ -1,0 +1,29 @@
+id: immich-23619
+status: candidate
+project: immich
+issue:
+  upstream: immich-app/immich
+  number: 23619
+  title: "External library exclusion patterns with multiple extensions not work"
+  author: hktkzyx
+  opened: "2025-11-05"
+  sha256: 26d8447c5fe80dd38cdb33537b9f5e5f5e5234572822346006a54e903d5ff919
+area: backend
+hint: symptom
+grading: tests
+fixes:
+  - repository: immich
+    pull: 31970
+    merged: "2026-10-01"
+    commit: de6dcf669c498192ce73b181ec6d5de5d844b03a
+    source_files:
+      - server/src/queries/asset.repository.sql
+      - server/src/repositories/asset.repository.ts
+      - server/src/services/library.service.ts
+    test_files:
+      - server/test/medium/specs/services/library.service.spec.ts
+    applies_on_base: clean
+validated: false
+notes: >-
+  The only test upstream added is a medium test (server/test/medium), which needs Docker: find
+  out at validation whether it can run, otherwise review.

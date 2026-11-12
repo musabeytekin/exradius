@@ -1,0 +1,32 @@
+id: gitea-40037
+status: reserve
+project: gitea
+issue:
+  upstream: go-gitea/gitea
+  number: 40037
+  title: "API push-mirror delete leaves the mirror's git remote (with credentials) in the repo config"
+  author: ld-873233
+  opened: "2026-10-26"
+  sha256: 3f2256349aa1804a5ab5e1a750cf4fe52dc787d3625e13ad5e7720dbc3246931
+area: api
+hint: location
+grading: tests
+fixes:
+  - repository: gitea
+    pull: 40049
+    merged: "2026-10-31"
+    commit: a4d17117775e8a1a90c48faad607d6b1793b71ba
+    source_files:
+      - models/repo/mirror.go
+      - models/repo/pushmirror.go
+      - routers/api/v1/repo/mirror.go
+      - routers/web/repo/setting/setting.go
+      - services/mirror/mirror_push.go
+    test_files:
+      - tests/integration/mirror_push_test.go
+    applies_on_base: conflict
+    conflicts:
+      - tests/integration/mirror_push_test.go
+validated: false
+notes: >-
+  The integration test file changed after the base: take only this fix's added cases.

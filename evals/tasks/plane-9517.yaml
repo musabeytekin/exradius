@@ -1,0 +1,27 @@
+id: plane-9517
+status: selected
+project: plane
+issue:
+  upstream: makeplane/plane
+  number: 9517
+  title: "🐛 Bug: Work item create/update via API silently drops assignees who aren't active project members (returns 200/201, no error)"
+  author: cosmic-fire-eng
+  opened: "2026-07-31"
+  sha256: 35ca4496b68ee607b6e45ca92c71742263fd4360aa544c0629310544d01f8f83
+area: api
+hint: location
+grading: tests
+fixes:
+  - repository: plane
+    pull: 9526
+    merged: "2026-09-02"
+    commit: aacfaac7532e4697f9ac3cbb512e6dde6c42f5da
+    source_files:
+      - apps/api/plane/api/serializers/issue.py
+    test_files:
+      - apps/api/plane/tests/contract/api/test_issue_assignee_label_validation.py
+      - apps/api/plane/tests/unit/serializers/test_issue_serializer_api.py
+    applies_on_base: clean
+validated: false
+notes: >-
+  Contract and unit tests; the contract tests use the postgres service.

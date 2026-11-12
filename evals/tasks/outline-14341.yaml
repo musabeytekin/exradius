@@ -1,0 +1,25 @@
+id: outline-14341
+status: selected
+project: outline
+issue:
+  upstream: outline/outline
+  number: 14341
+  title: "fix(api): groups.add_user silently demotes group admin to member when permission is omitted"
+  author: KALVIUM23
+  opened: "2026-10-26"
+  sha256: e077ccf2a582d86935981da691e867085a3b12acdb2aa54faacbaa991c62754a
+area: api
+hint: location
+grading: tests
+fixes:
+  - repository: outline
+    pull: 14343
+    merged: "2026-10-26"
+    commit: 670410b2365a08b95eb39734cf9447f8b1c63f92
+    source_files:
+      - server/routes/api/groups/groups.ts
+      - server/routes/api/groups/schema.ts
+    test_files:
+      - server/routes/api/groups/groups.test.ts
+    applies_on_base: clean
+validated: false

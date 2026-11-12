@@ -1,0 +1,30 @@
+id: home-assistant-core-182861
+status: candidate
+project: home-assistant
+issue:
+  upstream: home-assistant/core
+  number: 182861
+  title: "http: every unauthenticated request returns 500 instead of 401 when `gethostbyaddr()` on the client IP raises `UnicodeDecodeError`"
+  author: Scarlet-Raine
+  opened: "2026-09-21"
+  sha256: f78df05c54d4494119afa7b5cf5a34049a21065a41dd52792e89526a2ae9e2ed
+area: api
+hint: location
+grading: tests
+fixes:
+  - repository: core
+    pull: 182919
+    merged: "2026-10-02"
+    commit: 5aef226233c8741f0c40a2294e737026678b5f26
+    source_files:
+      - homeassistant/components/http/ban.py
+    test_files:
+      - tests/components/http/test_ban.py
+    applies_on_base: clean
+runtime: >-
+  Home Assistant, and a request without a token from an address whose reverse lookup does not
+  decode.
+validated: false
+notes: >-
+  The report has the traceback. A one-line fix; the test patches the lookup, the report needs a
+  resolver that answers with bytes that do not decode.

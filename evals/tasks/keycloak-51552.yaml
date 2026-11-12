@@ -1,0 +1,29 @@
+id: keycloak-51552
+status: candidate
+project: keycloak
+issue:
+  upstream: keycloak/keycloak
+  number: 51552
+  title: "Refresh Token Introspection"
+  author: jlangy
+  opened: "2026-08-08"
+  sha256: 67a1901db80c0992a7d85c8a705d0e99545852c65569c80aff2500c8648a971b
+area: api
+hint: symptom
+grading: tests
+fixes:
+  - repository: keycloak
+    pull: 53012
+    merged: "2026-09-22"
+    commit: ea83ab966a95113135d288a6fa12ca6ca2eb8f7e
+    source_files:
+      - services/src/main/java/org/keycloak/protocol/oidc/RefreshTokenIntrospectionProvider.java
+      - services/src/main/java/org/keycloak/protocol/oidc/RefreshTokenIntrospectionProviderFactory.java
+      - services/src/main/java/org/keycloak/protocol/oidc/endpoints/TokenIntrospectionEndpoint.java
+    test_files:
+      - tests/base/src/test/java/org/keycloak/tests/oauth/RefreshTokenIntrospectionTest.java
+      - testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/oauth/TokenIntrospectionTest.java
+    applies_on_base: clean
+validated: false
+notes: >-
+  A regression report. The test is in tests/base.

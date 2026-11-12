@@ -1,0 +1,26 @@
+id: ruff-20179
+status: reserve
+project: ruff
+issue:
+  upstream: astral-sh/ruff
+  number: 20179
+  title: "A001 misses some attributes referenced within the class scope"
+  author: dscorbett
+  opened: "2025-08-31"
+  sha256: bcba063a2eaaf7000ac7223e225e6f51d192d5dbb01258022be634ec7895da30
+area: cli
+hint: symptom
+grading: tests+review
+fixes:
+  - repository: ruff
+    pull: 29076
+    merged: "2026-10-02"
+    commit: b4c75cd76ca9ff886a23fe53da75286e4fe56d8f
+    source_files:
+      - crates/ruff_linter/src/checkers/ast/analyze/expression.rs
+      - crates/ruff_linter/src/rules/flake8_builtins/rules/builtin_variable_shadowing.rs
+    test_files:
+      - crates/ruff_linter/resources/test/fixtures/flake8_builtins/A001.py
+      - crates/ruff_linter/src/rules/flake8_builtins/snapshots/ruff_linter__rules__flake8_builtins__tests__builtin-variable-shadowing_A001.py.snap
+    applies_on_base: clean
+validated: false

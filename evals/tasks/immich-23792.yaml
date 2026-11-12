@@ -1,0 +1,29 @@
+id: immich-23792
+status: candidate
+project: immich
+issue:
+  upstream: immich-app/immich
+  number: 23792
+  title: "Bulk removal of tags does not update the XMP sidecar files."
+  author: limes007
+  opened: "2025-11-11"
+  sha256: b59dbd55f729af8a5a7c58fbd57645ff08f0f7d6204c555696dfc058176b4ee0
+area: backend
+hint: symptom
+grading: tests
+fixes:
+  - repository: immich
+    pull: 31425
+    merged: "2026-09-28"
+    commit: 54987c764a393d5aabace1ccfb2faeea0492f812
+    source_files:
+      - server/src/queries/tag.repository.sql
+      - server/src/repositories/tag.repository.ts
+      - server/src/services/tag.service.ts
+    test_files:
+      - server/src/services/tag.service.spec.ts
+      - server/test/medium/specs/services/tag.service.spec.ts
+    applies_on_base: clean
+validated: false
+notes: >-
+  Medium tests as above; grade with tag.service.spec.ts under server/src.

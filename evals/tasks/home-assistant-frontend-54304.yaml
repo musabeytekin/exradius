@@ -1,0 +1,38 @@
+id: home-assistant-frontend-54304
+status: candidate
+project: home-assistant
+issue:
+  upstream: home-assistant/frontend
+  number: 54304
+  title: "ZHA reconfigure dialog throws uncaught TypeError if closed before device reconfiguration completes"
+  author: nokside
+  opened: "2026-09-21"
+  sha256: 166deff13af9a43c5c6e5b8e3a5e3f77f5e8a388ca34f3fe1b7726a9e577f1c0
+area: cross-repo
+hint: fix
+grading: tests+review
+fixes:
+  - repository: core
+    pull: 184812
+    merged: "2026-10-08"
+    commit: cb9695cbedfffdd021e89501c65d162d021b735f
+    source_files:
+      - homeassistant/components/zha/websocket_api.py
+    test_files:
+      - tests/components/zha/test_websocket_api.py
+    applies_on_base: clean
+  - repository: frontend
+    pull: 54684
+    merged: "2026-10-08"
+    commit: f0a67727a26c7cd58678d233b3c2cb97a24b148c
+    source_files:
+      - src/data/zha.ts
+      - src/panels/config/integrations/integration-panels/zha/dialog-zha-reconfigure-device.ts
+    test_files: []
+    applies_on_base: clean
+validated: false
+notes: >-
+  The only task with a fix in two repositories. Reported against the frontend; the root cause
+  is in core, which never answered the subscription, and the frontend was also made robust.
+  Only the core fix has a test; the frontend part is reviewed. The report has a proposed fix
+  for the frontend side.

@@ -1,0 +1,29 @@
+id: home-assistant-core-184125
+status: candidate
+project: home-assistant
+issue:
+  upstream: home-assistant/core
+  number: 184125
+  title: "The Signal Messenger integration fails if the CLI service is unavailable."
+  author: cyfra80
+  opened: "2026-10-03"
+  sha256: f7048515012fb35415203a6315508a8bdda678ee9a1b36d839129f5402257371
+area: backend
+hint: symptom
+grading: tests
+fixes:
+  - repository: core
+    pull: 185225
+    merged: "2026-10-09"
+    commit: 5061866b8fe32431124a5f903ce5818626ecf288
+    source_files:
+      - homeassistant/components/signal_messenger/notify.py
+    test_files:
+      - tests/components/signal_messenger/conftest.py
+      - tests/components/signal_messenger/test_notify.py
+    applies_on_base: clean
+runtime: >-
+  Home Assistant, with the integration configured and nothing listening at its URL.
+validated: false
+notes: >-
+  Reproducing it needs no Signal service, only its absence. The tests mock the client.

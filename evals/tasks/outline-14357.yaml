@@ -1,0 +1,28 @@
+id: outline-14357
+status: selected
+project: outline
+issue:
+  upstream: outline/outline
+  number: 14357
+  title: "Invalid import files are reported as unexpected errors"
+  author: tommoor
+  opened: "2026-10-27"
+  sha256: 4f9d55adb8aaf51f0cfd53bceca75d5318844c3b876cd46c46ab1f710c8688f3
+area: backend
+hint: fix
+grading: tests
+fixes:
+  - repository: outline
+    pull: 14361
+    merged: "2026-10-27"
+    commit: 96bb9dce653d7d45d507af41c77ed0727b25236e
+    source_files:
+      - server/converters/DocxConverter.ts
+      - server/utils/ZipHelper.ts
+    test_files:
+      - server/converters/DocumentConverter.test.ts
+      - server/utils/ZipHelper.test.ts
+    applies_on_base: clean
+validated: false
+notes: >-
+  Written by the maintainer, with a Proposed fix section.
