@@ -10,3 +10,10 @@ Element.prototype.scrollIntoView = function scrollIntoView() {};
 // Radix Select uses pointer capture, which jsdom lacks.
 Element.prototype.hasPointerCapture = function hasPointerCapture() { return false; };
 Element.prototype.releasePointerCapture = function releasePointerCapture() {};
+
+// Radix Checkbox measures itself with ResizeObserver, which jsdom lacks.
+globalThis.ResizeObserver ??= class ResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};

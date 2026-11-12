@@ -17,7 +17,8 @@ export function SecretsTab({ project }: { project: Project }) {
   const storeName = storeNameOf(project);
   const stores = useStores();
   const store = storeName ? stores.data?.find((s) => s.name === storeName) : undefined;
-  const keys = useStoreKeys(store?.id);
+  // Not asked while the store's backend is known to be out of reach (as on the store's page).
+  const keys = useStoreKeys(store?.error ? null : store?.id);
 
   if (!storeName) {
     const req = requiredKeys(project);

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { HAPPY, MISSING_KEYS, UNREADABLE, WITH_ERRORS } from "@/test/projectFixtures";
+import {
+  HAPPY, MISSING_KEYS, STORE_NOT_ALLOWED, STORE_UNREACHABLE, UNREACHABLE_REASON, UNREADABLE, WITH_ERRORS,
+} from "@/test/projectFixtures";
 import { agentSlugsOf, agentsOf, entries, missingKeys, projectHealth, requiredKeys, servicesOf, shortCommit, storeNameOf } from "./projectConfig";
 import type { Project } from "./types";
 
@@ -44,6 +46,64 @@ describe("project health", () => {
     const bare: Project = { ...HAPPY, required_keys: undefined, missing_keys: undefined, runnable: false, reason: "secret store x does not exist" };
     expect(projectHealth(bare)).toMatchObject({ health: "missing_secrets", detail: "secret store x does not exist" });
     expect(projectHealth({ ...bare, runnable: undefined }).health).toBe("ok");
+  });
+});
+
+describe("store health states", () => {
+  const ALL = ["GITHUB_TOKEN", "DB_PASSWORD", "DOCS_TOKEN", "TRACKER_TOKEN"];
+
+  it("is ready when the store allows the project and holds every key", () => {
+    expect(projectHealth(HAPPY, ALL)).toMatchObject({ health: "ok", tone: "ok", detail: null });
+    expect(projectHealth({ ...HAPPY, store_allowed: true })).toMatchObject({ health: "ok" });
+  });
+
+  it("reports missing keys by name against the store's live key list", () => {
+    expect(projectHealth(HAPPY, ["GITHUB_TOKEN", "DOCS_TOKEN"])).toMatchObject({
+      health: "missing_secrets", tone: "warn", label: "2 missing secrets",
+      detail: "Missing DB_PASSWORD, TRACKER_TOKEN in store bank-platform.",
+    });
+  });
+
+  it("reports a store that does not allow the project, not its keys", () => {
+    const h = projectHealth(STORE_NOT_ALLOWED);
+    expect(h).toMatchObject({ health: "store_not_allowed", tone: "err", label: "store not allowed" });
+    expect(h.detail).toBe("Secret store bank-platform is not allowed for this project.");
+    // The store's own keys say nothing to a project it does not allow.
+    expect(projectHealth(STORE_NOT_ALLOWED, ALL).health).toBe("store_not_allowed");
+    expect(projectHealth(STORE_NOT_ALLOWED, []).health).toBe("store_not_allowed");
+  });
+
+  it("does not call a store that does not exist not allowed", () => {
+    expect(projectHealth({ ...STORE_NOT_ALLOWED, store_exists: false }).health).toBe("missing_secrets");
+    expect(projectHealth(STORE_NOT_ALLOWED, null).detail).toBe("Secret store bank-platform does not exist.");
+  });
+
+  it("is ready when a store that does not allow the project is not needed", () => {
+    const none: Project = { ...STORE_NOT_ALLOWED, required_keys: [], missing_keys: [], runnable: true, reason: null, health: "ok" };
+    expect(projectHealth(none).health).toBe("ok");
+  });
+
+  it("reports an unreachable store as unreachable with its reason, never as missing keys", () => {
+    const h = projectHealth(STORE_UNREACHABLE);
+    expect(h).toMatchObject({ health: "store_unreachable", tone: "warn", label: "store unreachable", detail: UNREACHABLE_REASON });
+    expect(h.label).not.toMatch(/missing/);
+    expect(h.detail).not.toMatch(/missing/i);
+    // Without store_error, the reason the API gave.
+    expect(projectHealth({ ...STORE_UNREACHABLE, store_error: null }).detail).toBe(UNREACHABLE_REASON);
+  });
+
+  it("uses the store's key list once it answers again", () => {
+    expect(projectHealth(STORE_UNREACHABLE, ALL).health).toBe("ok");
+    expect(projectHealth(STORE_UNREACHABLE, ["GITHUB_TOKEN", "DOCS_TOKEN", "TRACKER_TOKEN"])).toMatchObject({
+      health: "missing_secrets", detail: "Missing DB_PASSWORD in store bank-platform.",
+    });
+  });
+
+  it("orders the states: unreadable, config errors, no store, not allowed, unreachable, missing", () => {
+    expect(projectHealth({ ...STORE_NOT_ALLOWED, commit: null }).health).toBe("unreadable");
+    expect(projectHealth({ ...STORE_UNREACHABLE, errors: ["agents: required"] }).health).toBe("config_errors");
+    expect(projectHealth({ ...STORE_UNREACHABLE, store_allowed: false }).health).toBe("store_not_allowed");
+    expect(projectHealth({ ...STORE_UNREACHABLE, store_exists: false }).health).toBe("missing_secrets");
   });
 });
 

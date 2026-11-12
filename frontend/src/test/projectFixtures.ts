@@ -81,3 +81,25 @@ export const UNREADABLE: Project = {
   errors: ["fatal: repository 'https://github.com/acme/missing.git/' not found"], warnings: [],
   store: null, store_exists: false, required_keys: [], missing_keys: [], agents: [], config: null, raw: null,
 };
+
+/** A store that exists but does not allow the project (docs/config-repo.md §7.1). */
+export const STORE_NOT_ALLOWED: Project = {
+  ...HAPPY,
+  id: "p5",
+  health: "store_not_allowed", runnable: false, reason: "secret store bank-platform is not allowed for this project",
+  store_allowed: false,
+  required_keys: REQUIRED.map((name) => ({ name, present: false })),
+  missing_keys: REQUIRED,
+};
+
+export const UNREACHABLE_REASON = "secret store bank-platform is unreachable: connection refused";
+
+/** An external store whose backend could not be asked (§7.3): keys neither present nor missing. */
+export const STORE_UNREACHABLE: Project = {
+  ...HAPPY,
+  id: "p6",
+  health: "store_unreachable", runnable: false, reason: UNREACHABLE_REASON,
+  store_error: UNREACHABLE_REASON,
+  required_keys: REQUIRED.map((name) => ({ name, present: null })),
+  missing_keys: [],
+};
