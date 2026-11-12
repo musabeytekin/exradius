@@ -198,8 +198,9 @@ Exradius installed:
 
 The flags mirror the operator's pod builder (`operator/internal/podspec/podspec.go` in the
 Exradius repository); a comment in both places names the other, and changing one means
-changing the other. The check does not cover the runtime bundle, providers, the egress
-proxy and its allowlist (phase 4), or pushes, which only a real run exercises.
+changing the other. The check does not cover the runtime bundle, providers or pushes,
+which only a real run exercises. Since skill 0.4.0 it stands in for the egress proxy
+(§2.7).
 
 ### 2.5 Update mode
 
@@ -213,3 +214,46 @@ on every run, so nothing else is needed.
 
 A "Set up with AI" button in the panel (would need Docker inside a run container);
 reading or writing secret values; calling the Exradius API from the skill.
+
+### 2.7 Skill 0.4.0: a setup an agent can work in
+
+Added 2026-11-12. The skill had stopped at phase 3: it did not know `network.allow`, its
+check refused the key, and it proved only what Verify proves. A config could pass both and
+leave the agent unable to add a dependency or run a test. What changed:
+
+- **The network.** `references/network.md` is the developer's account of
+  docs/kubernetes.md §11: the two phases, what needs no entry, how to find the hosts
+  (the project's registry configuration, then the check's own list), what no entry lifts
+  (private addresses, anything but HTTP, SSH remotes), tools that ignore the proxy
+  variables, private registries.
+- **The check stands in for the proxy.** The pod's containers join a Docker network
+  created with `--internal`, so nothing has a direct route out, as under NetworkPolicy. A
+  proxy container on that network and on the default bridge runs the check's own script
+  (standard library only): open in the setup phase, limited in the agent phase to
+  `network.allow`, the connections' hosts (`network.allowed_hosts`) and `--allow` hosts
+  (the install's `egress.allow`), refusing private addresses unless `--allow-private`
+  (`egress.allowPrivate`). Every container gets the variables the operator writes
+  (`proxyEnv`, `javaEnv`). Not mirrored: the reverse routes (the model, git's credential
+  route, HTTP connections), so the repositories' hosts are open in the local agent phase
+  and the Network step says when something used them; and image builds, which use
+  Docker's network.
+- **`--run '<command>'`** runs a command after setup in the workstation's conditions with
+  the agent phase's network. The skill passes the test and lint commands it is about to
+  write into `notes`, so `notes` hold only commands that worked in a run's conditions.
+  Verify does not run tests; this is the only place they are tried before a task.
+- **Connections.** The check fails when a stdio connection's command is not in the
+  workstation image. Listing tools still needs the runtime bundle and stays with Verify.
+- **Reading and writing.** CI is trusted over the README; registries, workspaces,
+  generated code, submodules and LFS are read; the skill shows what it read, inferred and
+  assumed. `notes` do not repeat the environment section; a role opens with the tickets
+  its agent takes, because routing (agent-routing.md §3) reads it. `bridges/jira.yaml` is
+  written when the developer names Jira spaces (config-repo.md §2.1).
+- **A failed Verify or task** is its own entry point, with
+  `references/verify-failures.md` by step and the rule to decide first whose problem it
+  is: the config's, the store's or the install's.
+- **Parity.** `backend/tests/test_skill_check.py` compares the check's validator, catalog
+  and host list with `schemas/project_config.py`, `catalog.py` and `network.py`, and
+  fails when a key of the schema is missing from its sample file, so a new key cannot be
+  missed again.
+- **Gone:** `--classic` and the classic-builder rules (v0.1.0), and the assumption that the
+  cluster is `amd64`.

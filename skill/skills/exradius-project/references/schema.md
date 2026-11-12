@@ -13,6 +13,8 @@ repository's URL and fills the secret store the file names.
   branch. Exradius reads the branch head every time, so a push is all an update needs.
 - Paths inside the file (`dockerfile`, `context`) are relative to the file's own
   directory and must stay inside the repository.
+- A bridge's settings for the project live next to the file, in `bridges/<name>.yaml`
+  (see "Bridge files" below). `exradius.yaml` holds Exradius's configuration only.
 
 ## The whole file
 
@@ -63,6 +65,12 @@ services:                         # default: none; next to the agent, by name on
 env:                              # environment of the setup commands and the agent
   DATABASE_URL: "postgres://app:${secret:DB_PASSWORD}@postgres:5432/app"
 
+network:                          # default: none
+  allow:                          # hosts the agent may reach besides its model, the
+    - repo.maven.apache.org       # repositories and its connections; setup reaches any host
+    - pypi.org
+    - '*.pythonhosted.org'        # quoted: a leading * is YAML alias syntax
+
 notes: |                          # default: empty; quoted to the agent as the maintainers' notes
   Run Java tests with `mvn test` in the service directory.
 
@@ -81,8 +89,8 @@ connections:                      # MCP servers agents may use; default: none
 agents:                           # required; at least one
   developer:                      # the agent's slug; tasks name it
     name: Developer               # default: the slug, capitalised
-    role: |                       # default: empty; the last part of the agent's system prompt
-      You are a software developer on this team. ...
+    role: |                       # default: empty; the last part of the agent's system prompt,
+      You are a software developer on this team. ...   # and what routing reads to pick an agent
     model: claude-sonnet-5-5      # default: the runtime's default model
     provider: main                # default: the default provider; a provider slug from the panel
     runtime: claude_code          # default and only value: claude_code
@@ -120,9 +128,13 @@ must exist in the repository, may not be absolute, use `..` or pass through a sy
 Exradius builds a Dockerfile from the committed tree of the config repository (files that
 are only local or git-ignored are not in the build), tags the image by the context's git
 tree hash, and rebuilds only when the context changes. It builds with rootless BuildKit in
-the cluster, with a layer cache in its registry; build secrets (`RUN --mount=type=secret`)
-and SSH mounts are not given. Images named with `image:` are pulled by the cluster's nodes,
-so they must be reachable from them (a private registry needs the install's pull secret).
+the cluster, with a layer cache in its registry, for the cluster's CPU architecture
+(`amd64` or `arm64`: ask the admin). Multi-stage builds, `COPY --from=<image>`, heredocs
+and cache mounts work; build secrets (`RUN --mount=type=secret`) and SSH mounts are not
+given. A build reaches any public host through the egress proxy, and no private address.
+Images named with `image:` are pulled by the cluster's nodes, so they must be reachable
+from them (a private registry needs the install's pull secret) and exist for their
+architecture.
 
 **Memory.** `resources.memory` (the workstation: the setup commands and the agent's
 session) and a service's `memory` are sizes: a number and one of `b`, `k`, `m`, `g`
@@ -156,6 +168,19 @@ links do not cross mounts, so tools that link from their store (pnpm, uv) copy i
 still no download. A cache is per project, so a
 run can only affect later runs of the same project. The paths per package manager are in
 pitfalls.md.
+
+**Network.** `network.allow` lists hosts the agent may reach: host names (`pypi.org`),
+`*.name` for every name below it (`*.pythonhosted.org`, which does not include
+`pythonhosted.org` itself), or IPv4 addresses. Not URLs, not `host:port` (every port of an
+allowed host is allowed), not a bare `*`, not `localhost` or `127.*` (the run's own
+services need no entry), each listed once. A run's requests all go through Exradius's
+egress proxy. During setup (cloning, the setup commands, image builds) it lets any public
+host through. In the agent phase it lets through only the agent's model, the project's
+repositories (git only), the agent's connections (a catalog entry's own hosts, a custom
+`url`), what the install allows for every project, and this list; anything else is a `403`
+that names the host. Private addresses are refused in every phase unless the install
+allows them. The agent's environment section states the list. What belongs on it and how
+to find the hosts: network.md.
 
 **Services.** A run's services and the agent's container share one network: each service
 is reached by its name, which points at `127.0.0.1`, and listens on the same `localhost` as
@@ -215,13 +240,61 @@ they are referenced. Secret values never appear in the agent's prompt, the panel
 credential Exradius uses for reading the config repository. `push: true` lets agents push
 with that credential; the agent is told, per repository, whether pushing is allowed. Work
 an agent does not push is lost when the task ends (Exradius reports unpushed commits but
-never commits or pushes for the agent).
+never commits or pushes for the agent). URLs must be `http(s)://`: git reaches a
+repository through the egress proxy, which adds the credential, and an SSH remote
+(`git@host:path`, `ssh://`) cannot go that way. No pod holds the credential, so
+`git remote -v` inside a run shows the proxy's route rather than the URL. Submodules and
+Git LFS objects are not fetched by the clone; a setup command does that when the project
+needs them (`git submodule update --init`, `git lfs pull`), for public ones.
 
 **Agents.** The agent's system prompt is Claude Code's preset, Exradius's operating
-rules, a generated "your environment" section (the image, repositories with branch and
-push permission, services with their non-secret settings, the notes), then `role`. Tasks
-name the project slug and the agent slug; an agent missing from the current file rejects
-the task.
+rules, a generated "your environment" section, then `role`.
+
+- The operating rules are the same for every agent of every project. They already say:
+  each folder of the project directory is a git clone; work on a branch whose name starts
+  with the task id; push to `origin` when pushing is allowed, otherwise attach a patch;
+  ask through `request_information` only what a person alone can answer; end with
+  `submit_result`; nobody is watching, so decide and act; the directory is discarded
+  afterwards.
+- The environment section is generated from the file on every run: the image, each
+  repository with its branch and whether pushing is allowed, each service with its host
+  name, ports and non-secret settings (secrets as `$NAME`), the network line, then
+  `notes` quoted as the maintainers' notes.
+- So `notes` and `role` carry only what neither of those says: `notes` what is true of
+  the project for every agent (how to run the checks, where things are, what cannot run
+  here), `role` what this agent is for and when its work is done.
+
+A task names the project and usually an agent. When it names none, Exradius picks one
+from each agent's `name`, `role` and the tools of its `connections` (as the last Verify
+listed them), so a role's first sentence must say which tickets the agent takes. An agent
+named by a task and missing from the current file rejects the task.
+
+## Bridge files
+
+A bridge connects a tracker to Exradius (it is separate software the admin installs).
+What a bridge needs to know about this project is a file of its own, next to
+`exradius.yaml`:
+
+```
+exradius.yaml
+bridges/
+  jira.yaml
+```
+
+(`.exradius/bridges/` when the config is `.exradius/exradius.yaml`.) The file's name is
+the bridge's name, `[a-z][a-z0-9-]*`; its content is YAML with a mapping at the top, at
+most 64 KiB, which Exradius passes to the bridge as written. Exradius does not know the
+keys and does not resolve `${secret:...}` there: no secrets in bridge files. A malformed
+file is a warning on the project, never an error.
+
+- **Jira** (`bridges/jira.yaml`): `projects: [PLANE]`, the Jira space keys
+  (`[A-Z][A-Z0-9_]*`, at least one) whose issues belong to this project. It is the only
+  key; unknown keys are errors the bridge reports. A space belongs to one Exradius
+  project.
+- **GitHub issues**: no file. The bridge finds the project from the issue's repository
+  and offers one `agent: <Name>` label per agent of the project.
+
+Write a bridge file only when the developer says the team uses that bridge.
 
 ## What the admin does with the file
 
@@ -232,7 +305,9 @@ the task.
 3. Per store: create the secret store the file names and fill every required key. The
    panel accepts a pasted `.env` block for several keys at once.
 
-Then Verify runs: "Read config" (commit, errors, warnings, missing keys), "Build
-workstation" and "Build service <name>", "Prepare workspace", "Clone <repo>" for each
-repository, "Start service <name>", "Setup: <command>" for each setup command, and "List
-tools <name>" for each connection an agent uses. A failure gets a diagnosis.
+Then Verify runs, by itself after every new commit of the config: "Read config" (commit,
+errors, warnings, missing keys), "Build workstation" and "Build service <name>", "Prepare
+workspace", "Clone <repo>" for each repository, "Start service <name>", "Setup:
+<command>" for each setup command, and "List tools <name>" for each connection an agent
+uses. A failure gets a diagnosis (verify-failures.md). Verify does not run the tests or
+the agent.

@@ -1,9 +1,9 @@
 # Pitfalls, each with its fix
 
-Each of these failed a real project's Verify at least once, or would have. They are what
-`scripts/check.sh` exists to catch on the developer's machine. Read the lockfiles and
-version files first; most failures are a tool in the image older or newer than what the
-repository asks for.
+Each of these failed a real project's Verify or a real task at least once, or would have.
+They are what `scripts/check.sh` exists to catch on the developer's machine. Read the
+lockfiles and version files first; most failures are a tool in the image older or newer
+than what the repository asks for.
 
 ## Node images ship no corepack (Yarn Berry, pnpm missing)
 
@@ -236,18 +236,6 @@ not allowed in `command`. A service Dockerfile is still needed when the entrypoi
 must change (it ignores or rewrites the arguments), or for files the image must contain
 (an extension, seed data).
 
-## BuildKit-only Dockerfile syntax (v0.1.0 servers only)
-
-**Symptom:** on an Exradius v0.1.0 (Docker-based) server, the local `docker build` works and
-Verify's "Build workstation" fails with "the --mount option requires BuildKit".
-
-**Cause:** v0.1.0 built through the Docker Engine API's classic builder. Exradius 0.2.0
-builds with rootless BuildKit in the cluster, where `RUN --mount=type=cache` and heredocs
-work (build secrets and SSH mounts are not given).
-
-**Fix:** for a v0.1.0 server, no `RUN --mount`, no `RUN <<EOF` heredocs, no `# syntax=`
-directive; `check.sh --classic` builds that way.
-
 ## A `tcp` check on a service that listens only on 127.0.0.1
 
 **Symptom:** "Start service cache" fails after 120 s with "did not become ready within 120s
@@ -321,7 +309,7 @@ wins in the app's loader (Outline's `.env.test` supplies `SECRET_KEY`; the
 
 **Fix:** move them into the Dockerfile. Setup commands may write only under `/work`, the
 home, `/tmp` and the `workstation.cache` folders (the root filesystem is read-only; see
-the two limits in run-conditions.md).
+the limits in run-conditions.md).
 
 ## Tests that start containers themselves
 
@@ -338,9 +326,125 @@ for CI; say so in `notes`, with the command that runs the rest.
 
 ## Architecture-specific downloads
 
-**Symptom:** passes locally on an Apple Silicon Mac, fails on the server (or the reverse)
-on a binary downloaded in the Dockerfile (`curl .../tool-linux-arm64`).
+**Symptom:** passes locally, fails in the cluster's build (or the reverse) on a binary
+downloaded in the Dockerfile (`curl .../tool-linux-arm64`), or a service image "could not
+be pulled" because it has no build for the cluster's architecture.
 
-**Fix:** select the binary by `$(uname -m)` or `dpkg --print-architecture`, prefer
-`COPY --from=<multi-arch image>`, and run `check.sh --platform linux/amd64` once before
-handing over.
+**Cause:** the cluster is `amd64` or `arm64`, and the developer's machine may be the
+other (an Apple Silicon Mac is `arm64`; many clusters are `amd64`, cloud installs often
+`arm64`).
+
+**Fix:** never hard-code an architecture: select the binary by `$(uname -m)` or
+`dpkg --print-architecture`, prefer `COPY --from=<multi-arch image>`. Ask which
+architecture the cluster has; when it differs from the machine's, run
+`check.sh --platform linux/<arch>` once before handing over.
+
+## The agent cannot download what setup could
+
+**Symptom:** Verify passes; a task then reports that it could not add a dependency, or a
+test fails with `403` and "is not on this task's network allowlist (network.allow)", or
+Maven or Gradle fails resolving a plugin on first use. The task page's Network tab lists
+the refused hosts (Bank of Anthos: 215 refusals of Google's Maven Central mirror, which
+its build tries first).
+
+**Cause:** setup reaches any public host, the agent only the hosts in `network.allow`
+(besides its model, the repositories and its connections). Whatever was not downloaded
+by a setup command is out of reach afterwards unless its host is listed.
+
+**Fix:** list the package registries of every package manager in setup, and the hosts the
+tests and builds reach at run time (network.md has the defaults per tool). Take them from
+the check, which prints the hosts setup really used, and prove the commands the agent
+will run with `check.sh --run '<command>'`: they run with the agent's network. Maven and
+Gradle resolve some plugins only when a goal first runs (`dependency:go-offline` does not
+fetch everything a test run needs), so list their registry even when setup pre-fetches:
+the `--run` of the test command shows whether anything is still missing.
+
+## A tool that ignores the proxy
+
+**Symptom:** a setup command hangs and ends with "connection timed out", "Network is
+unreachable", `ETIMEDOUT`, or a host name that does not resolve, while the same command
+works on a laptop.
+
+**Cause:** nothing in a run has a direct route out; requests go to the proxy named by
+`HTTPS_PROXY`, `HTTP_PROXY` and `JAVA_TOOL_OPTIONS`. Most tools read them. Exradius adds
+`YARN_HTTPS_PROXY` for Yarn 2+ and a resolver flag for Maven, the two it met so far. A
+tool that reads none of them connects directly and waits until it gives up.
+
+**Fix:** give the tool its own proxy setting where it looks for one, pointing at the
+variable rather than a fixed address: in a setup command
+(`sometool config set proxy "$HTTPS_PROXY"`), or an `env` entry the tool reads. Never set
+`HTTPS_PROXY` itself in `env`. The local check reproduces this (its containers have no
+direct route either) and adds a hint when a command fails this way.
+
+## An internal registry or mirror on a private address
+
+**Symptom:** a build step or a setup command fails with "resolves to a private or
+cluster-internal address", although the host is in `network.allow`.
+
+**Cause:** private addresses (10.x, 172.16 to 172.31.x, 192.168.x and the like) are
+refused in every phase, whatever the config says. Only the install can allow them.
+
+**Fix:** nothing in the config. Name the host in the admin README's "Ask the admin"
+section: it goes into the install's `egress.allowPrivate`. Check locally with
+`--allow-private <host>`.
+
+## SSH repository URLs, submodules, LFS
+
+**Symptom:** "Clone" hangs or fails on `git@github.com:owner/repo.git`; or the clone
+works and the build fails on an empty submodule folder or on LFS pointer files.
+
+**Cause:** git reaches repositories through the proxy over HTTPS, so an SSH remote has no
+way out. The clone fetches neither submodules nor LFS objects.
+
+**Fix:** write every repository `url` as `https://host/owner/repo.git`, whatever the
+developer's own remote says. For submodules add a setup command
+(`cd <repo> && git submodule update --init --recursive`); their URLs in `.gitmodules`
+must be HTTPS too (or rewrite them in the same command with
+`git -c url.https://github.com/.insteadOf=git@github.com: submodule update --init`). For
+LFS, install `git-lfs` in the Dockerfile and run `cd <repo> && git lfs pull` in setup.
+Both work for public content during setup; a private submodule is better declared as a
+repository of its own, with its credential.
+
+## Notes that name commands nobody ran
+
+**Symptom:** the agent reports "tests could not be run", runs the whole suite for ten
+minutes on a one-line change, or ships untested because the documented command needs a
+tool the image lacks.
+
+**Cause:** `notes` were copied from the README. The README describes a developer's
+machine; a run is a fresh clone with a read-only root, services on `localhost` and an
+allowlisted network.
+
+**Fix:** every command `notes` and a `role` name is run once by the check, as the agent
+would: `check.sh --run 'cd api && uv run pytest tests/unit -q -x' --run 'cd web && pnpm
+lint'`. Give the fast path (one test file, one package) as well as the full one, and the
+flag that keeps memory down when a suite starts parallel workers. A command that cannot
+work in a run is not in the notes; what replaces it is.
+
+## Checks that need generated code
+
+**Symptom:** type checks or tests fail in a fresh clone on missing generated files (a
+Prisma client, GraphQL or protobuf types, compiled workspace packages), though they pass
+on the developer's machine.
+
+**Cause:** the developer generated them long ago; a run starts from a clean clone.
+
+**Fix:** find the generating step in CI (it runs from a clean clone too) and add it to
+setup after the install, or say in `notes` which command must run first when it is slow
+and only some checks need it (Plane: type checks need `pnpm turbo run build
+--filter=<package>...` first).
+
+## Browsers for end-to-end tests
+
+**Symptom:** Playwright or Cypress fails with missing shared libraries
+(`libnss3.so: cannot open shared object file`), or tries to download a browser in the
+agent phase and gets a `403`.
+
+**Cause:** the browsers' system libraries need root to install, and the browser itself is
+a download.
+
+**Fix:** system libraries in the Dockerfile (`npx -y playwright@<version> install-deps
+chromium`, with the version from the lockfile). The browser by a setup command
+(`cd web && pnpm exec playwright install chromium`): it lands in the home, always matches
+the lockfile, and setup's network is open. When the team does not expect agents to run
+the end-to-end suite, leave it out and say so in `notes`.
