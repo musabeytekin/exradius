@@ -617,6 +617,62 @@ past that point knows where a value came from.
 - `${secret:NAME}` rules, `$NAME` placeholders in the environment section and the drop of
   provider-named variables in `env` are unchanged.
 
+### 10.1 Rotating the master key
+
+`EXRADIUS_SECRET_KEY` is the **primary** key: it encrypts every stored secret (the
+`*_encrypted` columns: store values, git host credentials, provider credentials, routing's
+OpenAI key). `EXRADIUS_SECRET_KEY_PREVIOUS` holds keys being rotated out, comma-separated
+(Fernet keys contain no comma): they only decrypt. `SecretBox` is a `MultiFernet` of the
+primary followed by the previous keys. An install that sets no previous key behaves as before.
+
+Two values are derived from the primary key, not stored:
+
+- **Download signatures** (`task.result` URLs, `downloads.py`) are made with the primary and
+  accepted with the primary or any previous key. URLs published before a rotation keep
+  working until their key is removed from `EXRADIUS_SECRET_KEY_PREVIOUS`; after that they
+  answer 401 ("login required"), and an integration that kept them needs the files fetched before then.
+- **The admin session cookie** has a single secret. When the primary changes, open
+  sessions end and the admin signs in again. `EXRADIUS_SESSION_SECRET`, when set, replaces
+  the derived value and is not affected by a rotation (the chart does not set it).
+
+`exradius rotate-key` re-encrypts every non-empty `*_encrypted` value with the primary, in
+one transaction with the rows locked. It finds the columns by that naming convention, so a
+new encrypted column must keep the suffix. It prints a count per `table.column`, never a
+value. A value that no configured key decrypts aborts it with the table, column and row id,
+and nothing is changed. Running it again is safe: every value is encrypted again with the
+primary.
+
+The procedure, in a cluster (the chart reads both keys from `secretKey.existingSecret`:
+`secret-key` and the optional `previous-secret-keys`, values `secretKey.key` and
+`secretKey.previousKey`):
+
+1. Make the new key the primary and the old one the previous, in the same Secret:
+
+   ```bash
+   old=$(kubectl -n exradius get secret exradius-secret-key -o jsonpath='{.data.secret-key}' | base64 -d)
+   new=$(openssl rand -base64 32 | tr '+/' '-_')     # or: exradius generate-key
+   kubectl -n exradius create secret generic exradius-secret-key \
+     --from-literal=secret-key="$new" --from-literal=previous-secret-keys="$old" \
+     --dry-run=client -o yaml | kubectl apply -f -
+   ```
+
+   A Secret managed elsewhere (External Secrets, GitOps) gets the same two keys there.
+2. Roll the api and the worker, which read the keys as environment variables at start:
+   `kubectl -n exradius rollout restart deploy/exradius-api deploy/exradius-worker`, then
+   `kubectl -n exradius rollout status` for both. While old and new pods run side by side,
+   a value written by a new pod cannot be read by an old one, and a URL signed by a new
+   worker is not accepted by an old api: avoid changing stores, credentials and providers
+   until the roll is done.
+3. Re-encrypt: `kubectl -n exradius exec deploy/exradius-worker -c worker -- exradius rotate-key`.
+4. Keep the previous key as long as published download URLs signed with it should work.
+   Then remove it from the Secret (`kubectl -n exradius patch secret exradius-secret-key
+   --type=json -p '[{"op":"remove","path":"/data/previous-secret-keys"}]'`) and roll the api
+   and the worker again. Run `rotate-key` once more first if anything could have written with
+   the old key in between; it fails, changing nothing, if a value still needs the old key.
+
+Runs already in flight are not affected: their secrets were decrypted into the per-run
+Secret at creation, and the egress proxy fetches its policies from the api.
+
 ## 11. The egress proxy and NetworkPolicy
 
 Every request of a run or build pod goes through `exradius-egress`, a Go binary
@@ -968,7 +1024,8 @@ probes become a Run with `purpose: probe`:
 - **`EXRADIUS_DATA_DIR` goes.** Config-repository mirrors live in an `emptyDir` cache in the
   api and worker pods and are re-fetched after a restart. Runs, mirrors and caches live in
   PVCs; objects in the store.
-- Broker URL, database URL, `EXRADIUS_SECRET_KEY` and the admin password come from Secrets that
+- Broker URL, database URL, `EXRADIUS_SECRET_KEY` (and `EXRADIUS_SECRET_KEY_PREVIOUS` while
+  rotating, §10.1) and the admin password come from Secrets that
   values name (`existingSecret`), never from values themselves. The operators' generated
   Secrets (CloudNativePG's `<cluster>-app`, RabbitMQ's default user) are used locally.
 
@@ -1053,7 +1110,7 @@ The main keys:
 
 ```yaml
 publicApiUrl: https://exradius.example.com
-secretKey: {existingSecret: exradius-secret-key}
+secretKey: {existingSecret: exradius-secret-key, key: secret-key, previousKey: previous-secret-keys}   # §10.1
 admin: {username: admin, existingSecret: exradius-admin}
 broker: {existingSecret: ..., publicHost: ..., publicPort: 5672}
 worker: {replicas: 1, concurrency: 4}

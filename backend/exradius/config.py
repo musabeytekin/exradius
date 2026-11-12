@@ -61,9 +61,13 @@ class Settings(BaseSettings):
 
     # Security
     secret_key: str = ""
-    """Fernet key used to encrypt secrets at rest (``Fernet.generate_key()``)."""
+    """Fernet key used to encrypt secrets at rest (``Fernet.generate_key()``): the primary key."""
+    secret_key_previous: str = ""
+    """Keys being rotated out, comma-separated: they decrypt and verify download signatures,
+    never encrypt or sign (docs/kubernetes.md §10.1)."""
     session_secret: str = ""
-    """Signs the admin session cookie. Defaults to a value derived from ``secret_key``."""
+    """Signs the admin session cookie. Defaults to a value derived from ``secret_key``, so
+    sessions end when the primary key changes."""
     cookie_secure: bool = False
     admin_username: str = "admin"
     admin_password: str | None = None
@@ -195,13 +199,21 @@ class Settings(BaseSettings):
         return getattr(self, f"runtime_image_{runtime}")
 
     @property
+    def previous_secret_keys(self) -> list[str]:
+        return [key.strip() for key in self.secret_key_previous.split(",") if key.strip()]
+
+    @property
     def download_signing_key(self) -> bytes:
         """Signs the download URLs in ``task.result`` (derived from ``secret_key``)."""
         if not self.secret_key:
             raise RuntimeError("EXRADIUS_SECRET_KEY must be set")
-        import hashlib
+        return _download_key(self.secret_key)
 
-        return hashlib.sha256(b"exradius-download:" + self.secret_key.encode()).digest()
+    @property
+    def download_verify_keys(self) -> list[bytes]:
+        """The signing key, then those derived from the previous keys: URLs published before
+        a rotation keep verifying while their key is still configured."""
+        return [self.download_signing_key, *(_download_key(key) for key in self.previous_secret_keys)]
 
     @property
     def effective_session_secret(self) -> str:
@@ -212,6 +224,12 @@ class Settings(BaseSettings):
         import hashlib
 
         return hashlib.sha256(b"exradius-session:" + self.secret_key.encode()).hexdigest()
+
+
+def _download_key(secret_key: str) -> bytes:
+    import hashlib
+
+    return hashlib.sha256(b"exradius-download:" + secret_key.encode()).digest()
 
 
 @lru_cache

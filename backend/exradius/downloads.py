@@ -3,7 +3,8 @@
 The consumer of outbound events is the user's integration layer, which has no admin
 session, so each URL carries a signature (``?sig=``): an HMAC of its path, keyed by a
 value derived from ``EXRADIUS_SECRET_KEY``. The API accepts either the admin session or a
-valid signature. Signatures do not expire in version one.
+valid signature. Signatures do not expire in version one; after a key rotation, those made
+with a key in ``EXRADIUS_SECRET_KEY_PREVIOUS`` still verify until that key is removed.
 """
 
 from __future__ import annotations
@@ -28,12 +29,18 @@ def transcript_key(run_id: uuid.UUID | str) -> str:
     return f"runs/{run_id}/transcript.jsonl"
 
 
+def _hmac(key: bytes, path: str) -> str:
+    return hmac.new(key, path.encode(), hashlib.sha256).hexdigest()
+
+
 def sign(settings: Settings, path: str) -> str:
-    return hmac.new(settings.download_signing_key, path.encode(), hashlib.sha256).hexdigest()
+    return _hmac(settings.download_signing_key, path)
 
 
 def verify(settings: Settings, path: str, signature: str | None) -> bool:
-    return bool(signature) and hmac.compare_digest(sign(settings, path), signature)
+    if not signature:
+        return False
+    return any(hmac.compare_digest(_hmac(key, path), signature) for key in settings.download_verify_keys)
 
 
 def signed_url(settings: Settings, path: str) -> str:

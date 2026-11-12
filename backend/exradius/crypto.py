@@ -6,17 +6,26 @@ import base64
 import hashlib
 import hmac
 import secrets
+from collections.abc import Iterable
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 
 class SecretBox:
-    """Encrypts secret values with a Fernet key from the Exradius environment."""
+    """Encrypts secret values with a Fernet key from the Exradius environment.
 
-    def __init__(self, key: str):
+    ``key`` (``EXRADIUS_SECRET_KEY``) is the primary key: it encrypts, and it is tried first
+    to decrypt. ``previous`` (``EXRADIUS_SECRET_KEY_PREVIOUS``) are keys being rotated out:
+    they only decrypt, until ``exradius rotate-key`` has re-encrypted every stored value with
+    the primary (docs/kubernetes.md §10.1).
+    """
+
+    def __init__(self, key: str, previous: Iterable[str] = ()):
         if not key:
             raise RuntimeError("EXRADIUS_SECRET_KEY is not set; it is required to encrypt secrets")
-        self._fernet = Fernet(key.encode() if isinstance(key, str) else key)
+        fernets = [_fernet(key, "EXRADIUS_SECRET_KEY")]
+        fernets += [_fernet(k, "EXRADIUS_SECRET_KEY_PREVIOUS") for k in previous]
+        self._fernet = MultiFernet(fernets)
 
     def encrypt(self, value: str) -> str:
         return self._fernet.encrypt(value.encode()).decode()
@@ -26,6 +35,22 @@ class SecretBox:
             return self._fernet.decrypt(token.encode()).decode()
         except InvalidToken as exc:  # pragma: no cover - depends on a wrong key
             raise RuntimeError("cannot decrypt secret: wrong EXRADIUS_SECRET_KEY?") from exc
+
+    def rotate(self, token: str) -> str:
+        """``token`` re-encrypted with the primary key, whichever known key encrypted it."""
+        try:
+            return self._fernet.rotate(token.encode()).decode()
+        except InvalidToken as exc:
+            raise RuntimeError(
+                "cannot decrypt secret with EXRADIUS_SECRET_KEY or EXRADIUS_SECRET_KEY_PREVIOUS"
+            ) from exc
+
+
+def _fernet(key: str | bytes, setting: str) -> Fernet:
+    try:
+        return Fernet(key.encode() if isinstance(key, str) else key)
+    except ValueError:  # never the value itself in the message
+        raise RuntimeError(f"{setting} holds a value that is not a Fernet key") from None
 
 
 def generate_secret_key() -> str:
