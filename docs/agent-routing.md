@@ -96,15 +96,30 @@ A profile is what the decision knows about one agent:
   `"not listed yet"`, and the decision goes on with name, role and connection names.
   Verify runs by itself after a config commit (setup-and-verify.md), so this gap is
   usually short.
-- A server can change its tools with no commit on our side (a remote server, an unpinned
-  `npx -y` package). That is parked in `ideas.md`.
+- **Every Verify lists every used connection again,** whether or not its `definition_hash`
+  changed, and replaces the row when the listing succeeds; `listed_at` is when it last
+  did. A listing that fails keeps the earlier row, and its older `listed_at` shows it.
+  Nothing lists tools between Verifies.
+- **Catalog packages are pinned** to an exact version (`npx -y <package>@<version>`,
+  `uvx <command>@<version>`; `catalog.py`), so a server's code, which runs with the
+  connection's secrets in its environment, changes only with a commit to Exradius. The
+  launchers still resolve each package's own dependencies within its declared ranges.
+  Bumping a version changes the definition, and with it the hash: routing leaves that
+  connection's stored tools out until the next Verify lists them.
+- **What still changes without a commit:** the hosted entries (`github`, `linear`) and
+  custom http connections are remote servers, and a custom `npx` or `uvx` connection
+  without an exact version gets the latest release each session. The latter is the
+  project's choice, so the config check warns ("connections.docs: runs @acme/docs-mcp
+  without an exact version, so each session gets its latest release") rather than
+  refusing it. For these, `listed_at` is how old the stored list is.
 
 ### 3.2 In the panel
 
 The project page gets an **Agents** tab: each agent's name and role, and each of its
-connections with its tools (name, description, annotations), with "listed by Verify
-<time>", "not listed yet" or "not listed since this connection changed". It shows what
-routing will see; it does not explain routing.
+connections with its tools (name, description, annotations), with "listed <time ago>"
+(the exact time on hover), "not listed yet" or "not listed since this connection
+changed". It shows what routing will see; it does not explain routing. The Config tab
+shows the command a catalog connection runs, version included.
 
 ## 4. The decision
 

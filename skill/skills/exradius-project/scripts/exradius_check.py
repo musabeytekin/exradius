@@ -663,6 +663,19 @@ CATALOG = {
                    "requires": "npx", "hosts": NPM},
 }
 LAUNCHERS = ("npx", "uvx")
+NPX_VALUE_FLAGS = ("-p", "--package", "-c", "--call", "-w", "--workspace")
+UVX_VALUE_FLAGS = (
+    "--from", "-w", "--with", "--with-editable", "--with-requirements", "-p", "--python",
+    "-c", "--constraints", "--overrides", "-b", "--build-constraints", "--index",
+    "--default-index", "-i", "--index-url", "--extra-index-url", "-f", "--find-links",
+    "--index-strategy", "--keyring-provider", "--resolution", "--prerelease", "--exclude-newer",
+    "--exclude-newer-package", "-P", "--upgrade-package", "--reinstall-package",
+    "--refresh-package", "--no-build-package", "--no-binary-package", "-C", "--config-setting",
+    "--link-mode", "--python-platform", "--torch-backend", "--env-file", "--cache-dir",
+    "--directory", "--project", "--config-file", "--color", "--allow-insecure-host",
+)
+NPM_EXACT = re.compile(r"^[=v]?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
+PYPI_EXACT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]*\])?\s*===?\s*[A-Za-z0-9._+!-]+$")
 SECRET_PLACES = (
     ("repositories", int, "credential"),
     ("services", str, "env", str),
@@ -671,6 +684,60 @@ SECRET_PLACES = (
     ("connections", str, "env", str),
     ("connections", str, "headers", str),
 )
+
+
+def _launcher_options(args, value_flags):
+    """``(flag, value)`` pairs before the first positional argument, and the rest."""
+    options = []
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        flag, eq, value = args[index].partition("=")
+        if not eq and flag in value_flags and index + 1 < len(args):
+            index += 1
+            value = args[index]
+        options.append((flag, value))
+        index += 1
+    return options, args[index:]
+
+
+def _npm_unpinned(spec):
+    if spec.startswith((".", "/", "~")) or ":" in spec or ("/" in spec and not spec.startswith("@")):
+        return False  # a path, URL, git or alias spec: not a registry version
+    name, _, version = spec[1:].partition("@") if spec.startswith("@") else spec.partition("@")
+    return bool(name) and not NPM_EXACT.match(version)
+
+
+def _pypi_unpinned(requirement):
+    if requirement.startswith((".", "/", "~")) or "://" in requirement or " @ " in requirement:
+        return False  # a path or a direct URL: not a registry version
+    return not PYPI_EXACT.match(requirement.strip())
+
+
+def unpinned_packages(command, args):
+    """Registry packages an ``npx`` or ``uvx`` command runs without an exact version
+    (``unpinned_packages`` in Exradius's catalog module)."""
+    if command == "npx":
+        options, rest = _launcher_options(args, NPX_VALUE_FLAGS)
+        specs = [value for flag, value in options if flag in ("-p", "--package")]
+        if not specs and rest and not any(flag in ("-c", "--call") for flag, _ in options):
+            specs = [rest[0]]
+        return [spec for spec in specs if _npm_unpinned(spec)]
+    if command == "uvx":
+        options, rest = _launcher_options(args, UVX_VALUE_FLAGS)
+        unpinned = []
+        source = next((value for flag, value in options if flag == "--from"), None)
+        if source is not None:
+            if _pypi_unpinned(source):
+                unpinned.append(source)
+        elif rest:
+            name, at, version = rest[0].partition("@")
+            if not at and _pypi_unpinned(name) or at and version in ("", "latest"):
+                unpinned.append(rest[0])
+        for flag, value in options:
+            if flag in ("-w", "--with"):
+                unpinned += [r for r in re.split(r",\s*(?=[A-Za-z0-9])", value) if _pypi_unpinned(r)]
+        return unpinned
+    return []
 
 
 def memory_bytes(text):
@@ -1316,6 +1383,11 @@ def validate(raw, config_dir="", lookup=None):
                 launcher = entry["requires"]
             elif conn.get("command") in LAUNCHERS:
                 launcher = conn["command"]
+                args = conn.get("args") if isinstance(conn.get("args"), list) else []
+                unpinned = unpinned_packages(conn["command"], [str(a) for a in args])
+                if unpinned:
+                    warnings.append("%s: runs %s without an exact version, so each session gets its latest release"
+                                    % (fmt_path(p), ", ".join(unpinned)))
             if launcher and default_station:
                 warnings.append("%s: needs %s, which the default workstation image does not have" % (fmt_path(p), launcher))
             item = {}
