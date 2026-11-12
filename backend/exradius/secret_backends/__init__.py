@@ -83,6 +83,20 @@ class SecretBackends:
             return None if self.vault else "Vault is not configured for this install (values vault.address)"
         return f"this version does not know the store kind {kind!r}"
 
+    async def settings_problem(self, store: str, kind: str, settings: dict) -> str | None:
+        """Why valid ``settings`` would still not work, asked of the backend when a store is
+        saved (a Vault mount that is not KV version 2); ``None`` when nothing is known
+        against them, also when the backend cannot be reached now."""
+        if kind != "vault" or self.vault is None:
+            return None
+        from exradius.secret_backends import kinds
+        from exradius.secret_backends.vault import VaultSettings
+
+        parsed = kinds.parse(kind, settings)
+        assert isinstance(parsed, VaultSettings)
+        problem = await self.vault.mount_problem(store, parsed, fresh=True)
+        return f"settings.mount: {problem}" if problem else None
+
     def of(self, session: AsyncSession, store: SecretStore, *, retry: bool = True) -> SecretBackend:
         """The store's backend. ``retry``: an external backend tries again for a few
         seconds before it gives up (intake, ``preparing``, Verify, the run spec, the egress

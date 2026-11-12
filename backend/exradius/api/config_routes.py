@@ -455,8 +455,10 @@ async def _set_allowed(session, admin: AdminUser, store: SecretStore, slugs: lis
             log_change(session, admin, store, "project_removed", project=project.slug)
 
 
-def _settings(state: AppState, kind: str, settings: dict) -> dict:
-    """The settings as stored; 422 with every problem, or when the install cannot use the kind."""
+async def _settings(state: AppState, name: str, kind: str, settings: dict) -> dict:
+    """The settings as stored; 422 with every problem, when the install cannot use the kind,
+    or when the backend says they cannot work (a Vault mount that is not KV version 2). A
+    backend that cannot be reached now does not stop the save: the store then shows why."""
     try:
         normalized = kinds.normalize(kind, settings)
     except kinds.SettingsInvalid as exc:
@@ -464,6 +466,9 @@ def _settings(state: AppState, kind: str, settings: dict) -> dict:
     reason = state.secrets.unavailable(kind)
     if reason is not None:
         raise HTTPException(422, reason)
+    problem = await state.secrets.settings_problem(name, kind, normalized)
+    if problem is not None:
+        raise HTTPException(422, [problem])
     return normalized
 
 
@@ -473,7 +478,7 @@ async def create_store(body: s.StoreIn, session: DB, state: State, admin: Admin)
     ``allowed_projects`` and no other."""
     if await session.scalar(select(SecretStore.id).where(SecretStore.name == body.name)):
         raise HTTPException(409, f"store {body.name!r} already exists")
-    settings = _settings(state, body.kind, body.settings)
+    settings = await _settings(state, body.name, body.kind, body.settings)
     store = SecretStore(id=uuid.uuid4(), name=body.name, kind=body.kind, settings=settings, created_at=utcnow())
     session.add(store)
     log_change(session, admin, store, "store_created", detail={"kind": store.kind, "settings": settings})
@@ -493,7 +498,7 @@ async def _move(session, state: AppState, admin: AdminUser, store: SecretStore, 
     """Give the store a new kind or new settings. Projects keep naming it: moving a project's
     values to a vault needs no commit in its config repository. Leaving ``internal`` deletes
     the values kept here (each one logged); the backend is then their only source."""
-    normalized = _settings(state, kind, settings)
+    normalized = await _settings(state, store.name, kind, settings)
     if kind == store.kind and normalized == (store.settings or {}):
         return
     before = {"kind": store.kind, "settings": store.settings or {}}

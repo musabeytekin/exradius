@@ -19,6 +19,14 @@ keys. Field values must be strings.
   asked for it (intake, ``preparing``, Verify, the run spec, the egress policy); a refused
   sign-in or a refused read is not. Then ``StoreUnreachable`` says why. A path that holds no
   secret (``404``) is a store with no keys.
+- **KV version 1 is told apart.** On a KV version 1 mount (or any other engine) the
+  ``subkeys`` and ``data`` paths answer ``404`` with no error, exactly like an empty KV
+  version 2 path, so a store would look empty and its projects would read "missing secret".
+  When a read comes back as an empty path, and when a store's settings are saved, the mount
+  is looked up with ``GET /v1/sys/internal/ui/mounts/<mount>/<path>`` (``data.type`` and
+  ``data.options.version``; the store's read policy is enough), and anything but KV version 2
+  is a clear reason. The answer is kept for ``MOUNT_TTL`` seconds per mount; a read that
+  finds the secret never asks.
 
 Plain httpx, as ``worker/kube.py`` and ``pod_identity.py``: no vendor SDK.
 """
@@ -53,6 +61,9 @@ REQUEST_TIMEOUT = 5.0
 TOKEN_MARGIN = 60.0
 """Seconds before the Vault token's lease ends when it is renewed by signing in again."""
 SERVICE_ACCOUNT_TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
+MOUNT_TTL = 60.0
+"""Seconds what a mount is (KV version 2 or not) is kept; asked only when a path reads empty."""
+
 
 class _Refused(Exception):
     """Vault answered, and said no: not worth asking again."""
@@ -78,6 +89,7 @@ class VaultClient:
         self._login_lock = asyncio.Lock()
         self._names: dict[tuple[str, str], tuple[float, set[str]]] = {}
         self._failures: dict[tuple[str, str], tuple[float, str]] = {}
+        self._mounts: dict[str, tuple[float, str | None]] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -178,6 +190,7 @@ class VaultClient:
         try:
             response = await self._attempts(store, f"/v1/{settings.mount}/subkeys/{settings.path}", {"depth": 1}, retry)
             if response.status_code == 404 and not _errors(response):
+                await self._kv2_or_raise(store, settings)
                 names: set[str] = set()
             elif response.status_code == 200:
                 subkeys = ((response.json() or {}).get("data") or {}).get("subkeys")
@@ -200,6 +213,7 @@ class VaultClient:
             return {}
         response = await self._attempts(store, f"/v1/{settings.mount}/data/{settings.path}", None, retry)
         if response.status_code == 404 and not _errors(response):
+            await self._kv2_or_raise(store, settings)
             return {}
         if response.status_code != 200:
             raise StoreUnreachable(store, _read_problem(response, settings, "data"))
@@ -214,6 +228,44 @@ class VaultClient:
                                  f"{_json_type(value)}, not a string")
             out[name] = value
         return out
+
+
+    async def mount_problem(self, store: str, settings: VaultSettings, *, fresh: bool = False) -> str | None:
+        """Why the store's mount is not a KV version 2 engine, or ``None`` when it is or when
+        Vault cannot say (unreachable, or no access to the mount: the reads then explain it).
+        An answer is kept for ``MOUNT_TTL`` seconds per mount; ``fresh`` asks again."""
+        now = time.monotonic()
+        cached = self._mounts.get(settings.mount)
+        if cached and cached[0] > now and not fresh:
+            return cached[1]
+        try:
+            response = await self._attempts(
+                store, f"/v1/sys/internal/ui/mounts/{settings.mount}/{settings.path}", None, retry=False)
+        except StoreUnreachable as exc:
+            log.info("secret store %s: cannot tell what %s is: %s", store, settings.mount, exc.why)
+            return None
+        if response.status_code != 200:
+            log.info("secret store %s: cannot tell what %s is (%s)", store, settings.mount,
+                     _problem(response, "the mount lookup"))
+            self._mounts[settings.mount] = (time.monotonic() + MOUNT_TTL, None)
+            return None
+        data = (response.json() or {}).get("data") or {}
+        engine = data.get("type")
+        version = str((data.get("options") or {}).get("version") or "1")
+        problem = None
+        if engine != "kv":
+            problem = f"{settings.mount} is a {engine or 'non-KV'} mount; stores of kind vault read KV version 2"
+        elif version != "2":
+            problem = (f"{settings.mount} is a KV version {version} mount; stores of kind vault read KV version 2 "
+                       f"(vault kv enable-versioning {settings.mount} upgrades it)")
+        self._mounts[settings.mount] = (time.monotonic() + MOUNT_TTL, problem)
+        return problem
+
+    async def _kv2_or_raise(self, store: str, settings: VaultSettings) -> None:
+        """A path read empty: unless the mount is not KV version 2, that is an empty store."""
+        problem = await self.mount_problem(store, settings)
+        if problem is not None:
+            raise StoreUnreachable(store, problem)
 
 
 class VaultBackend:

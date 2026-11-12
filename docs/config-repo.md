@@ -402,7 +402,7 @@ secret of a KV version 2 engine, and the secret's fields are the store's keys.
 - **Key names** come from `GET /v1/<mount>/subkeys/<path>?depth=1`, which lists the fields
   without reading a value (Vault 1.10 or later), and are kept 30 seconds so the panel and the
   directory do not call Vault on every view. A path that holds no secret (`404`) is a store
-  with no keys.
+  with no keys, once the mount is known to be KV version 2 (below).
 - **Values** come from `GET /v1/<mount>/data/<path>` when a run is created, a verification
   runs, the run or verify spec is served, or the egress proxy refreshes a policy. They are
   never cached. A field that is not a string fails with `secret store S: field N of
@@ -425,7 +425,18 @@ secret of a KV version 2 engine, and the secret's fields are the store's keys.
 
 - **Reach.** The api and the worker have no egress NetworkPolicy, so they reach Vault
   wherever it is; run pods never do.
-- KV version 1 is not supported: its paths have no `data/` and `subkeys/`.
+- **KV version 2 only, and told apart.** On a KV version 1 mount, or any other engine, the
+  `subkeys` and `data` paths answer `404` with no error, exactly like an empty KV version 2
+  path (checked on Vault 2.2.2), so the store would look empty and its projects would read
+  `missing secret …`. So when a read comes back as an empty path, the mount is looked up with
+  `GET /v1/sys/internal/ui/mounts/<mount>/<path>` (`data.type`, `data.options.version`; the
+  endpoint Vault's own CLI uses before a KV command, which the store's read policy is enough
+  for), and anything but `kv` version 2 gives `secret store S is unreachable: kv1 is a KV
+  version 1 mount; stores of kind vault read KV version 2 (vault kv enable-versioning kv1
+  upgrades it)`. The answer is kept a minute per mount, and a read that finds the secret
+  never asks. Saving a store's settings asks too, afresh, and refuses such a mount with 422
+  (`settings.mount: …`); a Vault that cannot be reached, or a mount the role cannot see (403),
+  does not stop the save, and the store then shows why.
 
 ## 8. Data model changes
 
