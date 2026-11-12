@@ -7,6 +7,7 @@
 # (bootstrap.sh installs its operator).
 #
 #   terraform init && terraform apply -var subscription_id=<id> -var 'allowed_cidrs=["<your address>/32"]'
+#     an existing Vault (vault.tf): add -var 'vault={address="https://vault.example.com:8200", audience="vault"}'
 #   ../bootstrap.sh azure     # kubeconfig, Traefik, cert-manager, the RabbitMQ operator, Secrets
 #   make -C ../.. push ...    # the images (terraform output push_command)
 #   helm upgrade --install exradius ../../../charts/exradius -n exradius \

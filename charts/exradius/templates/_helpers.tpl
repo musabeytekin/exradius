@@ -198,6 +198,62 @@ http://{{ include "exradius.serviceHost" (list . .Values.objectStore.inCluster.n
   value: /tmp
 {{- end -}}
 
+{{/* HashiCorp Vault for stores of kind vault (values vault, backend/exradius/config.py): the
+api's and the worker's environment, mounts and volumes. */}}
+{{- define "exradius.vaultEnv" -}}
+{{- if .Values.vault.address }}
+- name: EXRADIUS_VAULT_ADDRESS
+  value: {{ .Values.vault.address | quote }}
+- name: EXRADIUS_VAULT_AUTH_MOUNT
+  value: {{ .Values.vault.authMount | quote }}
+- name: EXRADIUS_VAULT_ROLE
+  value: {{ required "vault.role names the Kubernetes auth role" .Values.vault.role | quote }}
+{{- with .Values.vault.namespace }}
+- name: EXRADIUS_VAULT_NAMESPACE
+  value: {{ . | quote }}
+{{- end }}
+{{- if .Values.vault.caBundle.configMap }}
+- name: EXRADIUS_VAULT_CA_FILE
+  value: /etc/exradius/vault-ca/{{ .Values.vault.caBundle.key }}
+{{- end }}
+{{- if .Values.vault.audience }}
+- name: EXRADIUS_VAULT_TOKEN_FILE
+  value: /var/run/secrets/exradius/vault/token
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{- define "exradius.vaultMounts" -}}
+{{- if .Values.vault.address }}
+{{- if .Values.vault.caBundle.configMap }}
+- {name: vault-ca, mountPath: /etc/exradius/vault-ca, readOnly: true}
+{{- end }}
+{{- if .Values.vault.audience }}
+- {name: vault-token, mountPath: /var/run/secrets/exradius/vault, readOnly: true}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{- define "exradius.vaultVolumes" -}}
+{{- if .Values.vault.address }}
+{{- with .Values.vault.caBundle }}
+{{- if .configMap }}
+- name: vault-ca
+  configMap:
+    name: {{ .configMap }}
+    items: [{key: {{ .key }}, path: {{ .key }}}]
+{{- end }}
+{{- end }}
+{{- if .Values.vault.audience }}
+# A token only Vault accepts, rotated by the kubelet (the backend reads it at every sign-in).
+- name: vault-token
+  projected:
+    sources:
+      - serviceAccountToken: {path: token, audience: {{ .Values.vault.audience | quote }}, expirationSeconds: 3600}
+{{- end }}
+{{- end }}
+{{- end -}}
+
 {{/* A backend process, under Tilt's restart wrapper in development: (list . "exradius-api") */}}
 {{- define "exradius.backendCommand" -}}
 {{- $root := index . 0 -}}

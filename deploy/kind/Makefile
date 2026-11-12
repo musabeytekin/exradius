@@ -6,9 +6,12 @@
 #
 #   make -C deploy/kind dev-seccomp  # the build pods' seccomp profile on the node (builds.seccompProfile)
 #   make -C deploy/kind dev-gvisor   # gVisor (runsc) in the node and a RuntimeClass "gvisor" (runs.runtimeClassName)
+#   make -C deploy/kind dev-vault    # Vault in dev mode (LOCAL ONLY) for stores of kind vault; then
+#                                    # tilt up -- --vault, or install VAULT=1 (values-vault.yaml)
 #
 # Without Tilt: `make -C deploy/kind images install` builds every image with tag $(TAG),
-# pushes it to the local registry and installs the chart with values-local.yaml.
+# pushes it to the local registry and installs the chart with values-local.yaml (and
+# values-vault.yaml with VAULT=1).
 #
 #   make -C deploy/kind e2e PROJECT=<slug> [AGENT=<slug>]
 # publishes one task to the install and waits for its result (deploy/kind/e2e.py).
@@ -20,7 +23,7 @@ TAG ?= 0.2.0
 # The Python package version, which the runtime bundle checks (backend/pyproject.toml).
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' $(ROOT)/backend/pyproject.toml | head -1)
 
-.PHONY: dev-up dev-down dev-seccomp dev-gvisor images install uninstall e2e
+.PHONY: dev-up dev-down dev-seccomp dev-gvisor dev-vault images install uninstall e2e
 
 dev-up:
 	./dev-up.sh
@@ -41,6 +44,11 @@ dev-seccomp:
 dev-gvisor:
 	./dev-gvisor.sh
 
+# Vault in dev mode in the cluster, its Kubernetes auth role for the api and the worker, and a
+# sample secret (deploy/kind/dev-vault.sh). Local only. Run again after the Vault pod restarts.
+dev-vault:
+	./dev-vault.sh
+
 images:
 	docker build -f $(ROOT)/deploy/backend.Dockerfile -t $(REGISTRY)/exradius-backend:$(TAG) $(ROOT)
 	docker build -t $(REGISTRY)/exradius-frontend:$(TAG) $(ROOT)/frontend
@@ -56,7 +64,8 @@ images:
 
 install:
 	helm upgrade --install exradius $(ROOT)/charts/exradius --kube-context $(CONTEXT) --namespace exradius \
-	  -f $(ROOT)/charts/exradius/values-local.yaml --set images.tag=$(TAG)
+	  -f $(ROOT)/charts/exradius/values-local.yaml $(if $(VAULT),-f $(ROOT)/deploy/kind/values-vault.yaml) \
+	  --set images.tag=$(TAG)
 
 uninstall:
 	helm uninstall exradius --kube-context $(CONTEXT) --namespace exradius

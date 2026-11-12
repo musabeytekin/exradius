@@ -147,8 +147,11 @@ def setup_configuration(admin, root: Path, config: str = API_CONFIG, values: dic
     remote = make_config_repo(root, {"exradius.yaml": config}, name=f"cfg-{uuid.uuid4().hex[:6]}")
     project = admin.post("/api/projects", json={"config_url": str(remote)})
     assert project.status_code == 201, project.text
+    slug = project.json()["slug"]
     store = next((x for x in admin.get("/api/stores").json() if x["name"] == "billing"), None) \
         or admin.post("/api/stores", json={"name": "billing"}).json()
+    store = admin.patch(f"/api/stores/{store['id']}",
+                        json={"allowed_projects": [*store["allowed_projects"], slug]}).json()
     values = values if values is not None else {"GIT_TOKEN": "ghp_secret", "DOCS_KEY": "docs-key", "SENTRY_TOKEN": "sentry"}
     for key, value in values.items():
         assert admin.put(f"/api/stores/{store['id']}/keys/{key}", json={"value": value}).status_code == 200
@@ -170,7 +173,7 @@ def test_projects_are_added_by_url(admin, tmp_path):
     assert (project["health"], project["runnable"], project["store_exists"]) == ("missing_secrets", False, False)
     assert project["reason"] == "secret store billing does not exist"
 
-    store = admin.post("/api/stores", json={"name": "billing"}).json()
+    store = admin.post("/api/stores", json={"name": "billing", "allowed_projects": ["billing-platform"]}).json()
     for key in ("DOCS_KEY", "GIT_TOKEN"):
         admin.put(f"/api/stores/{store['id']}/keys/{key}", json={"value": "v"})
     project = admin.get(f"/api/projects/{project['id']}").json()

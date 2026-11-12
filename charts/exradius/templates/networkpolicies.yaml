@@ -2,8 +2,10 @@
 api's internal port, nothing else, so it cannot reach the Kubernetes API, the stack's
 Postgres or RabbitMQ, another run or the internet except through the proxy. Build pods
 likewise (or the internet directly with builds.egress: direct). The api's internal port
-takes run, build and egress pods only; the proxy takes run and build pods only. The
-cluster's network plugin must enforce NetworkPolicy (kind's kindnet and k3s's own
+takes run, build and egress pods only; the proxy takes run and build pods only. The api and
+the worker have no egress policy: they reach Postgres, RabbitMQ, the object store, the
+Kubernetes API, git hosts and the install's Vault (values vault.address) wherever those are.
+The cluster's network plugin must enforce NetworkPolicy (kind's kindnet and k3s's own
 controller do; Docker Desktop's cluster does not). */ -}}
 {{- if .Values.networkPolicy.enabled }}
 {{- $np := .Values.networkPolicy -}}

@@ -305,3 +305,41 @@ subjects:
   - kind: ServiceAccount
     name: exradius-operator
     namespace: {{ .Release.Namespace }}
+{{- if and .Values.vault.address .Values.vault.tokenReviewer }}
+---
+# The reviewer of a Vault outside the cluster (values vault.tokenReviewer): it may create
+# TokenReviews and nothing else; Vault reads its token from the Secret below.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exradius-vault-reviewer
+  labels:
+    {{- include "exradius.componentLabels" (list . "vault-reviewer") | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-exradius-vault-reviewer
+  labels:
+    {{- include "exradius.componentLabels" (list . "vault-reviewer") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: exradius-vault-reviewer
+    namespace: {{ .Release.Namespace }}
+---
+# Filled by Kubernetes' token controller.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: exradius-vault-reviewer
+  labels:
+    {{- include "exradius.componentLabels" (list . "vault-reviewer") | nindent 4 }}
+  annotations:
+    kubernetes.io/service-account.name: exradius-vault-reviewer
+type: kubernetes.io/service-account-token
+{{- end }}

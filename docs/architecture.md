@@ -544,7 +544,7 @@ did it with Docker, the Kubernetes section is named instead.
 
 **Configuration resolution**
 
-- Every `${secret:NAME}` resolves from the secret store the config names (`secret_store`); there are no project or global secrets, overrides or fallbacks. `exradius/resolve.py` substitutes at Run creation (worker) and for the run spec (API); a missing key raises `MissingSecret` ("missing secret NAME in store S").
+- Every `${secret:NAME}` resolves from the secret store the config names (`secret_store`), if that store allows the project (`docs/config-repo.md` §7.1); there are no project or global secrets, overrides or fallbacks. `project_state.store_values` reads the referenced names from the store's backend (internal or Vault, §7.3) and `exradius/resolve.py` substitutes at Run creation (worker) and for the run spec (API); a missing key raises `MissingSecret` ("missing secret NAME in store S"), a store the project may not use or that cannot be reached a `StoreError` with its reason.
 - The connection name `exradius` is reserved for the built-in server.
 - The model credential comes only from a provider (`docs/providers.md`).
 
@@ -660,7 +660,7 @@ did it with Docker, the Kubernetes section is named instead.
   - A launcher (`npx`, `uvx`) on the default workstation is a warning, for catalog entries (`requires`) and custom stdio connections alike.
   - Flow mappings cannot hold an unquoted reference: `{token: ${secret:X}}` is not YAML, because `{` opens a flow mapping. The design's example was fixed to quote them; block style needs no quotes.
 - **Reading** (`exradius/config_repo.py`, `exradius/project_state.py`). The mirror is `<EXRADIUS_CACHE_DIR>/config-repos/<project id>.git` in the reading pod's own cache, fetched under a file lock with the credential of the URL's host (`git_credentials`; a token is sent as `x-access-token:<token>`, `basic` as given; local paths and `file://` have no host). Without `config_branch`, the branch is the remote's default (the mirror's `HEAD`, which follows the remote at every fetch). The file is `config_path`, or `exradius.yaml`, then `.exradius/exradius.yaml`. A repository, branch or file that cannot be read raises `ConfigReadError`; callers turn it into a snapshot with that error and no commit. Reads happen in `POST /api/projects`, re-read and PATCH (API), and at intake, in `preparing` and in Verify (worker); each stores the snapshot on the project.
-  - Health (`project_state.assess`): errors are the file's plus a slug change ("project.slug: the file says 'x', but this project was added as 'y'; …"; the row keeps its slug). Missing keys are the required keys the store lacks (all of them when it does not exist). The reason, in order: `config error: <first error>`, `secret store S does not exist`, `missing secret A in store S` / `missing secrets A, B in store S`. A file that names a store but references no secret does not need the store.
+  - Health (`project_state.assess`): errors are the file's plus a slug change ("project.slug: the file says 'x', but this project was added as 'y'; …"; the row keeps its slug). Missing keys are the required keys the store lacks (all of them when it does not exist or does not allow the project). The reason, in order: `config error: <first error>`, `secret store S does not exist`, `secret store S is not allowed for this project`, `secret store S is unreachable: <why>`, `missing secret A in store S` / `missing secrets A, B in store S` (revised 2026-11-11, `docs/config-repo.md` §3, §7). A file that names a store but references no secret does not need the store.
 - **Intake** reads the config afresh (not the cache), so an agent added to the file is known to the next task. Rejections: `unknown project 'x'`, the health reason, `unknown agent 'x' in project 'p' (it defines a, b)`, `no provider configured` / `unknown provider 'x'`, and the existing ones. `POST /api/tasks` still checks nothing itself; the panel sees the rejection as a `rejected` status event on the task's stream.
 - **Preparing** reads the config again, fails the run with the health reason or "agent 'x' is no longer defined in project 'p'", records `config_commit`, `config` and `agent_snapshot`, builds the images, then clones, writes attachments, starts the services and runs `workstation.setup`, all from that config. Container start (first start and each resume) takes model, provider, runtime, identity and connections from `runs.config`; the run spec carries the role as `agent_prompt`.
 - **Secrets in the workstation.** The workstation environment is the config's `env` with secrets substituted, plus every store key that the services' settings reference, under its own name, so the environment section's `$DB_PASSWORD` is true. Repository credentials and connection headers are used by reference only and never exported (since phase 4 the egress proxy holds them). Provider variable names in `env` are dropped as before.
@@ -707,10 +707,21 @@ did it with Docker, the Kubernetes section is named instead.
 - **Caches** (`worker/caches.py`, `docs/kubernetes.md` §7.6). `cache_specs` names each entry `<n>-<sanitised path>` (its index in the list, the path's characters outside `[A-Za-z0-9._-]` as `_`); the Run spec carries `{path, name}`. The operator mounts `caches/<name>` of the project volume (or, without one, of the run's workspace) at the path in the setup containers and the workstation. `prepare`, as the run user, creates the directories and every mount point below the home or `/tmp`: the kubelet would create a missing `~/.cache` as root. The panel's cache size (`ProjectOut.cache_bytes`) is gone. The project volume `exradius-project-<slug>` is created by the operator on the project's first Run (owned by no Run; a deleted one still terminating is waited for) and deleted by the worker on the api's `project_deleted` control message, or by its sweep every minute when the project no longer exists.
 - **Service `command`** is the container's `args`; the entrypoint is the image's.
 - **Store changes** (`config_routes._verify_after_keys`). After `POST /api/stores`,
-  `PUT /api/stores/{id}/keys` and `PUT /api/stores/{id}/keys/{key}`, every project whose
-  latest read names the store, is runnable now and whose freshness is neither `current`
-  nor `running` gets a verification through `_request_verification` (the one-open rule;
-  without the broker it fails at once and the store change still succeeds).
+  `PATCH /api/stores/{id}`, `PUT /api/stores/{id}/keys` and `PUT /api/stores/{id}/keys/{key}`,
+  every project whose latest read names the store, is runnable now and whose freshness is
+  neither `current` nor `running` gets a verification through `_request_verification` (the
+  one-open rule; without the broker it fails at once and the store change still succeeds).
+- **Stores bound to projects, backends, Vault** (`docs/config-repo.md` §7, implemented
+  2026-11-11). Migrations `0009` (`secret_store_projects`, `secret_store_changes`, each
+  project allowed for the store its cached snapshot named) and `0010`
+  (`secret_stores.settings`). `exradius/secret_backends/`: the `SecretBackend` protocol and
+  `StoreUnreachable`, `internal.py`, `kinds.py` (strict settings per kind), `vault.py`
+  (`VaultClient`: Kubernetes auth sign-in, `subkeys` for names cached 30 s, `data` for values
+  never cached, retries for 10 s). One `SecretBackends` per process (`AppState.secrets`,
+  `RunManager.backends`), so the Vault token and the names cache are shared. Intake,
+  `preparing` and Verify commit the config snapshot before asking the store, so a slow Vault
+  holds no row lock; `preparing` resolves values before it locks the run row. Panel views
+  and the directory ask an external store once (`retry=False`).
 
 ## 13. Operating rules and prompt layout (agreed 2026-11-06)
 

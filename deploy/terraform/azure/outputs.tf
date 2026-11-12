@@ -24,6 +24,7 @@ locals {
         userNamespaces = false
       }
     } : {},
+    local.vault_values,
   )
 }
 
@@ -53,7 +54,7 @@ output "push_command" {
 
 output "bootstrap" {
   description = "What deploy/terraform/bootstrap.sh needs."
-  value = {
+  value = merge({
     cloud           = "azure"
     kubeconfig      = "az aks get-credentials --resource-group ${azurerm_resource_group.rg.name} --name ${azurerm_kubernetes_cluster.aks.name} --overwrite-existing"
     context         = azurerm_kubernetes_cluster.aks.name
@@ -61,7 +62,7 @@ output "bootstrap" {
     ingress_ip      = azurerm_public_ip.ingress.ip_address
     ingress_ip_name = azurerm_public_ip.ingress.name
     resource_group  = azurerm_resource_group.rg.name
-  }
+  }, local.vault_bootstrap)
 }
 
 output "postgres_uri" {

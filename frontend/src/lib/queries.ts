@@ -13,6 +13,8 @@ export const qk = {
   catalog: ["catalog"] as const,
   stores: ["stores"] as const,
   storeKeys: (id: string) => ["stores", id, "keys"] as const,
+  storeChanges: (id: string) => ["stores", id, "changes"] as const,
+  storeKinds: ["store-kinds"] as const,
   gitCredentials: ["git-credentials"] as const,
   integrationTokens: ["integration-tokens"] as const,
   bridges: ["bridges"] as const,
@@ -59,6 +61,8 @@ export const useCatalog = () => useQuery({ queryKey: qk.catalog, queryFn: api.ca
 export const useStores = () => useQuery({ queryKey: qk.stores, queryFn: api.stores.list });
 export const useStoreKeys = (id: string | null | undefined) =>
   useQuery({ queryKey: qk.storeKeys(id ?? "-"), queryFn: () => api.stores.keys(id!), enabled: !!id });
+export const useStoreKinds = () => useQuery({ queryKey: qk.storeKinds, queryFn: api.stores.kinds, staleTime: 60_000 });
+export const useStoreChanges = (id: string) => useQuery({ queryKey: qk.storeChanges(id), queryFn: () => api.stores.changes(id) });
 export const useGitCredentials = () => useQuery({ queryKey: qk.gitCredentials, queryFn: api.gitCredentials.list });
 export const useIntegrationTokens = () => useQuery({ queryKey: qk.integrationTokens, queryFn: api.integrationTokens.list });
 // Bridges report every 5 minutes; `reporting` turns false 15 minutes after the last report.

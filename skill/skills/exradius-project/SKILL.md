@@ -12,9 +12,10 @@ Kubernetes pod. A project is one file, `exradius.yaml`, in a git repository: the
 repositories, the workstation image the agents work in, the services next to it
 (Postgres, Redis, ...), environment, what the agent may reach on the network, notes, MCP
 connections, the agents, and the name of a **secret store** the Exradius admin fills. The
-admin pastes the config repository's URL and fills the store; the developers own
-everything else. You do the developers' part, on their machine, where a mistake costs
-seconds instead of a commit, a push and a Verify in the cluster.
+admin pastes the config repository's URL, fills the store (or points it at a Vault path)
+and allows the project to use it; the developers own everything else. You do the
+developers' part, on their machine, where a mistake costs seconds instead of a commit, a
+push and a Verify in the cluster.
 
 The file is good when an agent, on its first ticket, is where a new engineer is after a
 well-run first day: the tools are installed at the right versions, the dependencies are

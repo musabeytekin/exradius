@@ -1,0 +1,77 @@
+# HashiCorp Vault for the local kind cluster ONLY (make -C deploy/kind dev-vault,
+# docs/kubernetes.md §17). Dev mode: unsealed, everything in memory, plain HTTP, and the root
+# token "root". Never use this outside a local cluster. dev-vault.sh configures it, and must
+# run again after the pod restarts, since dev mode forgets everything.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault
+  namespace: vault
+---
+# The Kubernetes auth method reviews the api's and the worker's ServiceAccount tokens with
+# Vault's own ServiceAccount (TokenReview).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: vault
+    namespace: vault
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vault
+  namespace: vault
+  labels: {app: vault}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: vault}
+  template:
+    metadata:
+      labels: {app: vault}
+    spec:
+      serviceAccountName: vault
+      containers:
+        - name: vault
+          # Vault 2.2.2 (amd64 and arm64), pinned by digest.
+          image: hashicorp/vault:2.2.2@sha256:dfa48c2fa2b0099ccb47681ec5c4804bf5aec9d6879ecfee07ad4b92a5427ad6
+          # The image's entrypoint runs `vault server -dev` as the vault user.
+          args: [server, -dev]
+          env:
+            - {name: VAULT_DEV_ROOT_TOKEN_ID, value: root}
+            - {name: VAULT_DEV_LISTEN_ADDRESS, value: "0.0.0.0:8200"}
+            # Dev mode locks no memory: no IPC_LOCK capability to set.
+            - {name: SKIP_SETCAP, value: "true"}
+            # For `kubectl exec ... vault` (dev-vault.sh): the CLI in the pod talks to this server.
+            - {name: VAULT_ADDR, value: "http://127.0.0.1:8200"}
+            - {name: VAULT_TOKEN, value: root}
+          ports:
+            - {name: http, containerPort: 8200}
+          readinessProbe:
+            httpGet: {path: /v1/sys/health, port: http}
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: vault
+spec:
+  selector: {app: vault}
+  ports:
+    - {name: http, port: 8200, targetPort: http}

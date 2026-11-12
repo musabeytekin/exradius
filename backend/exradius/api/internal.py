@@ -44,9 +44,10 @@ from exradius.models import (
 )
 from exradius.project_state import cached, store_values
 from exradius.network import route_connection
-from exradius.resolve import MissingSecret, connection_spec
+from exradius.resolve import StoreError, connection_spec
 from exradius.schemas import internal as i
 from exradius.schemas.project_config import ProjectConfig
+from exradius.secret_backends import StoreUnreachable
 from exradius.states import State as RunState
 from exradius.states import is_terminal
 from exradius.storage import ObjectNotFound
@@ -118,16 +119,18 @@ def _pod_connections(config: ProjectConfig, names, secrets, state) -> list[dict]
 @router.get("/spec", response_model=i.RunSpecResponse)
 async def run_spec(run: RunDep, session: DB, state: State):
     """Built from the config the run read in ``preparing`` (``runs.config``), with secrets
-    from the store that config names, decrypted now. ``resume`` once an answer was
+    from the store that config names, decrypted now if it still allows the task's project. ``resume`` once an answer was
     delivered: a pod recreated for a resume starts there (docs/kubernetes.md §8.3)."""
     task = run.task
     if run.config is None:
         raise HTTPException(409, "the run has no config yet")
     config = ProjectConfig.model_validate(run.config, strict=False)
-    secrets = await store_values(session, state.box, config.secret_store)
     try:
+        secrets = await store_values(session, state.secrets, task.project_id, config)
         connections = _pod_connections(config, config.agents[task.agent].connections, secrets, state)
-    except MissingSecret as exc:
+    except StoreUnreachable as exc:  # the runner retries a 5xx
+        raise HTTPException(503, str(exc)) from exc
+    except StoreError as exc:
         raise HTTPException(422, str(exc)) from exc
     agent = config.agents[task.agent]
     return i.RunSpecResponse(
@@ -305,11 +308,13 @@ async def verify_spec(verification: VerificationDep, session: DB, state: State):
     if snapshot is None or snapshot.config is None:
         raise HTTPException(409, "the project's config is not readable")
     config = snapshot.config
-    secrets = await store_values(session, state.box, config.secret_store)
     used = [name for name in config.connections if any(name in a.connections for a in config.agents.values())]
     try:
+        secrets = await store_values(session, state.secrets, verification.project_id, config)
         specs = _pod_connections(config, used, secrets, state)
-    except MissingSecret as exc:
+    except StoreUnreachable as exc:  # the runner retries a 5xx
+        raise HTTPException(503, str(exc)) from exc
+    except StoreError as exc:
         raise HTTPException(422, str(exc)) from exc
     return i.VerifySpec(connections=[i.ConnectionSpecModel.model_validate(c) for c in specs])
 

@@ -192,6 +192,7 @@ def create_app(
             startup_check.cancel()
             await asyncio.gather(startup_check, return_exceptions=True)
             await app.state.exradius.rereads.close()
+            await app.state.exradius.secrets.aclose()
             if hasattr(publisher, "close"):
                 await publisher.close()
             await engine.dispose()

@@ -101,18 +101,62 @@ class GitCredential(Base):
 
 
 class SecretStore(Base):
-    """A named set of secrets a project's config refers to with ``secret_store`` (§7)."""
+    """A named set of secrets a project's config refers to with ``secret_store`` (§7). Only
+    the projects the admin allowed for it (``secret_store_projects``) may use it."""
 
     __tablename__ = "secret_stores"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String(63), unique=True)
     kind: Mapped[str] = mapped_column(String(20), default="internal")
+    """Which backend holds the values (``exradius.secret_backends``): ``internal`` or an
+    external one."""
+    settings: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    """Where an external store's values are, validated per kind; never a credential."""
     created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
 
     entries: Mapped[list[SecretStoreEntry]] = relationship(
         cascade="all, delete-orphan", order_by="SecretStoreEntry.key"
     )
+
+
+class SecretStoreProject(Base):
+    """A project the admin allowed to use a store (§7): a config naming a store that does not
+    allow its project is not runnable, and no value of that store is resolved for it."""
+
+    __tablename__ = "secret_store_projects"
+
+    store_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("secret_stores.id", ondelete="CASCADE"), primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True, index=True)
+    allowed_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+
+
+class SecretStoreChange(Base):
+    """One change to a store, appended and never updated (§7): who made it, when, and what.
+    Never a value. ``store_id`` is no foreign key, so the log outlives a deleted store."""
+
+    __tablename__ = "secret_store_changes"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True, autoincrement=True
+    )
+    at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
+    actor: Mapped[str] = mapped_column(String(100))
+    """The admin's user name (``migration`` for what a migration recorded)."""
+    store_id: Mapped[uuid.UUID] = mapped_column(Uuid, index=True)
+    store: Mapped[str] = mapped_column(String(63))
+    """The store's name at the time."""
+    action: Mapped[str] = mapped_column(String(30))
+    """``store_created``, ``store_deleted``, ``key_set``, ``key_deleted``,
+    ``project_allowed``, ``project_removed`` or ``settings_changed``."""
+    key: Mapped[str | None] = mapped_column(String(255))
+    project: Mapped[str | None] = mapped_column(String(100))
+    """The project's slug, for ``project_allowed`` and ``project_removed``."""
+    detail: Mapped[dict[str, Any] | None] = mapped_column(nullable=True)
+    """What else the change needs to be read: the kind and settings of a created store, the
+    settings before and after a change. Settings hold no secret."""
 
 
 class SecretStoreEntry(Base):
@@ -512,7 +556,9 @@ __all__ = [
     "RoutingSettings",
     "Run",
     "SecretStore",
+    "SecretStoreChange",
     "SecretStoreEntry",
+    "SecretStoreProject",
     "Task",
     "TranscriptChunk",
     "Worker",

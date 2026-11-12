@@ -70,8 +70,8 @@ reset.
 
 | Component | Kind | Holds | May do in Kubernetes | May not |
 |---|---|---|---|---|
-| `api` | Deployment, `exradius-backend` image | master key, Postgres | create TokenReviews (to authenticate the egress proxy; `system:auth-delegator`) | touch Runs, pods or Secrets |
-| `worker` | Deployment, same image | master key, Postgres, broker | in `exradius-runs`: create, patch, delete and watch `Run`; create, patch and delete Secrets (no get or list); list and delete PVCs. In `exradius-builds`: create, get, watch and delete `Build`; create, patch and delete Secrets (the Build's token). Read the operator's Lease | create pods; read Secrets |
+| `api` | Deployment, `exradius-backend` image | master key, Postgres; signs in to the install's Vault, if any | create TokenReviews (to authenticate the egress proxy; `system:auth-delegator`) | touch Runs, pods or Secrets |
+| `worker` | Deployment, same image | master key, Postgres, broker; signs in to the install's Vault, if any | in `exradius-runs`: create, patch, delete and watch `Run`; create, patch and delete Secrets (no get or list); list and delete PVCs. In `exradius-builds`: create, get, watch and delete `Build`; create, patch and delete Secrets (the Build's token). Read the operator's Lease | create pods; read Secrets |
 | `operator` | Deployment, Go (controller-runtime) | nothing secret | in `exradius-runs`: create, watch and delete pods and PVCs; in `exradius-builds`: create, watch and delete pods. In both: read `pods/log`; update `runs/status` or `builds/status`; write Events. Its leader-election Lease | read Secrets; reach Postgres or the broker |
 | `egress` | Deployment, Go | decrypted credentials of active runs, in memory only | list and watch pods in `exradius-runs` and `exradius-builds` | anything else |
 | run pod | Pod per Run | the per-run Secret (§10) | nothing: `automountServiceAccountToken: false`, and NetworkPolicy blocks the API server | reach anything but the proxy, the api's internal port and DNS |
@@ -578,8 +578,26 @@ the only one NetworkPolicy lets a run pod reach. It uses the per-run token, as t
 
 ## 10. Secrets
 
-The master key and the stores never leave `exradius` and Postgres. What a run needs is
-decrypted by the worker at Run creation, or by the api when a component asks for it.
+The master key and the internal stores never leave `exradius` and Postgres; a store of kind
+`vault` stays in the install's Vault (config-repo.md §7.4). What a run needs is read from its
+store, internal values decrypted, by the worker at Run creation, or by the api when a
+component asks for it (the run spec, the verify spec, the egress proxy's policy). Nothing
+past that point knows where a value came from.
+
+- **Only the projects a store allows** get its values (config-repo.md §7.1). Every one of
+  those reads is `project_state.store_values` with the run's project, which refuses another
+  project's store: a config cannot pull a store into `env` by naming it.
+- **Only the names the config references** are read (its required keys), never the whole
+  store.
+- **Vault** is read by the api and the worker as their own ServiceAccounts (Vault's
+  Kubernetes auth method; with values `vault.audience`, a projected token only Vault
+  accepts). No Vault credential is stored, no value is cached (key names are, for 30
+  seconds), and no run pod ever reaches Vault: the per-run Secret and the proxy carry what
+  the run needs, as for an internal store.
+- **An unreachable store is not a missing key.** After about ten seconds of retries a task
+  is rejected, or the run fails in `preparing`, with `secret store S is unreachable: <why>`;
+  the run spec and the egress policy answer 503, so the runner retries and the proxy keeps
+  the policy it has.
 
 | Secret | Phases 1–3 | From phase 4 |
 |---|---|---|
@@ -661,7 +679,10 @@ waits up to 10 s for it, then is refused.
   probe's test provider), each repository with its credential and `push`, and each HTTP
   connection with secret headers. Verify Runs get no model route. It is cached in memory per
   pod for five minutes (a replaced credential takes effect then), dropped when the pod goes,
-  and never written. A failed refresh keeps the last one; an ended run gets none.
+  and never written. A failed refresh keeps the last one; an ended run gets none. The
+  credentials come from the run's secret store, so a store that no longer allows the run's
+  project is refused (409) and one that cannot be reached answers 503: either way the proxy
+  keeps what it has until the run ends (config-repo.md §7).
 
 **Policy:**
 
@@ -725,8 +746,13 @@ waits up to 10 s for it, then is refused.
 |---|---|
 | run pods (`exradius.dev/run`) | no ingress; egress only to the cluster DNS (values `networkPolicy.dns`), the egress pods on 3128 and 3129, and the api pods on 8001 |
 | build pods (`exradius.dev/purpose: build`) | no ingress; egress to the DNS, the api on 8001 and, with `builds.egress: proxy` (default), the egress pods on 3128; with `direct`, anywhere but `networkPolicy.clusterCIDRs` |
-| api | ingress on 8001 only from run, build and egress pods; on 8000 from the frontend and `networkPolicy.apiFrom` (an ingress controller) |
+| api | ingress on 8001 only from run, build and egress pods; on 8000 from the frontend and `networkPolicy.apiFrom` (an ingress controller); egress anywhere |
 | egress | ingress on 3128 and 3129 from run and build pods; egress anywhere |
+
+The api and the worker have no egress policy: they reach Postgres, RabbitMQ, the object
+store, the Kubernetes API, git hosts and the install's Vault (values `vault.address`)
+wherever those are. An install that adds egress policies of its own must let both reach
+Vault's address and port.
 
 A run therefore cannot reach the Kubernetes API, the stack's Postgres, RabbitMQ, other runs or
 the internet directly; this was checked from a run's shell on kind (kindnet's
@@ -1053,6 +1079,8 @@ builds: {registry: ..., builderImage: "", cache: true, insecureRegistries: [], r
 objectStore: {kind: s3, bucket: exradius, s3: {endpoint: ...}, gcs: {endpoint: ""},
               azure: {account: "", endpoint: "", existingSecret: ""}, inCluster: {seaweedfs: true}}
 identity: {app: {serviceAccountAnnotations: {}, podLabels: {}}, build: {serviceAccountAnnotations: {}, podLabels: {}}}
+vault: {address: "", authMount: kubernetes, role: exradius, namespace: "", caBundle: {configMap: "", key: ca.crt},
+        audience: "", tokenReviewer: false}   # stores of kind vault (config-repo.md §7.4); empty address: none
 stack: {nodeSelector: {}, tolerations: []}
 postgres: {existingSecret: ..., inCluster: {cloudnativepg: true, storage: 10Gi}}
 rabbitmq: {existingSecret: ..., inCluster: {operator: true}}
@@ -1070,12 +1098,14 @@ Terraform (`deploy/terraform/<cloud>/`, §28) creates what the values point at:
 - the cloud identities of the api, the worker and build pods;
 - a static address for the panel's load balancer, so `publicApiUrl` is known before the
   install;
-- `values-generated.yaml`.
+- `values-generated.yaml`, with a `vault` block when the optional `vault` variable names an
+  existing Vault (§28), and then the output `vault_kubernetes_auth` for Vault's admin.
 
 `deploy/terraform/bootstrap.sh <cloud>` then prepares the cluster (kubeconfig, the AWS Load
 Balancer Controller or cert-manager and the RabbitMQ operator, Traefik on the reserved
-address and open to `allowed_cidrs` only, the Secrets from Terraform's outputs), and
-`make -C deploy push` pushes the images.
+address and open to `allowed_cidrs` only, the Secrets from Terraform's outputs, and Vault's
+CA as a ConfigMap when the `vault` variable names one), and `make -C deploy push` pushes the
+images.
 
 ## 17. The local developer loop
 
@@ -1101,11 +1131,28 @@ address and open to `allowed_cidrs` only, the Secrets from Terraform's outputs),
     runtime to containerd (`systemd-cgroup = true`, as kind's kubelet uses systemd) and
     creates the RuntimeClass `gvisor`. It works in the arm64 kind node on this Mac;
     `runs.runtimeClassName: gvisor` then runs every run pod in it.
+  - `make dev-vault` (added 2026-11-12) runs HashiCorp Vault for stores of kind `vault`
+    (config-repo.md §7.4) in the namespace `vault`: `hashicorp/vault:2.2.2`, pinned by digest,
+    in **dev mode, for the local cluster only** (unsealed, in memory, plain HTTP, root token
+    `root`; `deploy/kind/vault.yaml`). `dev-vault.sh` then enables the Kubernetes auth method
+    against the cluster's own API (`kubernetes_host=https://kubernetes.default.svc`; Vault
+    reviews tokens with its own ServiceAccount, bound to `system:auth-delegator`), writes the
+    policy `exradius` (read `secret/data/exradius/*` and `secret/subkeys/exradius/*`), the role
+    `exradius` (the ServiceAccounts `exradius-api` and `exradius-worker` in `exradius`, audience
+    `vault`) and a sample secret `secret/exradius/demo` with `DEMO_TOKEN` and `DEMO_PASSWORD`.
+    It is idempotent, and dev mode forgets everything when its pod restarts, so it is run
+    again then. The chart reaches it with `deploy/kind/values-vault.yaml` on top of
+    `values-local.yaml` (`vault.address`, and `vault.audience: vault`, so the api and the
+    worker send a projected token only Vault accepts): `tilt up -- --vault`, or
+    `make install VAULT=1`. A store of kind `vault` with mount `secret` and path
+    `exradius/demo` then lists both keys. More secrets: `kubectl --context kind-exradius -n
+    vault exec deploy/vault -- vault kv put -mount=secret exradius/<name> KEY=value`.
 - **Tilt** (`Tiltfile` at the root):
   - `tilt up` builds the images (backend, frontend, operator, egress, builder, runtime
     bundle, project default) and
     pushes them to `localhost:5001`;
-  - installs the chart with `values-local.yaml`;
+  - installs the chart with `values-local.yaml` (and `deploy/kind/values-vault.yaml` with
+    `tilt up -- --vault`);
   - syncs changed Python files into the api and worker pods and restarts the process, with no
     image rebuild;
   - port-forwards the panel, API and RabbitMQ to `localhost:3100`, `8100`, `5673` and `15673`.
@@ -1711,6 +1758,41 @@ the list.
   Linux 3). AKS Pod Sandboxing (Kata, RuntimeClass `kata-vm-isolation`) runs on Azure Linux
   x86 nodes only, so it is not offered. The storage account allows no Shared Key; Terraform
   makes the container through Azure Resource Manager. RabbitMQ in the cluster.
+- **An existing Vault** (added 2026-11-12, config-repo.md §7.4). Exradius does not install
+  or operate Vault on a cloud: the install points at one the organisation already runs,
+  inside the cluster or outside it. Each module takes an optional `vault` variable (null by
+  default, and then nothing changes): `address`, `auth_mount` (`kubernetes`), `role`
+  (`exradius`), `namespace`, `audience` (`vault` recommended, with the role's audience the
+  same), `ca_file` and `token_reviewer`. Set, `values-generated.yaml` carries the chart's
+  `vault` block, since the address is the account's own value like the registry and the
+  bucket; `ca_file` (a PEM file) becomes the ConfigMap `exradius-vault-ca`, which
+  `bootstrap.sh` makes and the block names as `vault.caBundle`. The output
+  `vault_kubernetes_auth` gives Vault's admin the cluster's API address and CA, the auth
+  mount and role, the namespace `exradius` and the ServiceAccounts `exradius-api` and
+  `exradius-worker` the role binds, the audience, the policy's paths and the `vault`
+  commands to write them.
+  - **A Vault outside the cluster** reviews the pods' tokens at the cluster's API (a
+    TokenReview), so it must reach that API: its outbound address goes into
+    `allowed_cidrs`, which every module's API endpoint is limited to (EKS's public endpoint,
+    GKE's authorized networks, AKS's authorized IP ranges; the panel's load balancer is open
+    to them too). It also needs a credential for the TokenReview: with an audience, the
+    pods' own tokens are refused by the API server, so `token_reviewer` sets the chart's
+    `vault.tokenReviewer`, a ServiceAccount `exradius-vault-reviewer` bound to
+    `system:auth-delegator` with a long-lived token in the Secret of that name, for the auth
+    method's `token_reviewer_jwt`. A Vault inside the cluster reviews with its own
+    ServiceAccount (`make -C deploy/kind dev-vault` does it that way, §17) and needs neither.
+    This path, Vault outside a cloud cluster, has not been run by us.
+  - **Reaching Vault.** The chart gives the api and the worker no egress NetworkPolicy, and
+    no module restricts outbound traffic: on AWS the nodes sit in public subnets with public
+    addresses and the EKS module's node security group allows all egress; GKE's nodes have
+    external addresses and the VPC's implied egress rule allows everything (the cluster is
+    not private); AKS sends outbound traffic through its Standard load balancer, with no
+    network security group added. A Vault on the internet is reached as is. A Vault on a
+    private network needs a route the modules do not make (peering, a VPN, a transit
+    gateway), and its firewall must admit the cluster's sources: on AWS and Azure the node
+    subnets (`10.40.0.0/20` and, on AWS, `10.40.16.0/20`; pods leave with their node's
+    address), on GKE also the pod range `10.44.0.0/14`, since GKE does not translate pod
+    addresses for private destinations.
 - **ReadWriteMany project volumes and user namespaces exclude each other**: EFS, Filestore
   and Azure Files are NFS or SMB, which have no idmapped mounts, so a user-namespaced pod
   cannot mount them. Terraform's `rwx` therefore turns user namespaces off in the generated

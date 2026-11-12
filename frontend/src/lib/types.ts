@@ -69,7 +69,7 @@ export interface ProjectConfigSnapshot {
 }
 export interface RequiredKey { key: string; present: boolean }
 /** As the API sends it: `name` (current backend) or `key`. */
-export interface RequiredKeyIn { key?: string; name?: string; present?: boolean }
+export interface RequiredKeyIn { key?: string; name?: string; present?: boolean | null }
 /**
  * A project as `GET /api/projects[/{id}]` returns it. The current API puts the snapshot's fields
  * at the top level (`commit`, `read_at`, `config`, `raw`, `errors` ...); a nested `snapshot` is
@@ -94,6 +94,10 @@ export interface Project {
   store?: string | null; store_id?: Uuid | null;
   /** Whether the store the file names exists. */
   store_exists?: boolean | null;
+  /** Whether that store lets this project use it (config-repo.md §7). */
+  store_allowed?: boolean | null;
+  /** Why the store's backend could not list its keys (an external store out of reach). */
+  store_error?: string | null;
   required_keys?: (string | RequiredKeyIn)[] | null;
   missing_keys?: string[] | null;
   /** Agent slugs of the config. */
@@ -136,11 +140,37 @@ export interface CatalogEntry {
 /** Secret stores (§7). Values are write-only. */
 export interface SecretStore {
   id: Uuid; name: string; kind?: string; created_at?: string;
+  /** Where an external store's values are (its kind's settings); never a credential. */
+  settings?: Record<string, unknown> | null;
+  /** The same as one line, e.g. `secret/data/team/bank`. */
+  where?: string | null;
+  /** Values are set in the backend itself; Exradius refuses key writes. */
+  external?: boolean | null;
+  /** Why the backend could not list the keys. */
+  error?: string | null;
   key_count?: number | null; keys?: (string | SecretStoreKey)[] | null;
   /** Slugs of the projects whose config names it. */
   used_by?: string[] | null;
+  /** Slugs of the projects the admin allowed to use it; no other project gets its values. */
+  allowed_projects?: string[] | null;
 }
 export interface SecretStoreKey { key: string; updated_at?: string | null }
+export interface StoreIn { name: string; kind?: string; settings?: Record<string, unknown>; allowed_projects?: string[] }
+export interface StoreKindField { name: string; label: string; description: string; default: unknown; required: boolean }
+/** A store kind as `GET /api/store-kinds` lists it. */
+export interface StoreKind {
+  kind: string; label: string; external: boolean;
+  /** Whether this install can use it; `reason` says why not. */
+  available: boolean; reason: string | null;
+  fields: StoreKindField[];
+}
+export type StoreChangeAction =
+  | "store_created" | "store_deleted" | "key_set" | "key_deleted" | "project_allowed" | "project_removed" | "settings_changed";
+/** One entry of a store's change log; never a value. */
+export interface StoreChange {
+  id: number; at: string; actor: string; action: StoreChangeAction;
+  key: string | null; project: string | null; detail: Record<string, unknown> | null;
+}
 
 /** Config repository access per git host (§6). */
 export type GitCredentialKind = "token" | "basic";

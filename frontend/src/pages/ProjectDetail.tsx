@@ -137,7 +137,7 @@ export function ProjectDetailPage() {
         <Tabs.List className="mb-5">
           <Tabs.Trigger value="config" attention={!!p && (errorsOf(p).length > 0 || health?.health === "unreadable")}>Config</Tabs.Trigger>
           <Tabs.Trigger value="agents">Agents</Tabs.Trigger>
-          <Tabs.Trigger value="secrets" attention={health?.health === "missing_secrets"}>Secrets</Tabs.Trigger>
+          <Tabs.Trigger value="secrets" attention={health?.health === "missing_secrets" || health?.health === "store_not_allowed"}>Secrets</Tabs.Trigger>
           <Tabs.Trigger value="verify" attention={verifyState === "failed"}>Verify</Tabs.Trigger>
           <Tabs.Trigger value="tasks">Tasks</Tabs.Trigger>
         </Tabs.List>

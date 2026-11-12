@@ -75,7 +75,7 @@ def add_plane(admin, tmp_path, config: str = PLANE, bridges: dict[str, str] | No
 
 
 def plane_store(admin) -> dict:
-    return admin.post("/api/stores", json={"name": "plane"}).json()
+    return admin.post("/api/stores", json={"name": "plane", "allowed_projects": ["plane"]}).json()
 
 
 def notices(control) -> list[list[str]]:

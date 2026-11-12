@@ -94,7 +94,7 @@ class Worker:
         next check, in this process or another."""
         if self.publisher is None:
             return
-        await directory.check(self.sessions, self.publisher.publish_directory)
+        await directory.check(self.sessions, self.publisher.publish_directory, self.runs.backends)
 
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -108,7 +108,7 @@ class Worker:
             try:
                 intake = await accept_task(
                     self.sessions, self.store, message.body, box=self.runs.box, cache_dir=self.settings.cache_dir,
-                    router=self.router,
+                    router=self.router, backends=self.runs.backends,
                 )
             except Exception:
                 log.exception("task intake failed; message will be redelivered")
@@ -288,6 +288,7 @@ class Worker:
             sweeper.cancel()
         await self.heartbeat.stop()
         await self.presence.stop()
+        await self.runs.backends.aclose()
         await self.engine.dispose()
 
 

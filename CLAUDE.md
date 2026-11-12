@@ -88,6 +88,8 @@ Local cluster (kind, kubectl, helm, tilt):
 ```bash
 make -C deploy/kind dev-up      # registry localhost:5001, kind cluster "exradius", CloudNativePG, RabbitMQ operator, Secrets
 tilt up                         # build every image, install charts/exradius with values-local.yaml, live-update Python
+make -C deploy/kind dev-vault   # Vault in dev mode (local only) for stores of kind vault: auth role, policy, secret/exradius/demo
+tilt up -- --vault              # the same install plus deploy/kind/values-vault.yaml (make ... install VAULT=1 without Tilt)
 tilt down                       # uninstall (the exradius namespace and its Secrets stay)
 make -C deploy/kind dev-down    # delete the cluster and the registry
 make -C deploy/kind images install   # the same without Tilt, images tagged with the version
@@ -117,8 +119,9 @@ claude plugin validate . && claude plugin validate skill   # the marketplace (re
 **Config-repo model (docs/config-repo.md).** A project is a git repository holding
 `exradius.yaml` (or `.exradius/exradius.yaml`): slug, repositories, workstation image or
 Dockerfile, services, env, notes, connections, agents, and the name of one `secret_store`.
-Nothing about a project is edited in the panel. The admin owns only: secret stores and their
-keys, model providers, and one git credential per host for reading config repositories.
+Nothing about a project is edited in the panel. The admin owns only: secret stores (their
+keys, the projects allowed to use each, and where each is kept), model providers, and one
+git credential per host for reading config repositories.
 `${secret:NAME}` references are allowed only in repository credentials, service env, `env`,
 and connection config/env/headers; the set of names referenced is the project's required keys.
 The schema is strict pydantic with `extra="forbid"` in `schemas/project_config.py`.
@@ -128,9 +131,19 @@ The schema is strict pydantic with `extra="forbid"` in `schemas/project_config.p
   errors, warnings, required_keys, store).
 - `project_state.py` wraps it with the host credential, the store, and the runnable check;
   the API caches the latest snapshot on `projects.snapshot` for the panel only.
+- Secret stores (config-repo.md §7): a store hands its keys and values only to the projects
+  the admin allowed for it (`secret_store_projects`); `project_state.store_values(session,
+  backends, project_id, config)` is the one way to resolve values and refuses any other.
+  Every change to a store goes to the append-only `secret_store_changes` (never a value).
+  `secret_backends/` reads a store through its backend (`keys()`, `values(names)`, only the
+  names the config references): `internal` (encrypted rows in Postgres) or `vault` (one
+  HashiCorp Vault per install, KV v2, Kubernetes auth with the pod's ServiceAccount, values
+  never cached). Settings per kind are strict pydantic. `StoreUnreachable` is not a missing
+  key: its reason is `secret store S is unreachable: ...`, after about ten seconds of retries
+  in intake and `preparing`.
 - The worker never trusts that cache: intake and `preparing` read the file afresh and
-  record `runs.config_commit`. Tasks for a project with errors or missing keys are rejected
-  with the reason. `capabilities.py` is the hook for keys a version accepts before it can
+  record `runs.config_commit`. Tasks for a project with errors, a store that does not allow
+  it, an unreachable store or missing keys are rejected with the reason. `capabilities.py` is the hook for keys a version accepts before it can
   run them (empty since phase 3); its reason would be the health reason too.
 - `worker/builds.py` turns each Dockerfile into a `Build` object (create-if-absent, tag by
   tree hash, context tar in the object store, served by `/internal/builds/{id}/context`)
@@ -140,8 +153,8 @@ The schema is strict pydantic with `extra="forbid"` in `schemas/project_config.p
   without `ready`. Each project has a PVC `exradius-project-<slug>` for git mirrors and
   `workstation.cache` (`worker/caches.py` names them); the worker deletes it with the
   project.
-- `resolve.py` turns the config into run inputs; secrets are decrypted only there, when the
-  Run and its per-run Secret are created (the project's own secret variables) or for the
+- `resolve.py` turns the config into run inputs; secrets are read from the store (and
+  decrypted, for an internal one) only there, when the Run and its per-run Secret are created (the project's own secret variables) or for the
   egress proxy's policy (`api/egress.py`: the provider, repository and HTTP connection
   credentials, which never reach a pod). Everything shown to the panel, the agent's
   environment section, events and logs uses `$NAME` placeholders.
@@ -280,7 +293,8 @@ host list; `backend/tests/test_skill_check.py` fails when they drift, so a chang
 ## Conventions worth knowing
 
 - Secrets and provider credentials are write-only through the API and encrypted at rest
-  with `EXRADIUS_SECRET_KEY` (`crypto.py`). Never log or return their values.
+  with `EXRADIUS_SECRET_KEY` (`crypto.py`). Never log or return their values. A Vault
+  store's values never touch Postgres, and a store's settings hold no credential.
 - The worker does the harness's job only: it does not commit, push, open pull requests or
   otherwise act on behalf of the agent. Delivery problems become warnings in the result.
 - Unknown keys in `exradius.yaml` are errors, not warnings; keep validators strict.
@@ -300,5 +314,10 @@ cloud identities of the api, the worker and build pods, a static ingress address
 the values differ from kind: `values-eks.yaml`, `values-gke.yaml`, `values-aks.yaml`, then
 the generated file. The chart's `ingress` routes every path to the panel's nginx;
 `publicApiUrl` is its address. Values `identity`, `stack`, `objectStore.gcs|azure`,
-`builds.credentialHelper`, `runs.bundleMount` and `nodeSetup` are what the clouds use.
+`builds.credentialHelper`, `runs.bundleMount` and `nodeSetup` are what the clouds use. Each
+module's optional `vault` variable points the install at a Vault the organisation already
+runs (Exradius never installs one): it adds the `vault` block to `values-generated.yaml`,
+`bootstrap.sh` makes the CA ConfigMap from its `ca_file`, and the output
+`vault_kubernetes_auth` tells Vault's admin how to configure Kubernetes auth for the cluster
+(kubernetes.md §28).
 

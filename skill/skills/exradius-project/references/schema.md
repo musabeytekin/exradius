@@ -229,8 +229,13 @@ A connection that runs with `npx` or `uvx` needs that launcher in the workstatio
 string values under `repositories[].credential`, `services.*.env`, `env`, and
 `connections.*` `config`, `env` and `headers`. Anywhere else it is an error. The set of
 names referenced is the project's **required keys**; nothing declares them separately.
-Each resolves from the store named by `secret_store` when a run starts. A project whose
-store lacks a key cannot run (tasks are rejected with "missing secret NAME in store S").
+Each resolves from the store named by `secret_store` when a run starts, if the admin
+allowed this project to use that store. A project whose store lacks a key cannot run (tasks
+are rejected with "missing secret NAME in store S"), nor one whose store does not allow it
+("secret store S is not allowed for this project"); while an external store such as Vault
+cannot be reached, tasks are rejected with "secret store S is unreachable: ...". Whether the
+store keeps its values in Exradius or in Vault is the admin's business: the file only names
+it.
 The workstation also receives every secret that a service's env uses, under its own name
 (so `$DB_PASSWORD` is set in the workstation when `services.postgres.env` references
 `${secret:DB_PASSWORD}`). Repository credentials and connection values are used only where
@@ -302,8 +307,9 @@ Write a bridge file only when the developer says the team uses that bridge.
    private ones).
 2. Per project: paste the config repository URL (and a branch or path when not the
    defaults).
-3. Per store: create the secret store the file names and fill every required key. The
-   panel accepts a pasted `.env` block for several keys at once.
+3. Per store: create the secret store the file names, allow the project to use it, and
+   fill every required key (the panel accepts a pasted `.env` block for several keys at
+   once), or point the store at the Vault path whose fields hold them.
 
 Then Verify runs, by itself after every new commit of the config: "Read config" (commit,
 errors, warnings, missing keys), "Build workstation" and "Build service <name>", "Prepare

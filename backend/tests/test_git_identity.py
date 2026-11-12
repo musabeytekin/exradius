@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from exradius.git import RepoSpec
-from exradius.models import SecretStore, SecretStoreEntry
+from exradius.models import SecretStore, SecretStoreEntry, SecretStoreProject
 from exradius.runner import gitconfig
 from exradius.worker import git_identity
 from exradius.worker.git_identity import Identity, workstation_git
@@ -399,6 +399,7 @@ async def test_every_session_of_a_run_has_the_identity(manager, sessions, store,
         secret_store = SecretStore(name="billing")
         session.add(secret_store)
         await session.flush()
+        session.add(SecretStoreProject(store_id=secret_store.id, project_id=configured["project"].id))
         session.add(SecretStoreEntry(store_id=secret_store.id, key="GIT_TOKEN", value_encrypted=box.encrypt("ghp_push")))
         await session.commit()
     seen = []

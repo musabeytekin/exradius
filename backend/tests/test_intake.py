@@ -3,7 +3,7 @@ import json
 
 from sqlalchemy import select
 
-from exradius.models import Event, InfoRequest, Project, Run, SecretStore, SecretStoreEntry, Task
+from exradius.models import Event, InfoRequest, Project, Run, SecretStore, SecretStoreEntry, SecretStoreProject, Task
 from exradius.states import State
 from exradius.worker.intake import accept_answer
 from tests.conftest import BASE_CONFIG, commit_config
@@ -106,6 +106,7 @@ async def test_missing_store_and_keys_reject(sessions, store, configured, accept
         secret_store = SecretStore(name="billing")
         session.add(secret_store)
         await session.flush()
+        session.add(SecretStoreProject(store_id=secret_store.id, project_id=configured["project"].id))
         session.add(SecretStoreEntry(store_id=secret_store.id, key="TOKEN", value_encrypted=box.encrypt("t")))
         await session.commit()
         store_id = secret_store.id

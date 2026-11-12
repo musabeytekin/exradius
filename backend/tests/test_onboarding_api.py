@@ -432,7 +432,7 @@ def test_keys_arriving_verify_the_project_again(admin, control, sync_db, tmp_pat
     [auto] = control.verified
     finish(sync_db, auto, "failed", project["commit"])  # the store did not exist
 
-    store = admin.post("/api/stores", json={"name": "billing"}).json()
+    store = admin.post("/api/stores", json={"name": "billing", "allowed_projects": [project["slug"]]}).json()
     assert control.verified == [auto]  # created, but keys are still missing
     assert admin.put(f"/api/stores/{store['id']}/keys", json={"values": {"GIT_TOKEN": "t", "DOCS_KEY": "d"}}).status_code == 200
     assert control.verified == [auto]  # SENTRY_TOKEN is still missing
@@ -454,5 +454,5 @@ def test_store_created_after_the_project(admin, control, sync_db, tmp_path):
     project = admin.post("/api/projects", json={"config_url": str(remote)}).json()
     [auto] = control.verified
     finish(sync_db, auto, "failed", project["commit"])
-    admin.post("/api/stores", json={"name": "later"})
+    admin.post("/api/stores", json={"name": "later", "allowed_projects": ["plain"]})
     assert len(control.verified) == 2

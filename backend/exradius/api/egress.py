@@ -28,10 +28,11 @@ from exradius.models import EgressRecord, Project, ProjectVerification, Provider
 from exradius.network import agent_connections, allowed_hosts, proxied
 from exradius.project_state import cached, store_values
 from exradius.providers import model_route
-from exradius.resolve import MissingSecret, StoreValues, connection_spec, repo_specs
+from exradius.resolve import StoreError, StoreValues, connection_spec, repo_specs
 from exradius.runtimes import RuntimeName, runtime_class
 from exradius.schemas import internal as i
 from exradius.schemas.project_config import ProjectConfig
+from exradius.secret_backends import StoreUnreachable
 from exradius.worker.run_objects import parse_name
 
 log = logging.getLogger(__name__)
@@ -142,7 +143,7 @@ async def policy(name: str, session: DB, state: State, _: Egress):
             agent = run.task.agent
             if agent not in config.agents:
                 raise HTTPException(404, "the run's agent is gone from its config")
-            secrets = await store_values(session, state.box, config.secret_store)
+            secrets = await store_values(session, state.secrets, run.task.project_id, config)
             provider = await session.get(Provider, run.provider_id) if run.provider_id else None
             return i.EgressPolicy(
                 run=name, allow=allowed_hosts(config, agent, install),
@@ -159,7 +160,7 @@ async def policy(name: str, session: DB, state: State, _: Egress):
             if snapshot is None or snapshot.config is None:
                 raise HTTPException(404, "the project's config is not readable")
             config = snapshot.config
-            secrets = await store_values(session, state.box, config.secret_store)
+            secrets = await store_values(session, state.secrets, verification.project_id, config)
             return i.EgressPolicy(
                 run=name, allow=allowed_hosts(config, None, install),
                 repositories=_repositories(config, secrets),
@@ -172,7 +173,9 @@ async def policy(name: str, session: DB, state: State, _: Egress):
         if provider is None:
             raise HTTPException(404, "the provider was deleted")
         return i.EgressPolicy(run=name, model=_model(_runtime_for(provider), state, provider))
-    except MissingSecret as exc:
+    except StoreUnreachable as exc:  # the proxy keeps the policy it has, and asks again
+        raise HTTPException(503, str(exc)) from exc
+    except StoreError as exc:  # the proxy keeps the policy it has
         raise HTTPException(409, str(exc)) from exc
 
 

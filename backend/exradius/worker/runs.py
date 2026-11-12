@@ -33,7 +33,9 @@ from exradius.db import SessionFactory
 from exradius.models import Artifact, InfoRequest, Project, Run, TranscriptChunk, utcnow
 from exradius.project_state import assess, read_config, remember, store_values
 from exradius.providers import provider_problem, resolve_provider, runtime_environment
+from exradius.resolve import StoreError
 from exradius.runtimes import runtime_class
+from exradius.secret_backends import SecretBackends
 from exradius.schemas.messages import ArtifactRef, InfoRequestPayload, ResultPayload
 from exradius.schemas.project_config import ProjectConfig
 from exradius.states import State, can_transition, is_terminal
@@ -131,6 +133,8 @@ class RunManager:
         self.cluster = cluster
         self.emit = emit
         self.box = SecretBox(settings.secret_key)
+        self.backends = SecretBackends.from_settings(self.box, settings)
+        """Where stores' values live (exradius.secret_backends), shared by intake and Verify."""
         self.builder = ImageBuilder(settings, sessions, store, cluster)
         self.image_configs = ImageConfigs(
             settings.insecure_registry_hosts,
@@ -232,8 +236,8 @@ class RunManager:
             assert project is not None
             snapshot = await read_config(session, self.box, self.settings.cache_dir, project)
             remember(project, snapshot)
-            health = await assess(session, project, snapshot)
-            await session.commit()
+            await session.commit()  # before an external store is asked: no row lock meanwhile
+            health = await assess(session, project, snapshot, self.backends)
         await self.check_directory()
         if health.reason is not None:
             raise PreparationError(health.reason)
@@ -297,6 +301,12 @@ class RunManager:
         await self._store_url_attachments(run.id)
         token = new_run_token()
         name = run_name("task", run.id)
+        # Resolved before the run row is locked, for the task's project only (§7).
+        async with self.sessions() as session:
+            try:
+                secrets = await store_values(session, self.backends, task.project_id, config)
+            except StoreError as exc:
+                raise PreparationError(str(exc)) from exc
         async with self.sessions() as session:
             row = await self._lock(session, run.id)
             if row is None or row.state != State.PREPARING:
@@ -304,7 +314,6 @@ class RunManager:
             provider = await resolve_provider(session, agent.provider)
             if provider is None:
                 raise PreparationError(provider_problem(agent.provider))
-            secrets = await store_values(session, self.box, config.secret_store)
             # The pod gets a placeholder and the egress proxy's model route; the proxy reads
             # the credential of this provider (runs.provider_id) from the api.
             provider_env = runtime_environment(agent.runtime, provider, self.settings.egress_url)

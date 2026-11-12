@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from exradius import downloads
 from exradius.crypto import hash_token
-from exradius.models import Artifact, ImageBuild, InfoRequest, Run, SecretStore, SecretStoreEntry, Task
+from exradius.models import Artifact, ImageBuild, InfoRequest, Project, Run, SecretStore, SecretStoreEntry, SecretStoreProject, Task
 from exradius.states import State
 from exradius.worker.intake import accept_answer
 from exradius.worker.runs import RunManager
@@ -77,6 +77,8 @@ async def add_store(sessions, box, name: str, **values: str) -> None:
         secret_store = SecretStore(name=name)
         session.add(secret_store)
         await session.flush()
+        for project_id in await session.scalars(select(Project.id)):
+            session.add(SecretStoreProject(store_id=secret_store.id, project_id=project_id))
         for key, value in values.items():
             session.add(SecretStoreEntry(store_id=secret_store.id, key=key, value_encrypted=box.encrypt(value)))
         await session.commit()

@@ -140,8 +140,9 @@ Then open the panel at http://localhost:3100 and:
 
 1. add a model provider (**Providers**);
 2. add a credential for the git host of your config repository (**Settings**);
-3. create the secret store your config names (**Stores**);
-4. add the project by its config repository URL (**Projects**).
+3. add the project by its config repository URL (**Projects**);
+4. create the secret store your config names and allow the project to use it (**Create
+   store** on the project's **Secrets** tab does both).
 
 Once the store has every key the config references, **Verify** builds the workstation,
 starts the services and runs setup. If anything fails, it names the cause. Then send a task

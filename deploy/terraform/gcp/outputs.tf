@@ -21,6 +21,7 @@ locals {
       builds       = { registry = local.builds }
     },
     length(local.runs) > 0 ? { runs = local.runs } : {},
+    local.vault_values,
   )
 }
 
@@ -50,14 +51,14 @@ output "push_command" {
 
 output "bootstrap" {
   description = "What deploy/terraform/bootstrap.sh needs."
-  value = {
+  value = merge({
     cloud         = "gcp"
     kubeconfig    = "gcloud container clusters get-credentials ${google_container_cluster.cluster.name} --zone ${var.zone} --project ${var.project}"
     context       = "gke_${var.project}_${var.zone}_${google_container_cluster.cluster.name}"
     allowed_cidrs = var.allowed_cidrs
     ingress_ip    = google_compute_address.ingress.address
     arm64         = var.arm64
-  }
+  }, local.vault_bootstrap)
 }
 
 output "postgres_uri" {

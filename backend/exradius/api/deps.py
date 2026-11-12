@@ -14,6 +14,7 @@ from exradius.config import Settings
 from exradius.crypto import SecretBox
 from exradius.db import SessionFactory
 from exradius.models import AdminUser
+from exradius.secret_backends import SecretBackends
 from exradius.storage import ObjectStore
 
 
@@ -27,6 +28,17 @@ class AppState:
     rereads: Any = None  # hooks.Rereads, set at startup
     router: Any = None  # routing.Router; None: one for settings.openai_base_url
     egress_auth: Any = None  # egress.EgressAuth; None: one with the in-cluster TokenReview
+    backends: SecretBackends | None = None
+    """Where stores' values live; made from ``box`` when not given."""
+
+    def __post_init__(self) -> None:
+        if self.backends is None:
+            self.backends = SecretBackends.from_settings(self.box, self.settings)
+
+    @property
+    def secrets(self) -> SecretBackends:
+        assert self.backends is not None
+        return self.backends
 
 
 def app_state(request: Request) -> AppState:

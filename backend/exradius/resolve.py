@@ -17,7 +17,12 @@ from exradius.git import RepoSpec
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-class MissingSecret(Exception):
+class StoreError(Exception):
+    """The values a run needs cannot be handed out; the message is the reason in the words
+    of docs/config-repo.md §3 (a run fails with it, a request is refused with it)."""
+
+
+class MissingSecret(StoreError):
     def __init__(self, name: str, store: str | None):
         where = f"in store {store}" if store else "(the config names no secret store)"
         super().__init__(f"missing secret {name} {where}")

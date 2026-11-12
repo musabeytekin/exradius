@@ -20,6 +20,7 @@ locals {
         userNamespaces = false
       }
     } : {},
+    local.vault_values,
   )
 }
 
@@ -53,7 +54,7 @@ output "push_command" {
 
 output "bootstrap" {
   description = "What deploy/terraform/bootstrap.sh needs."
-  value = {
+  value = merge({
     cloud            = "aws"
     kubeconfig       = "aws eks update-kubeconfig --region ${var.region} --name ${module.eks.cluster_name} --alias ${var.name}"
     context          = var.name
@@ -64,7 +65,7 @@ output "bootstrap" {
     efs_id           = var.rwx ? aws_efs_file_system.projects[0].id : ""
     postgres_secrets = true
     broker_secret    = true
-  }
+  }, local.vault_bootstrap)
 }
 
 output "postgres_uri" {

@@ -4,14 +4,6 @@ Candidates agreed as worth designing, not yet scheduled. Each becomes its own de
 it is picked up. Source: `reports/Enterprise engineering task patterns.md` and the brainstorm
 of 2026-11-08.
 
-## Exradius's own egress proxy
-
-Designed in `kubernetes.md` §11 and built in phase 4 of the move to Kubernetes
-(2026-11-10): every run request goes through it, setup is open (chained to a corporate proxy
-when the install names one), the agent phase reaches only what the run declares plus
-`network.allow`, NetworkPolicy refuses everything else, credentials are added by the proxy,
-and every host reached or refused is recorded and shown on the task page.
-
 ## Harness-run checks
 
 `exradius.yaml` declares check commands (tests, lint, build). After the agent submits its
@@ -68,31 +60,22 @@ package versions so a change needs a commit.
 
 A review of the secret handling on 2026-11-11 found the run side sound (no model, repository
 or HTTP connection credential in a pod, late decryption in `resolve.py`, a worker that
-writes Secrets it cannot read) and four gaps on the storage and governance side. Fine for
-one team and one admin; the first questions of an install shared by several teams. In the
-order to take them:
+writes Secrets it cannot read) and four gaps on the storage and governance side. Two are
+closed: stores are bound to the projects allowed to use them, with an append-only change
+log, and HashiCorp Vault is the first external store (`config-repo.md` §7). Still open:
 
-- **Stores are not bound to projects.** `secret_store` is only a name in `exradius.yaml`, and
-  nothing says which project may name which store. Whoever can commit to one project's config
-  repository can name another team's store and bring its keys into `env`; setup reaches any
-  public host, so the values can leave. Idea: the admin lists, per store, the projects
-  allowed to use it, and a config naming a store it is not listed for is not runnable, with
-  the reason. It fits "the admin owns the stores".
 - **One master key, no rotation.** `SecretBox` holds a single Fernet key, with no key version
   on the stored values and no command to re-encrypt them. The session secret and the
   download signing key are derived from the same key, so one leak opens everything. Ideas:
   `MultiFernet` with an ordered key list, an `exradius rotate-key` command that re-encrypts
   every `*_encrypted` column, separate keys for signing.
-- **No external secret manager.** `secret_stores.kind` is `internal` only, and the master
-  key is a plain Kubernetes Secret. Enterprises keep secrets in their own vault and expect
-  tools to read from there. Ideas: further kinds (Vault, AWS Secrets Manager, Google Secret
-  Manager, Azure Key Vault) read with the pod's cloud identity as `storage.py` does, and
-  the master key wrapped by a KMS key.
-- **No audit trail, one admin.** `secret_store_entries.updated_at` is all that is recorded:
-  not who set or deleted a key, nor which run resolved which keys. There is a single admin
-  user and no roles. Ideas: an append-only table of store and key changes and of the keys
-  each run resolved (names, never values), shown in the panel; admin users with roles, or
-  SSO, as its own topic.
+- **Further backends.** Stores can be kept in Exradius or in Vault. AWS Secrets Manager,
+  Google Secret Manager and Azure Key Vault would be further kinds behind the same backend
+  protocol (`exradius/secret_backends`), read with the pod's cloud identity as `storage.py`
+  does. The master key itself is still a plain Kubernetes Secret; it could be wrapped by a
+  KMS key.
+- **One admin, no roles.** There is a single admin user, who owns every store. Ideas: admin
+  users with roles (who may change which stores), or SSO, as its own topic.
 
 Smaller, seen in the same review: the egress proxy fetches decrypted credentials from the
 api over plain HTTP inside the cluster (NetworkPolicy, no mTLS), and the Terraform modules

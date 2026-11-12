@@ -66,6 +66,7 @@ spec:
               value: {{ include "exradius.runtimeImage" . | quote }}
             - name: EXRADIUS_PROJECT_DEFAULT_IMAGE
               value: {{ include "exradius.projectDefaultImage" . | quote }}
+            {{- with include "exradius.vaultEnv" . }}{{ . | nindent 12 }}{{ end }}
           {{- with .Values.worker.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -75,6 +76,8 @@ spec:
           volumeMounts:
             - {name: cache, mountPath: /var/cache/exradius}
             - {name: tmp, mountPath: /tmp}
+            {{- with include "exradius.vaultMounts" . }}{{ . | nindent 12 }}{{ end }}
       volumes:
         - {name: cache, emptyDir: {}}
         - {name: tmp, emptyDir: {}}
+        {{- with include "exradius.vaultVolumes" . }}{{ . | nindent 8 }}{{ end }}

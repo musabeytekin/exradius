@@ -27,7 +27,7 @@ from sqlalchemy import select
 from exradius.crypto import hash_token, new_run_token
 from exradius.models import ConnectionTools, Project, ProjectVerification, utcnow
 from exradius.project_state import assess, read_config, remember, store_values
-from exradius.resolve import StoreValues
+from exradius.resolve import StoreError, StoreValues
 from exradius.routing import definition_hash
 from exradius.schemas.project_config import ProjectConfig
 from exradius.worker import run_objects
@@ -169,6 +169,14 @@ def finish_steps(steps: list[dict[str, Any]], view: RunView) -> None:
         failed = True
 
 
+def _store_note(health) -> str:
+    if not health.store_exists:
+        return ", which does not exist"
+    if not health.store_allowed:
+        return ", which does not allow this project"
+    return ""
+
+
 class ProjectVerifier:
     def __init__(self, runs: RunManager):
         self.runs = runs
@@ -208,8 +216,14 @@ class ProjectVerifier:
                 assert row is not None
                 snapshot = await read_config(session, self.runs.box, self.settings.cache_dir, row)
                 remember(row, snapshot)
-                health = await assess(session, row, snapshot)
-                secrets = await store_values(session, self.runs.box, snapshot.store)
+                await session.commit()  # before an external store is asked: no row lock meanwhile
+                health = await assess(session, row, snapshot, self.runs.backends)
+                secrets, refused = None, None
+                if health.runnable and snapshot.config is not None:
+                    try:
+                        secrets = await store_values(session, self.runs.backends, row.id, snapshot.config)
+                    except StoreError as exc:
+                        refused = str(exc)
                 verification = await session.get(ProjectVerification, verification_id)
                 if verification is not None:
                     verification.commit = snapshot.commit  # also when the file has errors
@@ -222,11 +236,12 @@ class ProjectVerifier:
                 *(f"not available yet: {e}" for e in health.unsupported),
                 *(f"warning: {w}" for w in snapshot.warnings),
                 f"missing keys: {', '.join(health.missing_keys) or 'none'}"
-                + (f" (store {snapshot.store}{'' if health.store_exists else ', which does not exist'})"
-                   if snapshot.required_keys else ""),
+                + (f" (store {snapshot.store}{_store_note(health)})" if snapshot.required_keys else ""),
             ]
             if health.reason is not None:
                 raise StepFailed("\n".join([health.reason, *lines]))
+            if refused is not None:
+                raise StepFailed("\n".join([refused, *lines]))
             assert snapshot.config is not None and snapshot.commit is not None
             read.update(config=snapshot.config, commit=snapshot.commit, secrets=secrets)
             return "\n".join(lines)
