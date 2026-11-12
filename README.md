@@ -220,7 +220,8 @@ The setup skill can write this file for you. It is a Claude Code plugin in
 [`skill/`](skill/). Run it in your project's checkout:
 - it reads the code and writes `exradius.yaml`, a workstation Dockerfile when a stock
   image is not enough, and a README for the Exradius admin;
-- it checks all of it locally with Docker, the same way Verify does.
+- it checks all of it locally with Docker: Verify's steps, then your own test and lint
+  commands as an agent would run them, with the agent's network.
 
 ```bash
 claude plugin marketplace add musabeytekin/exradius

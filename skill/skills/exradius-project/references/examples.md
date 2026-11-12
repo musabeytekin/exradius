@@ -1,11 +1,20 @@
 # Worked examples
 
-Four real projects, as their config repositories hold them (the agents' identity email is
-replaced by `dev-bot@example.com`), updated for skill 0.2.0: each now declares
-`resources.memory` and a `workstation.cache`, and Plane's MinIO is a stock image with a
-`command`. The first three failed Verify once before they passed; Plane passed first
-time. The choices below are why the files look the way they do. Each config passes
-`scripts/check.sh` with its code checked out.
+Four real projects that run on Exradius, with the choices that made their files look the
+way they do. The first three failed Verify once before they passed; Plane, set up by this
+skill, passed first time. The files are brought up to this skill release: each declares
+`resources.memory`, a `workstation.cache` and a `network.allow`, the roles say which
+tickets an agent takes, and `model` is left to the install's default. The agents'
+identity email is replaced by `dev-bot@example.com`.
+
+Read the one closest to the project at hand, not all four:
+
+| Project | Read it for |
+|---|---|
+| Bank of Anthos | Java with Maven, Python with uv in one repository; a pre-fetched Maven repository; a mirror host in `network.allow` |
+| Outline | one Node repository with Yarn 4; a test database created in setup; values the repository's own `.env.test` supplies |
+| Saleor | two repositories in one project (uv API, pnpm dashboard); services named as the app expects |
+| Plane | a pnpm + Turbo monorepo with a Django API; four services, one with a bootstrap `command`; long `notes` for a large codebase |
 
 ## Bank of Anthos
 
@@ -56,6 +65,13 @@ env:
   DATABASE_URL: "postgres://app:${secret:DB_PASSWORD}@postgres:5432/app"
   UV_LINK_MODE: copy
 
+network:
+  allow:
+    - repo.maven.apache.org
+    - maven-central.storage-download.googleapis.com
+    - pypi.org
+    - files.pythonhosted.org
+
 notes: |
   Java services live under src/ledger and src/ledgermonolith; run their tests with
   `mvn test` inside the service directory (dependencies are in ~/.m2/repository, kept
@@ -74,23 +90,26 @@ connections:
 agents:
   developer:
     name: Developer
-    model: claude-sonnet-5-5
     identity:
       name: Developer
       email: dev-bot@example.com
     connections: [github]
     role: |
-      You are a software developer on this team. You implement the changes a ticket asks
-      for in the project's repositories, following the conventions you find there and
-      keeping changes small and focused. Run the project's existing checks when they are
-      available. Explain what you changed and what a reviewer should look at. After
-      pushing, open a pull request against the repository's main branch with the GitHub
-      tool and link it in your result. Do not leave this to the reviewer.
+      You take tickets that ask for a change to the code: bug fixes, features,
+      refactors, dependency updates. You implement the change following the conventions
+      you find in the repository, and keep it small and focused.
+      Before you finish, run the tests of every service you touched (the notes say how)
+      and say in your result which you ran and what they showed; if one cannot run here,
+      say that rather than skipping it.
+      After pushing, open a pull request against the repository's main branch with the
+      GitHub tool and link it in your result. Do not leave this to the reviewer.
   scout:
     name: Scout
     role: |
-      You investigate questions about this codebase and report findings with file paths
-      and evidence. You never change code.
+      You take tickets that ask a question about the code or its behaviour: where
+      something is, why something happens, what a change would affect. You investigate and
+      report findings with file paths and evidence. You never change code, push or open
+      pull requests.
 ```
 
 `docker/workstation.Dockerfile`:
@@ -137,7 +156,9 @@ Choices:
 - `services.postgres` with `pg_isready -h 127.0.0.1`: a TCP check, so readiness is not reported during the image's init-time socket-only server.
 - `env.DATABASE_URL` uses the same `${secret:DB_PASSWORD}` as the service: one store key, consistent on both sides.
 - `credential` + `push: true` on the repository and the `github` catalog connection share `GITHUB_TOKEN`: one token to clone, push and open pull requests.
+- `network.allow`: Maven Central and PyPI, so an agent can add a dependency and Maven can resolve the plugins a test run fetches on first use. The Google mirror is there because this build tries it before Maven Central: the first tasks had 215 refused requests to it on the task page's Network tab, each a slow failure before the fallback.
 - `notes`: where tests live and how to run them, which a new engineer would be told on day one; the schemas' location because the database starts empty.
+- The developer's `role` opens with the tickets it takes, because Exradius reads roles to pick an agent when a task names none; then when the work is done (the tests ran, or the result says why not) and how it is delivered (a pull request, opened by the agent).
 - Two agents: `developer` (pushes, opens a pull request, `model` pinned) and `scout` (read-only by its role, no connections).
 
 ## Outline
@@ -199,9 +220,14 @@ env:
   SMTP_FROM_EMAIL: hello@example.com
   SMTP_REPLY_EMAIL: hello@example.com
 
+network:
+  allow:
+    - registry.yarnpkg.com
+
 notes: |
   Run the server tests with `yarn test:server` (needs the test database, created by the
-  setup commands) and the app tests with `yarn test:app`. Lint with `yarn lint`.
+  setup commands) and the app tests with `yarn test:app`; one file with
+  `yarn test:server <path>`. Lint with `yarn lint`.
   The repository's .env.test supplies SECRET_KEY and UTILS_SECRET and points DATABASE_URL
   at 127.0.0.1; the DATABASE_URL set here wins and points at the postgres service.
 
@@ -214,23 +240,26 @@ connections:
 agents:
   developer:
     name: Developer
-    model: claude-sonnet-5-5
     identity:
       name: Developer
       email: dev-bot@example.com
     connections: [github]
     role: |
-      You are a software developer on this team. You implement the changes a ticket asks
-      for, following the conventions you find in the repository and keeping changes small
-      and focused. Run the relevant tests and the linter before you finish. Explain what
-      you changed and what a reviewer should look at. After pushing, open a pull request
-      against the repository's main branch with the GitHub tool and link it in your
-      result. Do not leave this to the reviewer.
+      You take tickets that ask for a change to the code: bug fixes, features,
+      refactors, dependency updates. You implement the change following the conventions
+      you find in the repository, and keep it small and focused.
+      Before you finish, run the tests that cover what you touched and `yarn lint`, and
+      say in your result which you ran and what they showed; if one cannot run here, say
+      that rather than skipping it.
+      After pushing, open a pull request against the repository's main branch with the
+      GitHub tool and link it in your result. Do not leave this to the reviewer.
   scout:
     name: Scout
     role: |
-      You investigate questions about this codebase and report findings with file paths
-      and evidence. You never change code.
+      You take tickets that ask a question about the code or its behaviour: where
+      something is, why something happens, what a change would affect. You investigate and
+      report findings with file paths and evidence. You never change code, push or open
+      pull requests.
 ```
 
 `docker/workstation.Dockerfile`:
@@ -261,6 +290,8 @@ Choices:
 - `SECRET_KEY` and `UTILS_SECRET` are not in `env` or the store: `.env.test` supplies them for test runs; only `DB_PASSWORD` and `GITHUB_TOKEN` are real store keys.
 - SMTP and `URL` values are plain text: Outline's config validation requires them, their values do not matter for tests and are not secret.
 - `redis` with `ready: {tcp: 6379}`: the image has no HEALTHCHECK; a listening port is the readiness signal.
+- `network.allow: [registry.yarnpkg.com]`: Yarn 4's default registry, the one host `yarn install` used; with it an agent can run `yarn add` or `yarn up`. Yarn 4 ignores `HTTPS_PROXY`; Exradius sets `YARN_HTTPS_PROXY` in every run, so nothing about the proxy is in this file.
+- `notes` give the single-file form of the test command: the server suite takes minutes, and an agent that knows only the full command either waits for it or skips it.
 
 ## Saleor
 
@@ -327,6 +358,12 @@ env:
   pnpm_config_store_dir: /home/runner/.local/share/pnpm/store
   UV_LINK_MODE: copy
 
+network:
+  allow:
+    - pypi.org
+    - files.pythonhosted.org
+    - registry.npmjs.org
+
 notes: |
   API (saleor/): run tests with `uv run pytest saleor/<app> -n 0` inside the saleor folder
   (the suite defaults to pytest-xdist; -n 0 keeps a single worker). Lint with `uv run ruff check`.
@@ -343,23 +380,26 @@ connections:
 agents:
   developer:
     name: Developer
-    model: claude-sonnet-5-5
     identity:
       name: Developer
       email: dev-bot@example.com
     connections: [github]
     role: |
-      You are a software developer on this team. You implement the changes a ticket asks
-      for, following the conventions you find in each repository and keeping changes small
-      and focused. Run the relevant tests and linters before you finish. Explain what you
-      changed and what a reviewer should look at. After pushing, open a pull request
-      against each changed repository's main branch with the GitHub tool and link them in
-      your result. Do not leave this to the reviewer.
+      You take tickets that ask for a change to the code of the API or the dashboard:
+      bug fixes, features, refactors, dependency updates. You implement the change
+      following the conventions you find in each repository, and keep it small and focused.
+      Before you finish, run the tests and linters for what you touched (the notes say
+      how, per repository) and say in your result which you ran and what they showed; if
+      one cannot run here, say that rather than skipping it.
+      After pushing, open a pull request against each changed repository's main branch
+      with the GitHub tool and link them in your result. Do not leave this to the reviewer.
   scout:
     name: Scout
     role: |
-      You investigate questions about this codebase and report findings with file paths
-      and evidence. You never change code.
+      You take tickets that ask a question about the code or its behaviour: where
+      something is, why something happens, what a change would affect. You investigate and
+      report findings with file paths and evidence. You never change code, push or open
+      pull requests.
 ```
 
 `docker/workstation.Dockerfile`:
@@ -398,6 +438,7 @@ Choices:
 - `notes`: `-n 0` for pytest because the suite defaults to pytest-xdist workers, which multiply memory use in a run.
 - `cache` for both package managers, uv's and pnpm's stores; `pnpm_config_store_dir` pins the pnpm store to the cache folder (otherwise pnpm may put it in `/work/.pnpm-store`, deleted with the run).
 - `resources.memory: 4g` and `memory: 512m` on postgres: one pytest worker and the dashboard's install fit with headroom; the check applies both as the containers' limits.
+- `network.allow`: PyPI for the API and the npm registry for the dashboard, the registries of the two package managers in setup, so dependencies can be added in either repository.
 
 ## Plane
 
@@ -515,6 +556,12 @@ env:
   pnpm_config_store_dir: /home/runner/.local/share/pnpm/store
   UV_LINK_MODE: copy
 
+network:
+  allow:
+    - registry.npmjs.org
+    - pypi.org
+    - files.pythonhosted.org
+
 notes: |
   One repository, /work/plane, default branch `preview` (pull requests target preview,
   not main). AGENTS.md at the root is the team's own guide; follow it.
@@ -550,20 +597,24 @@ agents:
     name: Developer
     connections: [github]
     role: |
-      You are a software developer on the Plane team. You implement the changes a ticket
-      asks for, following AGENTS.md and the conventions you find in the code, and keep
-      changes small and focused. Before you finish, run the checks for what you touched:
+      You take tickets that ask for a change to Plane's code, web apps or API: bug fixes,
+      features, refactors, dependency updates. You implement the change following
+      AGENTS.md and the conventions you find in the code, and keep it small and focused.
+      Before you finish, run the checks for what you touched:
       for apps/api the relevant pytest tests and `uv run ruff check .` (plus
       `makemigrations --check` when models changed); for the web apps and packages
       `check:format`, `check:lint`, `check:types` and the vitest tests of the affected
-      packages. Explain what you changed and what a reviewer should look at. Push a new
-      branch, then open a pull request against `preview` with the GitHub tool and link it in
-      your result. Do not leave this to the reviewer.
+      packages. Say in your result which you ran and what they showed; if one cannot run
+      here, say that rather than skipping it. After pushing, open a pull request against
+      `preview` with the GitHub tool and link it in your result. Do not leave this to the
+      reviewer.
   scout:
     name: Scout
     role: |
-      You investigate questions about this codebase and report findings with file paths
-      and evidence. You never change code.
+      You take tickets that ask a question about the code or its behaviour: where
+      something is, why something happens, what a change would affect. You investigate and
+      report findings with file paths and evidence. You never change code, push or open
+      pull requests.
 ```
 
 `docker/workstation.Dockerfile`:
@@ -609,6 +660,8 @@ Choices:
 - `postgres:15.7-alpine`, `valkey/valkey:7.2.11-alpine`, `rabbitmq:3.13.6-management-alpine`: the images and versions of `docker-compose-test.yml`, credentials as in that file; all are throwaway test values, so the only store key is `GITHUB_TOKEN`.
 - The many `env` entries: the API's settings read each service's host, port and credentials separately, and the values in the repository's env examples point at `localhost`.
 - `mkdir -p .../collected-static` in setup: the API's `STATIC_ROOT` (`settings/common.py`); the directory is not in the repository, so setup creates it for the tests.
+- `network.allow`: the npm registry and PyPI, for the two package managers in setup. The local check confirmed them: its Network step showed `reached in setup: registry.npmjs.org, nodejs.org, files.pythonhosted.org, pypi.org`, and with the three listed, `uv run ruff check .`, the API's 566 unit tests and `pnpm check:format` all passed in the agent phase. Two hosts were left off on purpose: `nodejs.org` (`reached in setup only`: something `pnpm install` fetches once, which the agent does not need again) and `telemetry.vercel.com` (`refused in the agent phase`, 4 requests: Turbo's telemetry, whose refusal breaks nothing). Nothing for the services: they are on the run's `localhost`.
+- The role names the checks per area instead of "run the tests": in a monorepo the agent otherwise runs everything or nothing.
 - `notes`: AGENTS.md is the team's guide; which checks exist for the web packages and the API, that type checks need built packages first, and that `docker-compose-test.yml` cannot be used inside a run (no Docker daemon) while the services replace it.
 
 ## Patterns the four share
@@ -618,4 +671,6 @@ Choices:
 - Setup commands that install dependencies with the lockfile frozen (`--immutable`, `--locked`, `--frozen-lockfile`) and prepare databases; nothing that needs root.
 - A `workstation.cache` entry for every package manager in setup, and `resources.memory` from the heaviest step.
 - Services from stock images (with a `command` where compose has one) and a TCP-based `ready` check; secrets only for values that are really secret, referenced the same way in the service and in `env`.
-- `developer` (push, pull request, `github` connection) and `scout` (read-only) agents.
+- `network.allow` with the registries of the package managers in setup, plus whatever the check showed the build reaching first (a mirror); nothing listed "just in case".
+- `notes` that give each area's check commands as they work in a run, with the fast form for one file or package, and say what cannot run there.
+- `developer` (push, pull request, `github` connection) and `scout` (read-only) agents, each role opening with the tickets the agent takes and, for the developer, ending with when the work is done and how it is delivered.

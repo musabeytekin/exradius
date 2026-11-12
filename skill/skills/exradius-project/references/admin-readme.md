@@ -2,8 +2,10 @@
 
 The config repository's `README.md` is written for the Exradius admin, who has never seen
 the code. It is the only place that says what format each secret has and where to obtain
-it: Exradius shows key names, never hints. Fill every `<...>`; drop rows and sections that
-do not apply. No secret value ever goes into it, not even an example that looks real.
+it: Exradius shows key names, never hints. It is also the only place that says what the
+project needs from the install itself (the cluster's architecture, a private address, a
+bridge). Fill every `<...>`; drop rows and sections that do not apply. No secret value
+ever goes into it, not even an example that looks real.
 
 ````markdown
 # <Project name> on Exradius
@@ -22,11 +24,26 @@ repository on every run; changes take effect when they are pushed to `<branch>`.
 
 ## Add the project
 
-1. <Private repositories only:> in Settings, add a credential for `<host>` that can read
-   this repository (for GitHub: a fine-grained token with Contents: read on it).
+1. <Private repositories only:> in Settings, "Config repository access", add a credential
+   for `<host>` that can read this repository (for GitHub: a fine-grained token with
+   Contents: read on it).
 2. Projects, Add: paste `<URL>`<, branch `<branch>` when not the default>.
 3. Stores: create `<store>` and fill the keys below.
-4. Open the project's Verify tab: every step should pass.
+4. Open the project's Verify tab: it runs by itself and every step should pass. The local
+   check passed on <date> for `linux/<arch>`<, with these commands run as the agent
+   would: <commands>>.
+
+<Only when something applies:>
+## Ask the admin
+
+These are settings of the Exradius install, not of this repository:
+
+- <The cluster's CPU architecture: the images were checked for `linux/<arch>`. If the
+  cluster is the other one, tell the developers before the first Verify.>
+- <`egress.allowPrivate` must list `<host>` (<what it is: the internal npm mirror>): it is
+  on a private address, which runs and builds cannot reach otherwise.>
+- <A pull secret for `<registry>`: the `<service>` image is private.>
+- <The Jira bridge: this repository's `bridges/jira.yaml` claims the space<s> `<KEY>`.>
 
 ## Secret store `<store>`
 
@@ -50,16 +67,20 @@ DB_PASSWORD=
 - Setup: <one line per command and what it prepares>.
 - Agents: `developer` (<what it does, whether it pushes and opens pull requests>), `scout`
   (investigates and reports, never changes code).
+- Network: besides its model, these repositories and its connections, an agent reaches
+  <the hosts of `network.allow`, with what each is for: `registry.npmjs.org` (adding npm
+  dependencies), ...> <or: nothing else>. Setup reaches any public host. A refused host
+  shows on the task page's Network tab.
 - Resources: `resources.memory` is `<N>g`: each run needs a cluster node with that much
   memory free (it waits as "waiting for cluster capacity" until one has), and the
   workstation is killed if it goes over it
   (<the heaviest step>)<; services: <name> `<N>m`, ...>. Disk: about <N> GB per run
   (<the biggest install>).
 - Caches: <the package managers' stores, e.g. the pnpm store and uv's cache> are kept
-  between runs in `<data dir>/caches/<slug>/` on the Exradius server (about <N> GB after
-  the first run), shared by the project's runs, never cleaned by Exradius. The project
-  page shows their size; delete that directory to clear them (the next run downloads
-  everything again, nothing else is lost).
+  between runs on the project's volume in the cluster (the PersistentVolumeClaim
+  `exradius-project-<slug>` in the runs' namespace, about <N> GB after the first run),
+  shared by the project's runs and never cleaned by Exradius. Deleting the project deletes
+  them; nothing else is lost when they are gone, the next run downloads again.
 
 ## Maintaining it
 
@@ -80,7 +101,13 @@ developers check it locally with the `exradius-project` Claude Code skill
 | Sentry token (`sentry` connection) | `sntrys_...` user auth token | Sentry, User settings, Auth tokens |
 | Slack (`slack` connection) | bot token `xoxb-...` and team id `T...` | api.slack.com, the app's OAuth and permissions page |
 | Jira (`jira` connection) | Atlassian API token, plus the site URL and the account email | id.atlassian.com, Security, API tokens |
+| Private package registry (npm scope, PyPI index, Artifactory, GitHub Packages) | a read-only token as the registry issues it | the registry's token page; read-only, scoped to the packages the project installs. It is in the agent's environment, so never a publishing token |
 | Third-party API keys the tests need | as the provider issues them | name the provider's page; prefer a sandbox or test-mode key |
 
 Values that are not secret (a test-only `SECRET_KEY`, user names, `NODE_ENV`, URLs of
 services in the run) go into `env` as plain text, not into the store.
+
+A token is described by what it must be able to do, as narrowly as the project needs:
+the admin creates it, and a token with more access than the row says is a risk nobody
+asked for. Repository credentials and connection tokens never enter a run (the egress
+proxy adds them outside it); keys referenced in `env` and in a service's `env` do.

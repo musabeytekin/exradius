@@ -5,13 +5,13 @@ workstation image with these conditions. A workstation that works on a laptop as
 still fail here; `scripts/check.sh` reproduces all of them locally.
 
 From the inside, a run looks like a developer's own workstation: a normal user with a
-home, the project's tools, its services by host name, outbound network. Exradius deviates
-only where security requires it, and enforces each deviation at the level of the kernel,
+home, the project's tools, its services by host name, and a network that reaches what
+the project declared. Exradius deviates only where security requires it, and enforces each deviation at the level of the kernel,
 Kubernetes or the command line, where no project setting, tool or agent can change it.
 Exradius runs each task as one Kubernetes pod: the setup commands, the services and the
 agent's container are containers of that pod.
 
-## Two limits to know before anything else
+## Three limits to know before anything else
 
 1. **No Docker daemon inside a run.** Nothing in the workstation can start containers:
    no `docker`, no `docker compose`, no Testcontainers, no kind or minikube. Tests that
@@ -24,6 +24,10 @@ agent's container are containers of that pod.
    system, no `corepack enable`, no `sudo`. Everything a run needs that is not a project
    dependency goes into the workstation Dockerfile; project dependencies are installed by
    the setup commands into `/work` and the home.
+3. **The agent's network is an allowlist.** Setup commands reach any public host. The
+   agent reaches only its model, the project's repositories (git only), its connections
+   and the hosts in `network.allow`. What setup did not download, the agent can download
+   only from a listed host (network.md).
 
 ## The image
 
@@ -38,10 +42,12 @@ agent's container are containers of that pod.
   build-essential. Nothing inherits from it; write a Dockerfile for anything more.
 - Built in the cluster with **rootless BuildKit**: multi-stage builds, `COPY --from=<image>`,
   heredocs and cache mounts work; build secrets and SSH mounts are not given.
-- Built for the **cluster's CPU architecture** (usually `linux/amd64`). A Mac with Apple
-  Silicon builds `linux/arm64` locally; `check.sh --platform linux/amd64` builds and runs
-  the cluster's architecture under emulation (slower, but catches downloads of
-  architecture-specific binaries).
+- Built for the **cluster's CPU architecture**, `linux/amd64` or `linux/arm64` (cloud
+  installs are often Arm): the admin knows which. The local check builds the developer
+  machine's own architecture (`arm64` on Apple Silicon); when the two differ,
+  `check.sh --platform linux/<arch>` builds and runs the cluster's under emulation
+  (slower, but it catches a Dockerfile that downloads a binary for one architecture
+  only, and a service image that does not exist for the other).
 
 ## The user
 
@@ -101,6 +107,13 @@ agent's container are containers of that pod.
 - `HOME=/home/runner`, `EXRADIUS_WORK_DIR=/work`, `EXRADIUS_STATE_DIR` (the agent
   runtime's state).
 - The image's own `ENV` lines (`PATH`, `JAVA_HOME`, `COREPACK_HOME`, ...).
+- The proxy variables Exradius adds after the project's own: `HTTP_PROXY`, `HTTPS_PROXY`,
+  `NO_PROXY` (and lower case), `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`, and
+  `JAVA_TOOL_OPTIONS` with Java's proxy properties (appended to the project's own value).
+  Do not set or unset them in `env`.
+- No model key, no repository credential, no token of Exradius: the egress proxy adds
+  those outside the pod. The secrets in the environment are the ones `env` and the
+  services' `env` reference, and the agent can read them.
 
 ## Memory
 
@@ -114,14 +127,18 @@ agent's container are containers of that pod.
 
 ## The network
 
-- Outbound network access is available (package registries, git hosts).
+- Every request leaves through Exradius's egress proxy; nothing has a direct route out
+  (network.md). Setup reaches any public host; the agent only its model, the
+  repositories, its connections and `network.allow`. Private addresses are refused in
+  every phase unless the install allows them. Only HTTP and HTTPS leave the pod.
 - The services and the workstation share one network namespace, the pod's: each service
   is reached by its name, which resolves to `127.0.0.1` (`postgres:5432` and
   `localhost:5432` are the same), as compose publishes ports on a developer's machine.
   Two services cannot listen on the same port. Parallel runs never share services: each
   run is its own pod.
-- No ports are published, no Docker daemon is available inside the workstation (the first
-  limit above), and the run has no Kubernetes credentials.
+- No ports are published and nothing outside reaches the run, no Docker daemon is
+  available inside the workstation (the first limit above), and the run has no Kubernetes
+  credentials.
 - Services start before the setup commands and stay up for the whole task.
 
 ## The order of a run (and of Verify)
@@ -130,19 +147,26 @@ agent's container are containers of that pod.
    lacks a key.
 2. Build the workstation and service images that come from Dockerfiles (cached by
    content), pull the others. Wait for a node with room for the declared memory.
-3. Clone each repository into `/work/<name>` at its branch.
+3. Clone each repository into `/work/<name>` at its branch, through the proxy's git
+   route (no submodules, no LFS objects).
 4. Start the services in order (with their `command` and `memory`); wait for each to be
    ready (120 seconds from its start).
 5. Run each setup command in its own container from the workstation image, under the
    conditions above (cache folders mounted, memory limit applied), cwd `/work`. A non-zero exit fails the run with the output's tail.
    There is no time limit per command, but every run pays for them, so keep them to
    what the agent needs (dependency installs, database creation, cache copies).
-6. Start the agent in the same conditions; the runtime is mounted read-only at
-   `/opt/exradius/runtime`.
+6. Switch the network to the agent phase, then start the agent in the same conditions
+   (the same `/work`, home, `/tmp` and caches the setup commands left); the runtime is
+   mounted read-only at `/opt/exradius/runtime`. Verify lists each connection's tools
+   here instead.
 
 ## What the local check does not cover
 
-The agent runtime itself, providers and models, pushing with the repository credential,
-MCP connections, the cluster's network policies and egress allowlist, and its CPU
-architecture unless `--platform` is given. Only a Verify in Exradius, then a real task,
-covers those.
+The check reproduces the image, the user, the filesystem, the memory limits, the services
+and the two network phases, and runs the commands given with `--run` as the agent would.
+It does not cover: the agent runtime and the model; pushing, and git's credential route;
+the connections' tool lists (it only checks that each launcher is in the image); the
+cluster's CPU architecture unless `--platform` is given; what the admin's install allows
+(`egress.allow`, `egress.allowPrivate`) unless given with `--allow` and
+`--allow-private`; image builds' network (they use Docker's own). Only a Verify in
+Exradius, then a real task, covers those.

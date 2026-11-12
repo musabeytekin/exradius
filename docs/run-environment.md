@@ -206,7 +206,9 @@ mapped to `127.0.0.1`, and the services, the setup commands and the workstation 
 (`docker run --network container:<it>`), so services are reached on `localhost` by name and
 two services on one port collide as they would in a run. A service's `command` is its
 arguments, its `tcp` check connects to the shared address, and the 120 s deadline counts
-from its start. The egress proxy variables and `network.allow` come with phase 4.
+from its start. The egress proxy variables and `network.allow` came with skill 0.4.0
+(setup-and-verify.md §2.7), which also runs the project's own check commands as the agent
+would.
 
 ## 10. Out of scope
 

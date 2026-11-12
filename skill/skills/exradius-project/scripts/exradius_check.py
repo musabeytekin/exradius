@@ -4,13 +4,15 @@ Docker CLI alone and no Exradius installed.
 
     exradius_check.py [options] <config dir or exradius.yaml>
 
-Steps, in Verify's order: read and validate exradius.yaml; build the workstation and the
-service images; check the workstation image (glibc, sh, bash, git); put the code
-repositories under /work; start the services and wait until they are ready; run every setup
-command in the workstation under the run's conditions (with ``resources.memory`` as its
-memory limit and ``workstation.cache`` mounted from a local cache directory that persists
-between checks); stop and remove everything but the cache. The first failing step is
-printed with its output.
+Steps, in Verify's order: read and validate exradius.yaml (and print the hosts the agent
+phase may reach); build the workstation and the service images; check the workstation image
+(glibc, sh, bash, git); check that the stdio connections' commands are in it; put the code
+repositories under /work; start the egress proxy; start the services and wait until they
+are ready; run every setup command in the workstation under the run's conditions (with
+``resources.memory`` as its memory limit and ``workstation.cache`` mounted from a local
+cache directory that persists between checks); switch the proxy to the agent phase and run
+each ``--run`` command the same way; summarise what the proxy saw; stop and remove
+everything but the cache. The first failing step is printed with its output.
 
 Like an Exradius run on Kubernetes, the check is one "pod": a holder container owns the
 network namespace, with every service name mapped to 127.0.0.1 in its /etc/hosts (the pod's
@@ -20,6 +22,13 @@ check connects to the pod's own address as the kubelet does, and a service has 1
 its start to become ready. The flags mirror the operator's pod builder
 (operator/internal/podspec/podspec.go in the Exradius repository).
 
+The network is emulated as in a run (docs/kubernetes.md §11): the pod sits on an internal
+Docker network with no route out, and every container that joins it gets the proxy
+variables the operator writes. The only way out is a forward proxy (this same script in its
+``--egress-proxy`` mode, in a container on both networks): open in the setup phase, the
+agent phase's host list afterwards, private addresses refused in both unless
+``--allow-private`` names them. ``--open-network`` turns the emulation off.
+
 Standard library only, Python 3.8 or later. The YAML reader below covers the YAML an
 exradius.yaml uses (block and flow collections, quoted, plain and block scalars,
 comments); anchors, aliases and tags are refused with a message.
@@ -28,7 +37,7 @@ comments); anchors, aliases and tags are refused with a message.
 from __future__ import annotations
 
 import argparse
-import datetime
+import ipaddress
 import json
 import os
 import platform
@@ -36,10 +45,13 @@ import posixpath
 import re
 import secrets as _random
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from urllib.parse import urlsplit
 
 CONFIG_VERSION = 1
 """The exradius.yaml version this check (and the skill) understands."""
@@ -595,27 +607,60 @@ RESERVED_SERVICES = ("api", "workstation", "localhost")
 MAX_SERVICE_NAME = 55
 """A service's container in a run is ``service-<name>``, a DNS label of at most 63 characters."""
 MEMORY = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([bkmgBKMG])$")
-"""A Docker size string: ``512m``, ``6g`` (docs/run-environment.md §4)."""
+"""A size with a unit: ``512m``, ``6g`` (binary units; ``MEMORY_PATTERN`` in Exradius)."""
 MEMORY_UNITS = {"b": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
 MEMORY_MIN = 6 * 1024 ** 2
-"""Docker refuses a memory limit below 6 MiB."""
+"""The smallest memory a container can be given."""
 CACHE_FORBIDDEN = ("/", "/home", "/home/runner", "/tmp", "/etc", "/usr", "/bin", "/lib", "/var", "/opt")
 CACHE_FORBIDDEN_UNDER = ("/work", "/exradius", "/opt/exradius", "/proc", "/sys", "/dev", "/etc/passwd", "/etc/group")
 """``workstation.cache`` entries may not be the first set of paths, nor be or lie under the
 second: the project directory, Exradius's own mounts, the kernel's file systems and the
 generated identity files (docs/run-environment.md §5; ``cache_problem`` in Exradius)."""
+NPM = ("registry.npmjs.org",)
+PYPI = ("pypi.org", "files.pythonhosted.org")
+
+
+def _key(key, label, target, name="", required=True, fmt="{}", default=None, host=False):
+    """A catalog config key (``catalog.ConfigKey`` in Exradius)."""
+    return {"key": key, "label": label, "target": target, "name": name, "required": required, "format": fmt,
+            "default": default, "host": host}
+
+
 CATALOG = {
-    # key: (required config keys, optional config keys, launcher it needs)
-    "github": (("token",), (), None),
-    "gitlab": (("token",), ("api_url",), "npx"),
-    "postgres": (("url",), (), "uvx"),
-    "slack": (("bot_token", "team_id"), (), "npx"),
-    "sentry": (("token",), (), "npx"),
-    "linear": (("api_key",), (), None),
-    "jira": (("url", "username", "api_token"), (), "uvx"),
-    "fetch": ((), (), "uvx"),
-    "playwright": ((), (), "npx"),
-    "filesystem": ((), ("path",), "npx"),
+    # A copy of backend/exradius/catalog.py: transport, command or url, config keys, the
+    # launcher the default workstation lacks, and the hosts the agent phase may reach for it.
+    "github": {"transport": "http", "command": None, "url": "https://api.githubcopilot.com/mcp/",
+               "config": (_key("token", "GitHub token", "header", "Authorization", fmt="Bearer {}"),),
+               "requires": None, "hosts": ()},
+    "gitlab": {"transport": "stdio", "command": "npx", "url": None,
+               "config": (_key("token", "GitLab personal access token", "env", "GITLAB_PERSONAL_ACCESS_TOKEN"),
+                          _key("api_url", "GitLab API URL", "env", "GITLAB_API_URL", required=False,
+                               default="https://gitlab.com/api/v4", host=True)),
+               "requires": "npx", "hosts": NPM},
+    "postgres": {"transport": "stdio", "command": "uvx", "url": None,
+                 "config": (_key("url", "Database connection string", "env", "DATABASE_URI"),),
+                 "requires": "uvx", "hosts": PYPI},
+    "slack": {"transport": "stdio", "command": "npx", "url": None,
+              "config": (_key("bot_token", "Slack bot token", "env", "SLACK_BOT_TOKEN"),
+                         _key("team_id", "Slack team id", "env", "SLACK_TEAM_ID")),
+              "requires": "npx", "hosts": NPM + ("slack.com",)},
+    "sentry": {"transport": "stdio", "command": "npx", "url": None,
+               "config": (_key("token", "Sentry access token", "env", "SENTRY_ACCESS_TOKEN"),),
+               "requires": "npx", "hosts": NPM + ("sentry.io", "*.sentry.io")},
+    "linear": {"transport": "http", "command": None, "url": "https://mcp.linear.app/mcp",
+               "config": (_key("api_key", "Linear API key", "header", "Authorization", fmt="Bearer {}"),),
+               "requires": None, "hosts": ()},
+    "jira": {"transport": "stdio", "command": "uvx", "url": None,
+             "config": (_key("url", "Jira URL", "env", "JIRA_URL", host=True),
+                        _key("username", "Jira username", "env", "JIRA_USERNAME"),
+                        _key("api_token", "Jira API token", "env", "JIRA_API_TOKEN")),
+             "requires": "uvx", "hosts": PYPI},
+    "fetch": {"transport": "stdio", "command": "uvx", "url": None, "config": (), "requires": "uvx", "hosts": PYPI},
+    "playwright": {"transport": "stdio", "command": "npx", "url": None, "config": (), "requires": "npx",
+                   "hosts": NPM + ("cdn.playwright.dev", "playwright.download.prss.microsoft.com")},
+    "filesystem": {"transport": "stdio", "command": "npx", "url": None,
+                   "config": (_key("path", "Directory", "arg", required=False, default="/work"),),
+                   "requires": "npx", "hosts": NPM},
 }
 LAUNCHERS = ("npx", "uvx")
 SECRET_PLACES = (
@@ -669,6 +714,142 @@ def cache_folder(index, entry):
     text = entry[1:] if entry.startswith("~") else entry
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-")
     return "%d-%s" % (index, name[:80] or "cache")
+
+
+DNS_LABEL = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+IPV4 = re.compile(r"^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$")
+
+
+def _cut_suffix(text, suffix):
+    return text[:-len(suffix)] if suffix and text.endswith(suffix) else text
+
+
+def _cut_prefix(text, prefix):
+    return text[len(prefix):] if text.startswith(prefix) else text
+
+
+def host_key(entry):
+    """A ``network.allow`` entry as it is compared: lower case, no trailing dot."""
+    return _cut_suffix(entry.strip().lower(), ".")
+
+
+def host_problem(entry):
+    """Why a ``network.allow`` entry is not a host name (``pypi.org``, ``*.pythonhosted.org``,
+    an IPv4 address), or None (``host_problem`` in Exradius, word for word)."""
+    host = host_key(entry)
+    if "://" in host or "/" in host:
+        return "write a host name, not a URL (pypi.org, not https://pypi.org/simple)"
+    if ":" in host:
+        return "write the host without a port: every port of an allowed host is allowed"
+    if host in ("*", "*.") or host.startswith("*.") and "*" in host[2:]:
+        return "* stands for the subdomains of a name: *.example.com, never every host"
+    if "*" in host and not host.startswith("*."):
+        return "* is allowed only as a leading *. (*.example.com)"
+    name = _cut_prefix(host, "*.")
+    if name == "localhost" or name.startswith("127."):
+        return "the run's own services are on localhost and need no entry"
+    if IPV4.match(name):
+        return "*. does not apply to an address" if host.startswith("*.") else None
+    labels = name.split(".")
+    if len(name) > 253 or not all(DNS_LABEL.match(label) for label in labels):
+        return "%r is not a host name" % (entry,)
+    return None
+
+
+def url_host(url):
+    """The host of a URL without a secret in it, or None (``network.url_host``)."""
+    if not url or SECRET_REF.search(url):
+        return None
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
+def connection_definition(conn):
+    """A connection as transport, command, args, url, env and headers, a catalog one
+    expanded (``ProjectConfig.connection_definition`` and ``catalog.expand``)."""
+    if conn.get("catalog"):
+        item = CATALOG[conn["catalog"]]
+        given = conn.get("config") or {}
+        env, headers, args = {}, {}, []
+        for key in item["config"]:
+            value = given.get(key["key"], key["default"])
+            if value is None:
+                continue
+            written = key["format"].replace("{}", value)
+            if key["target"] == "env":
+                env[key["name"]] = written
+            elif key["target"] == "header":
+                headers[key["name"]] = written
+            else:
+                args.append(written)
+        return {"transport": item["transport"], "command": item["command"], "args": args, "url": item["url"],
+                "env": env, "headers": headers}
+    return {"transport": "http" if conn.get("url") else "stdio", "command": conn.get("command"),
+            "args": list(conn.get("args") or []), "url": conn.get("url"), "env": dict(conn.get("env") or {}),
+            "headers": dict(conn.get("headers") or {})}
+
+
+def proxied(definition):
+    """An HTTP connection whose headers hold a secret: a run reaches it through the proxy's
+    route, so its host is not on the agent phase's list (``network.proxied``)."""
+    return definition["transport"] == "http" and any(
+        SECRET_REF.search(str(value)) for value in (definition.get("headers") or {}).values())
+
+
+def connection_hosts(conn):
+    """The hosts one connection reaches besides a proxy route (``network.connection_hosts``)."""
+    hosts = []
+    definition = connection_definition(conn)
+    if conn.get("catalog"):
+        item = CATALOG[conn["catalog"]]
+        hosts += list(item["hosts"])
+        for key in item["config"]:
+            if key["host"]:
+                host = url_host((conn.get("config") or {}).get(key["key"], key["default"]))
+                if host:
+                    hosts.append(host)
+    if definition["transport"] == "http" and not proxied(definition):
+        host = url_host(definition.get("url"))
+        if host:
+            hosts.append(host)
+    return hosts
+
+
+def used_connections(cfg):
+    """Every connection some agent lists, in the file's order (``network.agent_connections``
+    without an agent: what a verify Run lists the tools of)."""
+    return [name for name in cfg.connections if any(name in names for names in cfg.agent_connections.values())]
+
+
+def allowed_hosts(cfg, install=()):
+    """The agent phase's host list (``network.allowed_hosts(config, None, install)``): the
+    install's ``egress.allow``, the config's ``network.allow``, the connections' hosts."""
+    hosts = list(install) + list(cfg.network_allow)
+    for name in used_connections(cfg):
+        hosts += connection_hosts(cfg.connections[name])
+    seen = set()
+    out = []
+    for host in hosts:
+        key = host_key(host)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(host.strip())
+    return out
+
+
+def repository_hosts(cfg):
+    """The hosts of the config's http(s) repository URLs. In a run git reaches them through
+    the proxy's credential route; the local proxy lets the agent phase reach them instead."""
+    hosts = []
+    for repo in cfg.repositories:
+        url = repo.get("url") or ""
+        if re.match(r"^https?://", url, re.I):
+            host = url_host(url)
+            if host and host.lower() not in hosts:
+                hosts.append(host.lower())
+    return hosts
 
 
 def fmt_path(path):
@@ -841,7 +1022,9 @@ class Config(object):
         self.env = {}
         self.required_keys = []
         self.agents = []
-        self.connections = []
+        self.agent_connections = {}  # agent slug -> the connection names it lists
+        self.connections = {}  # name -> dict: catalog, config, command, args, env, url, headers
+        self.network_allow = []  # network.allow, as written
 
 
 def validate(raw, config_dir="", lookup=None):
@@ -855,7 +1038,7 @@ def validate(raw, config_dir="", lookup=None):
     secret_errors = []
     required = scan_secrets(raw, secret_errors)
     top = ("version", "project", "secret_store", "resources", "repositories", "workstation", "services",
-           "env", "notes", "connections", "agents")
+           "env", "notes", "network", "connections", "agents")
     v.mapping((), raw, top, required=("version", "project", "agents"))
     cfg = Config()
     cfg.required_keys = required
@@ -885,10 +1068,10 @@ def validate(raw, config_dir="", lookup=None):
         text = text.strip()
         size = memory_bytes(text)
         if size is None:
-            v.err(path, "must be a Docker size such as 512m or 6g (a number and one of b, k, m, g)")
+            v.err(path, "must be a size with a unit, such as 512m or 6g")
             return None
         if size < MEMORY_MIN:
-            v.err(path, "at least 6m (Docker's smallest memory limit)")
+            v.err(path, "must be at least 6m")
             return None
         return text
 
@@ -1059,6 +1242,29 @@ def validate(raw, config_dir="", lookup=None):
     if "notes" in raw:
         v.text(("notes",), raw["notes"])
 
+    network = raw.get("network")
+    if "network" in raw and v.mapping(("network",), network, ("allow",)) is not None:
+        if "allow" in network:
+            hosts = set()
+            entries = network["allow"]
+            if not isinstance(entries, list):
+                v.err(("network", "allow"), "must be a list")
+                entries = []
+            for index, entry in enumerate(entries):
+                p = ("network", "allow", index)
+                text = v.text(p, entry, non_empty=True)
+                if text is None:
+                    continue
+                problem = host_problem(text)
+                if problem:
+                    v.err(p, problem)
+                    continue
+                key = host_key(text)
+                if key in hosts:
+                    v.err(p, "%r is listed twice" % (text,))
+                hosts.add(key)
+                cfg.network_allow.append(text)
+
     connections = {}
     if "connections" in raw:
         connections = raw["connections"]
@@ -1099,19 +1305,27 @@ def validate(raw, config_dir="", lookup=None):
                     v.err(p + ("catalog",), "unknown catalog entry %r (known: %s)" % (conn["catalog"], ", ".join(CATALOG)))
                     continue
                 given = conn.get("config") or {}
+                known = [k["key"] for k in entry["config"]]
                 for key in given:
-                    if key not in entry[0] + entry[1]:
+                    if key not in known:
                         v.err(p + ("config", key), "unknown config key for catalog %s (known: %s)"
-                              % (conn["catalog"], ", ".join(entry[0] + entry[1]) or "none"))
-                for key in entry[0]:
-                    if key not in given:
-                        v.err(p + ("config", key), "required by catalog %s" % conn["catalog"])
-                launcher = entry[2]
+                              % (conn["catalog"], ", ".join(known) or "none"))
+                for key in entry["config"]:
+                    if key["required"] and key["key"] not in given:
+                        v.err(p + ("config", key["key"]), "required by catalog %s (%s)" % (conn["catalog"], key["label"]))
+                launcher = entry["requires"]
             elif conn.get("command") in LAUNCHERS:
                 launcher = conn["command"]
             if launcher and default_station:
                 warnings.append("%s: needs %s, which the default workstation image does not have" % (fmt_path(p), launcher))
-            cfg.connections.append(name)
+            item = {}
+            for key in ("catalog", "command", "url"):
+                item[key] = conn.get(key)
+            for key in ("config", "env", "headers"):
+                item[key] = {str(k): (str(x) if not isinstance(x, str) else x) for k, x in (conn.get(key) or {}).items()} \
+                    if isinstance(conn.get(key), dict) else None
+            item["args"] = [str(x) for x in conn["args"]] if isinstance(conn.get("args"), list) else None
+            cfg.connections[name] = item
 
     if "agents" in raw:
         agents = raw["agents"]
@@ -1149,11 +1363,383 @@ def validate(raw, config_dir="", lookup=None):
                     v.err(p + ("connections", index), "no connection named %r" % name)
                 seen.add(name)
             cfg.agents.append(slug)
+            cfg.agent_connections[slug] = names
+
+    for name in cfg.connections:
+        if not any(name in names for names in cfg.agent_connections.values()):
+            warnings.append("connections.%s: no agent lists it, so no run gets it and Verify does not list its tools"
+                            % name)
 
     errors = v.errors + secret_errors
     if required and not raw.get("secret_store"):
         errors.append("secret_store: required, because the file references secrets (%s)" % ", ".join(required))
     return (None if errors else cfg), errors, warnings, required
+
+
+# ---------------------------------------------------------------------------------------
+# The egress proxy (a stand-in for exradius-egress's forward proxy, docs/kubernetes.md §11)
+# ---------------------------------------------------------------------------------------
+#
+# The check runs this script in a container as ``--egress-proxy /state``. It reads the phase
+# (``/state/phase``: setup or agent) and the policy (``/state/policy.json``: allow,
+# repositories, private) per request, so the check switches phases by rewriting a file, and
+# appends one JSON line per request to ``/state/records.jsonl``. Decisions mirror
+# egress/internal/proxy (proxy.go ``decide``, dial.go ``addresses``): the agent phase's list
+# first, then private addresses refused in every phase unless allowed, dialling the address
+# that was checked. A refusal is ``403`` with the reason as the status text and the body.
+
+PROXY_PORT = 3128
+PROXY_IMAGE = "python:3.13-alpine"
+PROXY_STATE = "/state"
+INTERNAL_RANGES = [ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+    "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8")]
+"""``internalRanges`` in egress/internal/proxy/dial.go."""
+
+
+def _unmap(ip):
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
+
+
+def internal_address(ip):
+    """A private, loopback, link-local or otherwise non-public address."""
+    ip = _unmap(ipaddress.ip_address(ip) if isinstance(ip, str) else ip)
+    return any(ip.version == net.version and ip in net for net in INTERNAL_RANGES)
+
+
+def match_host(patterns, host):
+    """``MatchHost``: an exact name (any case) or ``*.domain`` for every name below domain,
+    not the domain itself."""
+    host = _cut_suffix(host.lower(), ".")
+    for pattern in patterns:
+        pattern = host_key(pattern)
+        if not pattern:
+            continue
+        if pattern.startswith("*."):
+            if host.endswith("." + pattern[2:]):
+                return True
+        elif host == pattern:
+            return True
+    return False
+
+
+def private_allows(entry, host, ip, port):
+    """One ``--allow-private`` entry (``egress.allowPrivate``): a CIDR, an address, or
+    ``host[:port]`` (no port: any)."""
+    entry = entry.strip()
+    try:
+        net = ipaddress.ip_network(entry, strict=False)
+    except ValueError:
+        net = None
+    if net is not None:
+        return ip is not None and _unmap(ip).version == net.version and _unmap(ip) in net
+    name, want = entry, 0
+    match = re.match(r"^(?:\[([^\]]+)\]|([^:]+)):([0-9]+)$", entry)
+    if match:
+        name, want = match.group(1) or match.group(2), int(match.group(3))
+    return name.lower() == host.lower() and (want == 0 or want == port)
+
+
+def egress_decide(phase, host, port, addresses, allow=(), repositories=(), private=()):
+    """The forward proxy's decision, as a pure function. ``addresses`` are what ``host``
+    resolves to (a literal address resolves to itself; None: it did not resolve).
+
+    Returns a dict: ``allowed``, ``reason`` (the refusal text, or why it cannot be
+    reached), ``via`` ("repository" when only the repository stand-in allowed it,
+    "allow-private" when a private address was allowed), ``addresses`` (to dial)."""
+    out = {"allowed": True, "reason": "", "via": "", "addresses": []}
+    if phase != "setup" and not match_host(allow, host):
+        if host_key(host) in [host_key(h) for h in repositories]:
+            out["via"] = "repository"
+        else:
+            out.update(allowed=False, reason="%s is not on this task's network allowlist (network.allow)" % host)
+            return out
+    literal = None
+    try:
+        literal = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        pass
+    if literal is not None:
+        if internal_address(literal):
+            if not any(private_allows(e, host, literal, port) for e in private):
+                out.update(allowed=False, reason="%s is a private or cluster-internal address" % host)
+                return out
+            out["via"] = out["via"] or "allow-private"
+        out["addresses"] = [str(_unmap(literal))]
+        return out
+    if addresses is None:
+        out["reason"] = "cannot resolve %s" % host
+        return out
+    usable = []
+    for text in addresses:
+        ip = _unmap(ipaddress.ip_address(text))
+        if not internal_address(ip):
+            usable.append(str(ip))
+        elif any(private_allows(e, host, ip, port) for e in private):
+            usable.append(str(ip))
+            out["via"] = out["via"] or "allow-private"
+    if not usable:
+        out.update(allowed=False, reason="%s resolves to a private or cluster-internal address" % host, via="")
+        return out
+    out["addresses"] = usable
+    return out
+
+
+def _read_state(state):
+    try:
+        with open(os.path.join(state, "phase")) as handle:
+            phase = handle.read().strip() or "setup"
+    except OSError:
+        phase = "setup"
+    try:
+        with open(os.path.join(state, "policy.json")) as handle:
+            policy = json.load(handle)
+    except (OSError, ValueError):
+        policy = {}
+    return phase, policy
+
+
+def _resolve(host, port):
+    try:
+        found = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError, OSError):
+        return None
+    out = []
+    for item in found:
+        address = item[4][0].split("%")[0]
+        if address not in out:
+            out.append(address)
+    return out
+
+
+def _one_line(text):
+    text = "".join(c if 0x20 <= ord(c) <= 0x7e else " " for c in text)
+    return text[:200]
+
+
+def _split_host_port(text, default):
+    match = re.match(r"^\[([^\]]+)\](?::([0-9]+))?$", text) or re.match(r"^([^:]+)(?::([0-9]+))?$", text)
+    if not match:
+        return text, default
+    return match.group(1), int(match.group(2)) if match.group(2) else default
+
+
+class EgressProxy(object):
+    """The forward proxy: ``CONNECT host:port`` and absolute-form plain HTTP."""
+
+    def __init__(self, state, host="0.0.0.0", port=PROXY_PORT):
+        import http.server
+        import socketserver
+
+        self.state = state
+        self.lock = threading.Lock()
+        proxy = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_CONNECT(self):
+                proxy.connect(self)
+
+            def _plain(self):
+                proxy.plain(self)
+
+            do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = do_PATCH = do_OPTIONS = _plain
+
+        class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+
+        self.server = Server((host, port), Handler)
+        self.port = self.server.server_address[1]
+
+    def serve_forever(self):
+        self.server.serve_forever()
+
+    def shutdown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    # -- deciding and recording ---------------------------------------------------------
+
+    def decide(self, host, port):
+        phase, policy = _read_state(self.state)
+        literal = True
+        try:
+            ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            literal = False
+        addresses = None if literal else _resolve(host, port)
+        decision = egress_decide(phase, host, port, addresses, policy.get("allow") or (),
+                                 policy.get("repositories") or (), policy.get("private") or ())
+        decision["phase"] = phase
+        return decision
+
+    def record(self, decision, host, port, route):
+        line = json.dumps({"phase": decision["phase"], "host": host, "port": port, "route": route,
+                           "allowed": decision["allowed"], "reason": decision["reason"], "via": decision["via"],
+                           "at": time.time()})
+        with self.lock:
+            with open(os.path.join(self.state, "records.jsonl"), "a") as handle:
+                handle.write(line + "\n")
+
+    @staticmethod
+    def refuse(handler, code, reason):
+        reason = _one_line(reason)
+        body = (reason + "\n").encode()
+        handler.wfile.write(("HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\n"
+                             "Connection: close\r\n\r\n" % (code, reason, len(body))).encode() + body)
+        handler.wfile.flush()
+        handler.close_connection = True
+
+    @staticmethod
+    def dial(decision, port):
+        last = None
+        for address in decision["addresses"]:
+            try:
+                return socket.create_connection((address, port), timeout=30)
+            except OSError as exc:
+                last = exc
+        raise last or OSError("no address")
+
+    # -- CONNECT ------------------------------------------------------------------------
+
+    def connect(self, handler):
+        host, port = _split_host_port(handler.path, 443)
+        decision = self.decide(host, port)
+        if not decision["allowed"]:
+            self.record(decision, host, port, "connect")
+            self.refuse(handler, 403, decision["reason"])
+            return
+        try:
+            if not decision["addresses"]:
+                raise OSError(decision["reason"] or "no address")
+            upstream = self.dial(decision, port)
+        except OSError as exc:
+            decision["reason"] = _one_line(str(exc))
+            self.record(decision, host, port, "connect")
+            self.refuse(handler, 502, "cannot reach %s: %s" % (host, decision["reason"]))
+            return
+        self.record(decision, host, port, "connect")
+        handler.wfile.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        handler.wfile.flush()
+        handler.close_connection = True
+        upstream.settimeout(None)
+        client = handler.connection
+        client.settimeout(None)
+        self.splice(client, upstream)
+
+    @staticmethod
+    def splice(client, upstream):
+        def pump(source, target):
+            try:
+                while True:
+                    data = source.recv(65536)
+                    if not data:
+                        break
+                    target.sendall(data)
+            except OSError:
+                pass
+            try:
+                target.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+
+        other = threading.Thread(target=pump, args=(upstream, client))
+        other.daemon = True
+        other.start()
+        pump(client, upstream)
+        other.join()
+        upstream.close()
+
+    # -- plain HTTP in absolute form ----------------------------------------------------
+
+    def plain(self, handler):
+        try:
+            url = urlsplit(handler.path)
+        except ValueError:
+            url = None
+        if url is None or not url.scheme or not url.hostname:
+            self.refuse(handler, 400, "this is a forward proxy: send CONNECT or an absolute URL")
+            return
+        host = url.hostname
+        port = url.port or (443 if url.scheme == "https" else 80)
+        decision = self.decide(host, port)
+        if not decision["allowed"]:
+            self.record(decision, host, port, "http")
+            self.refuse(handler, 403, decision["reason"])
+            return
+        try:
+            if not decision["addresses"]:
+                raise OSError(decision["reason"] or "no address")
+            upstream = self.dial(decision, port)
+        except OSError as exc:
+            decision["reason"] = _one_line(str(exc))
+            self.record(decision, host, port, "http")
+            self.refuse(handler, 502, "cannot reach %s: %s" % (host, decision["reason"]))
+            return
+        self.record(decision, host, port, "http")
+        target = url.path or "/"
+        if url.query:
+            target += "?" + url.query
+        lines = ["%s %s HTTP/1.1" % (handler.command, target)]
+        for key, value in handler.headers.items():
+            if key.lower() in ("proxy-connection", "proxy-authorization", "connection", "keep-alive"):
+                continue
+            lines.append("%s: %s" % (key, value))
+        lines.append("Connection: close")
+        try:
+            upstream.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
+            length = handler.headers.get("Content-Length")
+            if length and length.isdigit():
+                remaining = int(length)
+                while remaining > 0:
+                    chunk = handler.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    upstream.sendall(chunk)
+                    remaining -= len(chunk)
+            elif "chunked" in (handler.headers.get("Transfer-Encoding") or "").lower():
+                while True:
+                    size_line = handler.rfile.readline()
+                    upstream.sendall(size_line)
+                    size = int(size_line.split(b";")[0].strip() or b"0", 16)
+                    if size == 0:
+                        while True:
+                            trailer = handler.rfile.readline()
+                            upstream.sendall(trailer)
+                            if trailer in (b"\r\n", b"\n", b""):
+                                break
+                        break
+                    upstream.sendall(handler.rfile.read(size + 2))
+            while True:
+                data = upstream.recv(65536)
+                if not data:
+                    break
+                handler.wfile.write(data)
+            handler.wfile.flush()
+        except (OSError, ValueError):
+            pass
+        finally:
+            upstream.close()
+            handler.close_connection = True
+
+
+def egress_proxy_main(state):
+    """``--egress-proxy STATE``: serve until stopped; ``STATE/ready`` says it listens."""
+    proxy = EgressProxy(state)
+    with open(os.path.join(state, "ready"), "w") as handle:
+        handle.write("%d\n" % proxy.port)
+    try:
+        proxy.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
 
 
 # ---------------------------------------------------------------------------------------
@@ -1341,6 +1927,13 @@ class Check(object):
         self.verbose = args.verbose
         self.cleanup_image = None
         self.cache_dir = None
+        self.emulate = not args.open_network
+        self.network = None  # the internal Docker network the pod sits on
+        self.proxy = None  # the egress proxy's container
+        self.proxy_url = None
+        self.egress_dir = None  # the proxy's state directory (phase, policy, records)
+        self.agent_hosts = []
+        self.repo_hosts = []
 
     # -- reporting ----------------------------------------------------------------------
 
@@ -1348,8 +1941,9 @@ class Check(object):
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
 
-    def step(self, name, action):
-        if self.failure is not None:
+    def step(self, name, action, always=False):
+        """``always``: a step that runs after a failure too and never fails by itself (INFO)."""
+        if self.failure is not None and not always:
             self.steps.append((name, "skipped", 0.0, ""))
             self.say("SKIP  %s" % name)
             return None
@@ -1372,7 +1966,7 @@ class Check(object):
             raise
         seconds = time.time() - started
         self.steps.append((name, state, seconds, summary or ""))
-        mark = "PASS" if state == "passed" else "FAIL"
+        mark = "INFO" if always else "PASS" if state == "passed" else "FAIL"
         timing = " (%.1fs)" % seconds if seconds >= 0.5 else ""
         self.say("%s  %s%s" % (mark, name, timing))
         if summary:
@@ -1412,11 +2006,21 @@ class Check(object):
         self.images = {}
         self.prepare_images()
         self.step("Check workstation image", self.check_image)
+        if used_connections(self.config):
+            self.step("Check connections", self.check_connections)
         self.step("Prepare /work", self.prepare_work)
+        if self.emulate:
+            self.step("Start egress proxy", self.start_proxy)
         for name in self.config.services:
             self.step("Start service %s" % name, lambda n=name: self.start_service(n))
         for command in self.config.workstation["setup"]:
             self.step("Setup: %s" % command, lambda c=command: self.setup(c))
+        if self.args.run and self.emulate and self.failure is None:
+            self.set_phase("agent")
+        for command in self.args.run:
+            self.step("Agent phase: %s" % command, lambda c=command: self.setup(c, agent=True))
+        if self.emulate and self.egress_dir is not None:
+            self.step("Network", self.network_summary, always=True)
 
     def check_budget(self):
         """Exradius places a run's pod on a node whose free memory fits the declared sizes
@@ -1442,10 +2046,24 @@ class Check(object):
             self.say("RESULT: the file is valid (only read and validated; no Docker steps ran).")
             code = 0
         elif self.failure is None:
-            self.say("RESULT: passed. The setup commands ran under the run's conditions.")
-            if not self.args.validate:
-                self.say("Not covered locally: the Exradius runtime, providers, pushes, the cluster's CPU "
-                         "architecture, and its network and egress allowlist.")
+            if self.args.run:
+                self.say("RESULT: passed. The setup commands and the agent-phase commands ran under the run's "
+                         "conditions.")
+            else:
+                self.say("RESULT: passed. The setup commands ran under the run's conditions.")
+            parts = ["the agent runtime and model", "providers", "pushes and git's credential route",
+                     "MCP connections' tool lists"]
+            if not self.args.platform:
+                parts.append("the cluster's CPU architecture (--platform)")
+            if self.args.allow or self.args.allow_private:
+                parts.append("the install's egress.allow and egress.allowPrivate beyond --allow and --allow-private")
+            else:
+                parts.append("the install's egress.allow and egress.allowPrivate (--allow, --allow-private)")
+            parts.append("image builds' network (Docker's own network here, the proxy in the cluster)")
+            self.say("Not covered locally: %s." % ", ".join(parts))
+            if not self.emulate:
+                self.say("The network was not emulated (--open-network): every container reached the network "
+                         "directly.")
             code = 0
         else:
             name, summary, output = self.failure
@@ -1509,6 +2127,13 @@ class Check(object):
             raise StepFailed("%d error%s in the file" % (len(errors), "" if len(errors) == 1 else "s"),
                              "\n".join(lines + ["error: %s" % e for e in errors]))
         self.config = config
+        self.agent_hosts = allowed_hosts(config, self.args.allow)
+        self.repo_hosts = repository_hosts(config)
+        if self.agent_hosts:
+            lines.append("network: the agent phase may reach %s" % ", ".join(self.agent_hosts))
+        else:
+            lines.append("network: the agent phase reaches no host besides the model, the repositories and the "
+                         "connections' routes")
         self.secrets = {name: "chk" + _random.token_hex(10) for name in required}
         if config.workstation["cache"]:
             self.cache_dir = os.path.realpath(self.args.cache_dir or os.path.join(os.path.dirname(self.config_path),
@@ -1553,16 +2178,13 @@ class Check(object):
         tag = "exradius-check/%s/%s:latest" % (self.config.slug, name)
         dockerfile = os.path.join(self.repo_root, item["dockerfile"])
         context = os.path.join(self.repo_root, item["context"] or "")
-        # Exradius builds with rootless BuildKit in the cluster (since 0.2.0); --classic builds
-        # as v0.1.0's Docker-based servers did, where BuildKit-only syntax failed.
-        cmd = ["docker", "build", "-f", dockerfile, "-t", tag, "--label", "exradius.build=%s" % name]
-        if not self.args.classic:
-            cmd.append("--progress=plain")
+        # Exradius builds with rootless BuildKit in the cluster.
+        cmd = ["docker", "build", "-f", dockerfile, "-t", tag, "--label", "exradius.build=%s" % name, "--progress=plain"]
         cmd += self.platform_args()
         if self.args.no_cache:
             cmd.append("--no-cache")
         cmd.append(context)
-        env = docker_env({"DOCKER_BUILDKIT": "0" if self.args.classic else "1"})
+        env = docker_env({"DOCKER_BUILDKIT": "1"})
         code, out = stream(cmd, self.log, self.verbose, env=env)
         if code != 0:
             raise StepFailed("building %s from %s failed (exit %d)%s" % (
@@ -1572,7 +2194,7 @@ class Check(object):
 
     def build_default(self):
         cmd = ["docker", "build", "-t", DEFAULT_IMAGE_TAG] + self.platform_args() + ["-"]
-        code, out = stream(cmd, self.log, self.verbose, env=docker_env({"DOCKER_BUILDKIT": "0" if self.args.classic else "1"}),
+        code, out = stream(cmd, self.log, self.verbose, env=docker_env({"DOCKER_BUILDKIT": "1"}),
                            input_text=DEFAULT_IMAGE_DOCKERFILE)
         if code != 0:
             raise StepFailed("building the default workstation stand-in failed (exit %d)" % code, out)
@@ -1668,6 +2290,164 @@ class Check(object):
         if problems:
             raise StepFailed("; ".join(problems), out)
         return detail
+
+    def check_connections(self):
+        """Each stdio connection an agent lists needs its command in the workstation image:
+        Verify's "List tools <name>" starts it there."""
+        commands = []
+        lines = []
+        for name in used_connections(self.config):
+            definition = connection_definition(self.config.connections[name])
+            if definition["transport"] != "stdio":
+                lines.append("%s: HTTP (%s), nothing to start in the workstation" % (
+                    name, "through the proxy's route" if proxied(definition) else url_host(definition["url"]) or "?"))
+                continue
+            commands.append((name, definition["command"]))
+        if not commands:
+            return "\n".join(lines)
+        probe = "".join('p=$(command -v "%s" 2>/dev/null) && echo "%s: $p" || echo "%s: missing"\n'
+                        % (cmd.replace('"', '\\"'), name, name) for name, cmd in commands)
+        env = self.workstation_env()
+        env.update({"HOME": HOME_DIR})
+        cmd = ["docker", "run", "--rm", "--network", "none"] + self.run_flags() + self.platform_args()
+        for key, value in env.items():
+            cmd += ["-e", "%s=%s" % (key, value)]
+        cmd += ["--entrypoint", "/bin/sh", self.images["workstation"], "-c", probe]
+        code, out = run(cmd, timeout=120)
+        self.log.write(out)
+        if code != 0:
+            raise StepFailed("could not run /bin/sh in the workstation image (exit %d)" % code, out)
+        found = {}
+        for row in out.splitlines():
+            key, _, value = row.partition(": ")
+            found[key] = value
+        missing = []
+        for name, command in commands:
+            path = found.get(name, "missing")
+            if path == "missing":
+                missing.append("connection %s needs %s, which is not on the workstation image's PATH (in Exradius, "
+                               "Verify's \"List tools %s\" would fail)" % (name, command, name))
+            else:
+                lines.append("%s: %s at %s" % (name, command, path))
+        if missing:
+            raise StepFailed("; ".join(missing), "\n".join(lines + [out]))
+        return "\n".join(lines)
+
+    def start_proxy(self):
+        """The internal network with no route out, and the forward proxy on it and on the
+        default bridge: the only way a container of the pod reaches the network."""
+        self.make_root()
+        network = "exradius-check-%s" % self.id
+        code, out = run(["docker", "network", "create", "--internal", "--label", self.label, network])
+        if code != 0:
+            raise StepFailed("could not create the internal network %s" % network, out)
+        self.network = network
+        image = self.args.proxy_image
+        code, _ = run(["docker", "image", "inspect", "--format", "{{.Id}}", image])
+        if code != 0:
+            code, out = stream(["docker", "pull", image], self.log, self.verbose)
+            if code != 0:
+                raise StepFailed("could not pull the proxy's image %s" % image, out)
+        self.egress_dir = os.path.join(self.root, "egress")
+        script_dir = os.path.join(self.root, "egress-script")
+        for d in (self.egress_dir, script_dir):
+            os.makedirs(d)
+        os.chmod(self.egress_dir, 0o777)
+        shutil.copyfile(os.path.realpath(__file__), os.path.join(script_dir, "exradius_check.py"))
+        os.chmod(script_dir, 0o755)
+        os.chmod(os.path.join(script_dir, "exradius_check.py"), 0o644)
+        self.write_state("phase", "setup\n")
+        self.write_state("policy.json", json.dumps({"allow": self.agent_hosts, "repositories": self.repo_hosts,
+                                                    "private": list(self.args.allow_private)}))
+        self.write_state("records.jsonl", "")
+        container = "exradius-check-%s-egress" % self.id
+        cmd = ["docker", "run", "-d", "--name", container, "--label", self.label, "--user", "%d:%d" % (RUN_UID, RUN_GID),
+               "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+               "--mount", "type=bind,source=%s,target=/check,readonly" % script_dir,
+               "--mount", "type=bind,source=%s,target=%s" % (self.egress_dir, PROXY_STATE),
+               "--entrypoint", "python3", image, "-I", "-B", "/check/exradius_check.py", "--egress-proxy", PROXY_STATE]
+        code, out = run(cmd)
+        if code != 0:
+            raise StepFailed("could not start the egress proxy (%s)" % image, out)
+        self.proxy = container
+        code, out = run(["docker", "network", "connect", network, container])
+        if code != 0:
+            raise StepFailed("could not connect the egress proxy to %s" % network, out)
+        code, out = run(["docker", "inspect", "--format",
+                         '{{(index .NetworkSettings.Networks "%s").IPAddress}}' % network, container])
+        address = out.strip()
+        if code != 0 or not address:
+            raise StepFailed("could not read the egress proxy's address on %s" % network, out)
+        started = time.time()
+        while not os.path.exists(os.path.join(self.egress_dir, "ready")):
+            code, running = run(["docker", "inspect", "--format", "{{.State.Running}}", container])
+            if running.strip() != "true" or time.time() - started > 30:
+                raise StepFailed("the egress proxy did not start", self.service_logs(container))
+            time.sleep(0.2)
+        self.proxy_url = "http://%s:%d" % (address, PROXY_PORT)
+        lines = ["%s on %s (internal, no route out), image %s" % (self.proxy_url, network, image),
+                 "setup: any public host; agent phase: %s" % (", ".join(self.agent_hosts) or "no host")]
+        if self.repo_hosts:
+            lines.append("agent phase, for the repositories (git's route in a run): %s" % ", ".join(self.repo_hosts))
+        if self.args.allow_private:
+            lines.append("private addresses allowed: %s" % ", ".join(self.args.allow_private))
+        return "\n".join(lines)
+
+    def write_state(self, name, text):
+        path = os.path.join(self.egress_dir, name)
+        temporary = path + ".new"
+        with open(temporary, "w") as handle:
+            handle.write(text)
+        os.chmod(temporary, 0o666)
+        os.rename(temporary, path)
+
+    def set_phase(self, phase):
+        if self.egress_dir is not None:
+            self.write_state("phase", phase + "\n")
+
+    def records(self, start=0):
+        """``(records, end offset)`` of the proxy's log from byte ``start``."""
+        if self.egress_dir is None:
+            return [], 0
+        path = os.path.join(self.egress_dir, "records.jsonl")
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(start)
+                data = handle.read()
+        except OSError:
+            return [], start
+        out = []
+        complete = data[:data.rfind(b"\n") + 1] if b"\n" in data else b""
+        for line in complete.decode("utf-8", "replace").splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+        return out, start + len(complete)
+
+    def records_offset(self):
+        return self.records(0)[1]
+
+    def proxy_env(self, java=False):
+        """``proxyEnv`` (and ``javaEnv`` for setup and the workstation) of podspec.go."""
+        if not self.proxy_url:
+            return {}
+        none = ["localhost", "127.0.0.1", "::1"] + [n for n in self.config.services]
+        env = {}
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            env[key] = self.proxy_url
+        env["NO_PROXY"] = env["no_proxy"] = ",".join(none)
+        env["YARN_HTTP_PROXY"] = env["YARN_HTTPS_PROXY"] = self.proxy_url
+        if java:
+            host, port = self.proxy_url[len("http://"):].rsplit(":", 1)
+            options = ("-Dhttp.proxyHost=%s -Dhttp.proxyPort=%s -Dhttps.proxyHost=%s -Dhttps.proxyPort=%s "
+                       "-Dhttp.nonProxyHosts=%s -Daether.connector.http.useSystemProperties=true"
+                       % (host, port, host, port, "|".join(h for h in none if ":" not in h)))
+            own = self.config.env.get("JAVA_TOOL_OPTIONS")
+            if own and not SECRET_REF.search(own):
+                options = own + " " + options
+            env["JAVA_TOOL_OPTIONS"] = options
+        return env
 
     def make_root(self):
         if self.root is not None:
@@ -1787,6 +2567,8 @@ class Check(object):
         container = "exradius-check-%s-pod" % self.id
         cmd = ["docker", "run", "-d", "--name", container, "--label", self.label, "--user", "%d:%d" % (RUN_UID, RUN_GID),
                "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"] + self.platform_args()
+        if self.network:
+            cmd += ["--network", self.network]
         for name in self.config.services:
             cmd += ["--add-host", "%s:127.0.0.1" % name]
         cmd += ["--entrypoint", "/bin/sh", self.images["workstation"], "-c",
@@ -1795,8 +2577,11 @@ class Check(object):
         if code != 0:
             raise StepFailed("could not start the container that holds the run's network", out)
         self.pod = container
-        code, out = run(["docker", "inspect", "--format",
-                         "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", container])
+        if self.network:
+            fmt = '{{(index .NetworkSettings.Networks "%s").IPAddress}}' % self.network
+        else:
+            fmt = "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"
+        code, out = run(["docker", "inspect", "--format", fmt, container])
         addresses = out.split()
         self.pod_ip = addresses[0] if code == 0 and addresses else "127.0.0.1"
 
@@ -1812,6 +2597,7 @@ class Check(object):
         for cap in SERVICE_CAPS:
             cmd += ["--cap-add", cap]
         cmd += ["--security-opt", "no-new-privileges", "--label", self.label] + self.platform_args()
+        env.update(self.proxy_env())
         for key, value in env.items():
             cmd += ["-e", "%s=%s" % (key, value)]
         cmd += memory_flags(service["memory"])
@@ -1888,12 +2674,17 @@ class Check(object):
         code, out = run(["docker", "logs", "--tail", "40", container])
         return out
 
-    def setup(self, command):
+    def setup(self, command, agent=False):
+        """A setup command, or (``agent``) a ``--run`` command in the agent phase: the same
+        container, image, mounts, environment and limits."""
         image = self.images["workstation"]
+        if self.emulate:
+            self.start_pod()
         env = self.workstation_env()
         env.update({"HOME": HOME_DIR, "EXRADIUS_STATE_DIR": STATE_DIR, "EXRADIUS_WORK_DIR": WORK_DIR})
         env.update(GIT_ENV)
-        container = "exradius-check-%s-setup-%s" % (self.id, _random.token_hex(3))
+        env.update(self.proxy_env(java=True))
+        container = "exradius-check-%s-%s-%s" % (self.id, "run" if agent else "setup", _random.token_hex(3))
         cmd = ["docker", "run", "--name", container] + self.run_flags(self.live_mounts) + self.platform_args()
         if self.pod:
             cmd += ["--network", "container:%s" % self.pod]
@@ -1902,6 +2693,7 @@ class Check(object):
             # docker CLI's own environment would also change its HOME and PATH.
             cmd += ["-e", "%s=%s" % (key, value)]
         cmd += ["--entrypoint", "/bin/sh", image, "-c", command]
+        offset = self.records_offset()
         started = time.time()
         code, out = stream(cmd, self.log, self.verbose)
         seconds = time.time() - started
@@ -1909,7 +2701,7 @@ class Check(object):
         if code == KILLED and self.config.memory:
             # Verify's wording (worker/verify.py): exit 137 under a declared limit.
             raise StepFailed("exited with 137: exceeded its declared memory (%s); raise resources.memory or "
-                             "lower the step's parallelism" % self.config.memory, out)
+                             "lower the step's parallelism" % self.config.memory, out + self.network_notes(out, offset))
         if code != 0:
             hint = ""
             if code == KILLED:
@@ -1918,14 +2710,86 @@ class Check(object):
                 hint = " (command not found: the workstation image lacks a tool this command runs)"
             elif code == 125:
                 hint = " (docker could not start the container)"
-            raise StepFailed("exited with %d after %.0fs%s" % (code, seconds, hint), out)
+            raise StepFailed("exited with %d after %.0fs%s" % (code, seconds, hint), out + self.network_notes(out, offset))
         last = [l for l in out.strip().splitlines() if l.strip()][-1:] if out.strip() else []
         return ("last line: %s" % last[0][:200]) if last else ""
+
+    def network_notes(self, out, offset):
+        """What the proxy refused during a failed step, and the hint for a tool that ignored
+        the proxy (``diagnose._network`` in Exradius)."""
+        if not self.emulate:
+            return ""
+        notes = []
+        records, _ = self.records(offset)
+        refused = []
+        for record in records:
+            if not record.get("allowed"):
+                line = "refused: %s: %s" % (record.get("host"), record.get("reason"))
+                if line not in refused:
+                    refused.append(line)
+        notes += refused
+        if not ALLOWLIST_REFUSAL.search(out) and (NO_PROXY_USED.search(out) or NO_NAME.search(out)):
+            notes.append("hint: the run reaches the network only through the proxy that HTTPS_PROXY, HTTP_PROXY and "
+                         "JAVA_TOOL_OPTIONS name; this command (or a tool it runs) ignored them and tried a direct "
+                         "connection, which a run's pod does not have. Configure the tool to use the proxy (Maven: a "
+                         "<proxy> in settings.xml).")
+        return ("\n" + "\n".join(notes)) if notes else ""
+
+    def network_summary(self):
+        """What the proxy saw in the whole check (never fails)."""
+        records, _ = self.records(0)
+        lines = []
+
+        def hosts_of(items):
+            counts = {}
+            for record in items:
+                host = (record.get("host") or "").lower()
+                counts[host] = counts.get(host, 0) + 1
+            return counts
+
+        def counted(counts):
+            return ", ".join("%s (%d request%s)" % (h, n, "" if n == 1 else "s") for h, n in counts.items())
+
+        setup = [r for r in records if r.get("phase") == "setup"]
+        agent = [r for r in records if r.get("phase") == "agent"]
+        refused_agent = hosts_of(r for r in agent if not r.get("allowed"))
+        refused_setup = hosts_of(r for r in setup if not r.get("allowed"))
+        if refused_agent:
+            lines.append("refused in the agent phase: %s" % counted(refused_agent))
+        if refused_setup:
+            lines.append("refused in setup: %s" % counted(refused_setup))
+        reached_setup = list(hosts_of(r for r in setup if r.get("allowed") and not r.get("reason")))
+        if reached_setup:
+            lines.append("reached in setup: %s" % ", ".join(reached_setup))
+        reached_agent = list(hosts_of(r for r in agent if r.get("allowed") and not r.get("reason")))
+        if reached_agent:
+            lines.append("reached in the agent phase: %s" % ", ".join(reached_agent))
+        setup_only = [h for h in reached_setup if not match_host(self.agent_hosts, h)]
+        if setup_only:
+            lines.append("reached in setup only: %s" % ", ".join(setup_only))
+            lines.append("  the agent phase cannot reach them: add to network.allow those the agent needs "
+                         "(to add or update a dependency, to download a browser)")
+        repos = list(hosts_of(r for r in agent if r.get("allowed") and r.get("via") == "repository"
+                              and not r.get("reason")))
+        if repos:
+            lines.append("repository hosts reached in the agent phase: %s" % ", ".join(repos))
+            lines.append("  in a run only git reaches them, through Exradius's route; other requests to them are "
+                         "refused unless network.allow lists them")
+        private = list(hosts_of(r for r in records if r.get("allowed") and r.get("via") == "allow-private"))
+        if private:
+            lines.append("private addresses allowed by --allow-private: %s" % ", ".join(private))
+            lines.append("  the install's egress.allowPrivate must list them")
+        if not records:
+            lines.append("no request went through the proxy")
+        return "\n".join(lines)
 
     def cleanup(self):
         ids = run(["docker", "ps", "-aq", "--filter", "label=" + self.label])[1].split()
         if ids:
             run(["docker", "rm", "-f", "-v"] + ids)
+        networks = run(["docker", "network", "ls", "-q", "--filter", "label=" + self.label])[1].split()
+        if networks:
+            run(["docker", "network", "rm"] + networks)
         if self.root and os.path.isdir(self.root):
             if self.args.keep:
                 self.say("DONE  Clean up: kept %s (work, home, tmp) as asked" % self.root)
@@ -1945,11 +2809,23 @@ class Check(object):
         removed = []
         if ids:
             removed.append("%d container%s" % (len(ids), "" if len(ids) == 1 else "s"))
+        if networks:
+            removed.append("the network %s" % self.network if self.network else "the network")
         if self.root:
             removed.append("the temporary folder")
         if removed:
             self.say("DONE  Clean up: removed %s" % ", ".join(removed))
 
+
+ALLOWLIST_REFUSAL = re.compile(r"(\S+) is not on this task's network allowlist")
+NO_PROXY_USED = re.compile(
+    r"Connect(?:ion)? timed out|connect: connection timed out|ETIMEDOUT|Network is unreachable|ENETUNREACH"
+    r"|connect to \S+ port \d+ (?:after \d+ ms: )?(?:Connection timed out|Couldn't connect)", re.I)
+"""A tool that ignored the proxy (``diagnose.NO_PROXY_USED`` in Exradius)."""
+NO_NAME = re.compile(r"Could not resolve host|ENOTFOUND|EAI_AGAIN|Temporary failure in name resolution"
+                     r"|Failed to connect to (?!localhost |127\.|::1 )\S+ port \d+|No route to host|EHOSTUNREACH")
+"""A direct connection on the check's internal network: names do not resolve and addresses
+have no route (in a run's pod the connection times out instead, NO_PROXY_USED)."""
 
 CACHE_DIR_NAME = ".exradius-cache"
 """The local stand-in for the project volume's caches/, next to exradius.yaml (git-ignored)."""
@@ -2034,12 +2910,24 @@ def parse_args(argv):
                         help="mount the local checkouts as they are (uncommitted changes, existing "
                              "node_modules or .venv included) instead of a fresh clone of them")
     parser.add_argument("--validate", action="store_true", help="only read and validate the file; no Docker")
-    parser.add_argument("--platform", help="build and run for this platform, e.g. linux/amd64 (the server's)")
+    parser.add_argument("--run", action="append", default=[], metavar="CMD",
+                        help="after the setup commands, run CMD in the workstation in the agent phase, under the "
+                             "agent's network (repeatable): the test and lint commands the notes name")
+    parser.add_argument("--allow", action="append", default=[], metavar="HOST",
+                        help="a host of the install's egress.allow, which the agent phase may reach on top of "
+                             "network.allow (repeatable)")
+    parser.add_argument("--allow-private", action="append", default=[], metavar="HOST_OR_CIDR",
+                        help="a private address the proxy may reach, as the install's egress.allowPrivate: a CIDR, "
+                             "an address or host[:port] (repeatable)")
+    parser.add_argument("--open-network", action="store_true",
+                        help="do not emulate the run's network: no egress proxy, every container reaches the "
+                             "network directly")
+    parser.add_argument("--proxy-image", default=PROXY_IMAGE, metavar="IMAGE",
+                        help="the image the egress proxy runs in (Python 3.8 or later; default %s)" % PROXY_IMAGE)
+    parser.add_argument("--platform", help="build and run for this platform, e.g. linux/amd64 (the cluster's)")
     parser.add_argument("--pull", action="store_true", help="pull images named with image: even when present locally")
     parser.add_argument("--no-cache", action="store_true", help="build without the Docker layer cache")
-    parser.add_argument("--classic", action="store_true",
-                        help="build with Docker's classic builder, as v0.1.0 (Docker-based) Exradius servers do")
-    parser.add_argument("--buildkit", action="store_true", help=argparse.SUPPRESS)  # the default since 0.3.0
+    parser.add_argument("--buildkit", action="store_true", help=argparse.SUPPRESS)  # builds always use BuildKit
     parser.add_argument("--keep", action="store_true", help="keep the temporary work, home and tmp folders")
     parser.add_argument("--cache-dir", metavar="DIR",
                         help="where workstation.cache folders live between checks (default: .exradius-cache "
@@ -2057,6 +2945,10 @@ def parse_args(argv):
             parser.error("--repo %s: %s is not a folder" % (name, path))
         args.repo_map[name] = path
     args.repos_dir = [os.path.expanduser(d) for d in args.repos_dir]
+    args.allow = [h.strip() for item in args.allow for h in item.split(",") if h.strip()]
+    args.allow_private = [h.strip() for item in args.allow_private for h in item.split(",") if h.strip()]
+    if args.open_network and (args.allow or args.allow_private):
+        parser.error("--allow and --allow-private need the emulated network (no --open-network)")
     if args.cache_dir:
         args.cache_dir = os.path.abspath(os.path.expanduser(args.cache_dir))
     return args
@@ -2066,7 +2958,14 @@ def main(argv=None):
     if sys.version_info < (3, 8):
         sys.stderr.write("exradius check needs Python 3.8 or later\n")
         return 2
-    args = parse_args(sys.argv[1:] if argv is None else argv)
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--egress-proxy"]:
+        # The proxy's own process, in its container (start_proxy).
+        if len(argv) != 2:
+            sys.stderr.write("usage: exradius_check.py --egress-proxy STATE_DIR\n")
+            return 2
+        return egress_proxy_main(argv[1])
+    args = parse_args(argv)
     return Check(args).main()
 
 

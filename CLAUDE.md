@@ -271,7 +271,11 @@ agent routing, so it still uses agent labels). They speak only the public contra
 (`docs/integration-api.md`) and import nothing from `backend/`. Their design notes are in
 each one's `docs/`. `skill/` is the setup skill (a Claude Code plugin); the repository
 root's `.claude-plugin/marketplace.json` publishes it, so it installs with
-`claude plugin marketplace add musabeytekin/exradius`.
+`claude plugin marketplace add musabeytekin/exradius`. Its `scripts/exradius_check.py`
+holds a standard-library port of the config schema, the catalog and the agent phase's
+host list; `backend/tests/test_skill_check.py` fails when they drift, so a change to
+`schemas/project_config.py`, `catalog.py` or `network.py` is followed by one there
+(setup-and-verify.md §2.7).
 
 ## Conventions worth knowing
 
