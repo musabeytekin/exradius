@@ -310,5 +310,10 @@ cloud identities of the api, the worker and build pods, a static ingress address
 the values differ from kind: `values-eks.yaml`, `values-gke.yaml`, `values-aks.yaml`, then
 the generated file. The chart's `ingress` routes every path to the panel's nginx;
 `publicApiUrl` is its address. Values `identity`, `stack`, `objectStore.gcs|azure`,
-`builds.credentialHelper`, `runs.bundleMount` and `nodeSetup` are what the clouds use.
+`builds.credentialHelper`, `runs.bundleMount` and `nodeSetup` are what the clouds use. Each
+module's optional `vault` variable points the install at a Vault the organisation already
+runs (Exradius never installs one): it adds the `vault` block to `values-generated.yaml`,
+`bootstrap.sh` makes the CA ConfigMap from its `ca_file`, and the output
+`vault_kubernetes_auth` tells Vault's admin how to configure Kubernetes auth for the cluster
+(kubernetes.md §28).
 

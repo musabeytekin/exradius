@@ -427,6 +427,10 @@ secret of a KV version 2 engine, and the secret's fields are the store's keys.
   wherever it is; run pods never do.
 - **Locally:** `make -C deploy/kind dev-vault`, then `tilt up -- --vault`, gives the kind
   cluster a dev-mode Vault set up as above with a sample secret (kubernetes.md §17).
+- **On a cloud:** the Terraform modules' optional `vault` variable points the install at an
+  existing Vault, and their output `vault_kubernetes_auth` says what its admin configures;
+  a Vault outside the cluster needs `token_reviewer` (the chart's `vault.tokenReviewer`) and
+  must reach the cluster's API (kubernetes.md §28).
 - **KV version 2 only, and told apart.** On a KV version 1 mount, or any other engine, the
   `subkeys` and `data` paths answer `404` with no error, exactly like an empty KV version 2
   path (checked on Vault 2.2.2), so the store would look empty and its projects would read

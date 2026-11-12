@@ -4,6 +4,7 @@
 # the panel's load balancer, and values-generated.yaml for helm.
 #
 #   terraform init && terraform apply -var 'allowed_cidrs=["<your address>/32"]'
+#     an existing Vault (vault.tf): add -var 'vault={address="https://vault.example.com:8200", audience="vault"}'
 #   ../bootstrap.sh aws       # kubeconfig, the load balancer controller, Traefik, Secrets
 #   make -C ../.. push ...    # the images (terraform output push_command)
 #   helm upgrade --install exradius ../../../charts/exradius -n exradius \

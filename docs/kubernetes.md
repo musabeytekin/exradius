@@ -1080,7 +1080,7 @@ objectStore: {kind: s3, bucket: exradius, s3: {endpoint: ...}, gcs: {endpoint: "
               azure: {account: "", endpoint: "", existingSecret: ""}, inCluster: {seaweedfs: true}}
 identity: {app: {serviceAccountAnnotations: {}, podLabels: {}}, build: {serviceAccountAnnotations: {}, podLabels: {}}}
 vault: {address: "", authMount: kubernetes, role: exradius, namespace: "", caBundle: {configMap: "", key: ca.crt},
-        audience: ""}           # stores of kind vault (config-repo.md §7.4); empty address: none
+        audience: "", tokenReviewer: false}   # stores of kind vault (config-repo.md §7.4); empty address: none
 stack: {nodeSelector: {}, tolerations: []}
 postgres: {existingSecret: ..., inCluster: {cloudnativepg: true, storage: 10Gi}}
 rabbitmq: {existingSecret: ..., inCluster: {operator: true}}
@@ -1098,12 +1098,14 @@ Terraform (`deploy/terraform/<cloud>/`, §28) creates what the values point at:
 - the cloud identities of the api, the worker and build pods;
 - a static address for the panel's load balancer, so `publicApiUrl` is known before the
   install;
-- `values-generated.yaml`.
+- `values-generated.yaml`, with a `vault` block when the optional `vault` variable names an
+  existing Vault (§28), and then the output `vault_kubernetes_auth` for Vault's admin.
 
 `deploy/terraform/bootstrap.sh <cloud>` then prepares the cluster (kubeconfig, the AWS Load
 Balancer Controller or cert-manager and the RabbitMQ operator, Traefik on the reserved
-address and open to `allowed_cidrs` only, the Secrets from Terraform's outputs), and
-`make -C deploy push` pushes the images.
+address and open to `allowed_cidrs` only, the Secrets from Terraform's outputs, and Vault's
+CA as a ConfigMap when the `vault` variable names one), and `make -C deploy push` pushes the
+images.
 
 ## 17. The local developer loop
 
@@ -1756,6 +1758,41 @@ the list.
   Linux 3). AKS Pod Sandboxing (Kata, RuntimeClass `kata-vm-isolation`) runs on Azure Linux
   x86 nodes only, so it is not offered. The storage account allows no Shared Key; Terraform
   makes the container through Azure Resource Manager. RabbitMQ in the cluster.
+- **An existing Vault** (added 2026-11-12, config-repo.md §7.4). Exradius does not install
+  or operate Vault on a cloud: the install points at one the organisation already runs,
+  inside the cluster or outside it. Each module takes an optional `vault` variable (null by
+  default, and then nothing changes): `address`, `auth_mount` (`kubernetes`), `role`
+  (`exradius`), `namespace`, `audience` (`vault` recommended, with the role's audience the
+  same), `ca_file` and `token_reviewer`. Set, `values-generated.yaml` carries the chart's
+  `vault` block, since the address is the account's own value like the registry and the
+  bucket; `ca_file` (a PEM file) becomes the ConfigMap `exradius-vault-ca`, which
+  `bootstrap.sh` makes and the block names as `vault.caBundle`. The output
+  `vault_kubernetes_auth` gives Vault's admin the cluster's API address and CA, the auth
+  mount and role, the namespace `exradius` and the ServiceAccounts `exradius-api` and
+  `exradius-worker` the role binds, the audience, the policy's paths and the `vault`
+  commands to write them.
+  - **A Vault outside the cluster** reviews the pods' tokens at the cluster's API (a
+    TokenReview), so it must reach that API: its outbound address goes into
+    `allowed_cidrs`, which every module's API endpoint is limited to (EKS's public endpoint,
+    GKE's authorized networks, AKS's authorized IP ranges; the panel's load balancer is open
+    to them too). It also needs a credential for the TokenReview: with an audience, the
+    pods' own tokens are refused by the API server, so `token_reviewer` sets the chart's
+    `vault.tokenReviewer`, a ServiceAccount `exradius-vault-reviewer` bound to
+    `system:auth-delegator` with a long-lived token in the Secret of that name, for the auth
+    method's `token_reviewer_jwt`. A Vault inside the cluster reviews with its own
+    ServiceAccount (`make -C deploy/kind dev-vault` does it that way, §17) and needs neither.
+    This path, Vault outside a cloud cluster, has not been run by us.
+  - **Reaching Vault.** The chart gives the api and the worker no egress NetworkPolicy, and
+    no module restricts outbound traffic: on AWS the nodes sit in public subnets with public
+    addresses and the EKS module's node security group allows all egress; GKE's nodes have
+    external addresses and the VPC's implied egress rule allows everything (the cluster is
+    not private); AKS sends outbound traffic through its Standard load balancer, with no
+    network security group added. A Vault on the internet is reached as is. A Vault on a
+    private network needs a route the modules do not make (peering, a VPN, a transit
+    gateway), and its firewall must admit the cluster's sources: on AWS and Azure the node
+    subnets (`10.40.0.0/20` and, on AWS, `10.40.16.0/20`; pods leave with their node's
+    address), on GKE also the pod range `10.44.0.0/14`, since GKE does not translate pod
+    addresses for private destinations.
 - **ReadWriteMany project volumes and user namespaces exclude each other**: EFS, Filestore
   and Azure Files are NFS or SMB, which have no idmapped mounts, so a user-namespaced pod
   cannot mount them. Terraform's `rwx` therefore turns user namespaces off in the generated

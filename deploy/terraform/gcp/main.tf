@@ -7,6 +7,7 @@
 # operator).
 #
 #   terraform init && terraform apply -var project=<id> -var 'allowed_cidrs=["<your address>/32"]'
+#     an existing Vault (vault.tf): add -var 'vault={address="https://vault.example.com:8200", audience="vault"}'
 #   ../bootstrap.sh gcp       # kubeconfig, Traefik, cert-manager, the RabbitMQ operator, Secrets
 #   make -C ../.. push ...    # the images (terraform output push_command)
 #   helm upgrade --install exradius ../../../charts/exradius -n exradius \

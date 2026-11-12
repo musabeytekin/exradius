@@ -13,7 +13,9 @@
 #      allowed_cidrs only;
 #   4. the namespace exradius and its Secrets: the secret key and the admin password
 #      (generated here, the password printed once), the database URL and, on AWS, the
-#      broker's user, from Terraform's outputs. They never touch a file.
+#      broker's user, from Terraform's outputs. They never touch a file;
+#   5. with Terraform's vault.ca_file, the ConfigMap exradius-vault-ca holding that CA, which
+#      values-generated.yaml names as vault.caBundle (docs/config-repo.md §7.4).
 #
 # Then push the images (terraform output push_command) and install the chart with the
 # cloud's values file and values-generated.yaml.
@@ -32,8 +34,9 @@ rabbitmq_operator_version=v2.23.2   # RabbitMQ Cluster Operator, as deploy/kind/
 
 say() { printf '==> %s\n' "$*"; }
 tf() { terraform -chdir="$dir" "$@"; }
-# A field of Terraform's bootstrap output.
+# A field of Terraform's bootstrap output; optional_field prints nothing for one it lacks.
 field() { tf output -json bootstrap | python3 -c 'import json, sys; v = json.load(sys.stdin)[sys.argv[1]]; print(v if isinstance(v, str) else json.dumps(v))' "$1"; }
+optional_field() { tf output -json bootstrap | python3 -c 'import json, sys; v = json.load(sys.stdin).get(sys.argv[1], ""); print(v if isinstance(v, str) else json.dumps(v))' "$1"; }
 
 say "kubeconfig"
 eval "$(field kubeconfig)" >/dev/null
@@ -160,9 +163,20 @@ if [ "$cloud" = aws ] && ! secret_exists exradius-broker; then
   tf output -raw broker_password | "${kubectl[@]}" -n exradius create secret generic exradius-broker \
     --from-literal=username=exradius --from-file=password=/dev/stdin >/dev/null
 fi
+vault_ca=$(optional_field vault_ca_file)
+if [ -n "$vault_ca" ]; then
+  say "Vault's CA, the ConfigMap exradius-vault-ca (from $vault_ca)"
+  # Applied, not created: a changed CA file replaces it on the next run.
+  "${kubectl[@]}" -n exradius create configmap exradius-vault-ca --from-file=ca.crt="$vault_ca" \
+    --dry-run=client -o yaml | "${kubectl[@]}" apply -f - >/dev/null
+fi
 
 say "ready. Push the images, then install the chart:"
 echo "    $(tf output -raw push_command)"
 case "$cloud" in aws) values=eks ;; gcp) values=gke ;; azure) values=aks ;; esac
 echo "    helm upgrade --install exradius charts/exradius --kube-context $context --namespace exradius \\"
 echo "      -f charts/exradius/values-$values.yaml -f deploy/terraform/$cloud/values-generated.yaml"
+if [ "$(tf output -json vault_kubernetes_auth 2>/dev/null || echo null)" != null ]; then
+  echo "Vault (var.vault): its admin configures this cluster's Kubernetes auth from"
+  echo "    terraform -chdir=deploy/terraform/$cloud output vault_kubernetes_auth"
+fi
