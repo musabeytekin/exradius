@@ -47,28 +47,35 @@ with the loop of improvements it drives. Settled so far:
 - **Expected to expose:** UI bugs (no browser in the workstation), no base ref in the task
   envelope, no per-run usage or cost recorded.
 
-## MCP tool lists that change on their own
+## MCP connections that change on their own
 
 Agent profiles for routing (`agent-routing.md` §3) carry each connection's tools from
-`tools/list`, stored by the last Verify. A connection's tools can change with no commit on our side: GitHub's MCP is a remote
-server (`api.githubcopilot.com/mcp/`), and the catalog's `npx -y` / `uvx` packages pull the
-latest version. The stored list then goes stale silently. Noted on 2026-11-08, to look at
-later. Ideas so far: show when the tools were fetched, refetch on every Verify, pin catalog
-package versions so a change needs a commit.
+`tools/list`, stored by the last Verify. Since 2026-11-11 the catalog's `npx` and `uvx`
+packages are pinned to exact versions, an unpinned custom connection is a config warning,
+every Verify lists every connection again and the panel shows when (`agent-routing.md`
+§3.1, `catalog.py`). Still open:
+
+- **A remote server changes with no commit.** GitHub's MCP is a hosted server
+  (`api.githubcopilot.com/mcp/`): its tools can change between two Verifies, and the stored
+  list then goes stale silently. Idea: list again on a schedule, or compare at intake.
+- **Pins cover the package, not its dependencies.** `npx` and `uvx` still resolve those
+  within their declared ranges. Idea: lock files per catalog entry, or images.
+- **Catalog entries to replace.** `postgres` cannot be installed (`postgres-mcp` 0.3.0 needs
+  `pglast==7.2.0`, which is gone from PyPI); the `gitlab` and `slack` packages are deprecated
+  on npm; `filesystem` 2.3.0 needs Node 24 or later.
 
 ## Secret management for more than one team
 
 A review of the secret handling on 2026-11-11 found the run side sound (no model, repository
 or HTTP connection credential in a pod, late decryption in `resolve.py`, a worker that
-writes Secrets it cannot read) and four gaps on the storage and governance side. Two are
+writes Secrets it cannot read) and four gaps on the storage and governance side. Three are
 closed: stores are bound to the projects allowed to use them, with an append-only change
-log, and HashiCorp Vault is the first external store (`config-repo.md` §7). Still open:
+log; HashiCorp Vault is the first external store (`config-repo.md` §7); and the master key
+can be rotated (`exradius rotate-key`, `kubernetes.md` §10.1). Still open:
 
-- **One master key, no rotation.** `SecretBox` holds a single Fernet key, with no key version
-  on the stored values and no command to re-encrypt them. The session secret and the
-  download signing key are derived from the same key, so one leak opens everything. Ideas:
-  `MultiFernet` with an ordered key list, an `exradius rotate-key` command that re-encrypts
-  every `*_encrypted` column, separate keys for signing.
+- **Signing keys come from the master key.** The session secret and the key that signs
+  download URLs are still derived from `EXRADIUS_SECRET_KEY`, so one leak opens them too.
+  Idea: separate keys, kept apart from the encryption key.
 - **Further backends.** Stores can be kept in Exradius or in Vault. AWS Secrets Manager,
   Google Secret Manager and Azure Key Vault would be further kinds behind the same backend
   protocol (`exradius/secret_backends`), read with the pod's cloud identity as `storage.py`
