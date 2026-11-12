@@ -135,6 +135,12 @@ vault:
   # the role's audience to match: the pods then send a projected token that only Vault
   # accepts, instead of their own, which the Kubernetes API accepts too.
   audience: ""
+  # For a Vault outside the cluster: a ServiceAccount exradius-vault-reviewer allowed to
+  # review tokens (system:auth-delegator), and a long-lived token for it in the Secret of the
+  # same name, which Vault's admin sets as the auth method's token_reviewer_jwt. A Vault
+  # inside the cluster reviews with its own ServiceAccount and needs none of it; without an
+  # audience, Vault may also review with each pod's own token instead.
+  tokenReviewer: false
 
 # The cloud identities pods sign in with (EKS Pod Identity or IRSA, GKE and AKS Workload
 # Identity), so no cloud key is ever in a Secret. Each is ServiceAccount annotations and pod
