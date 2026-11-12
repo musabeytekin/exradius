@@ -657,6 +657,10 @@ The procedure, in a cluster (the chart reads both keys from `secretKey.existingS
    ```
 
    A Secret managed elsewhere (External Secrets, GitOps) gets the same two keys there.
+   Run this once per rotation: a second run reads the new key as the old one, and the key
+   the stored values still need is gone from the Secret. It also writes the Secret whole,
+   so a `previous-secret-keys` already there is replaced; `kubectl apply` warns about a
+   missing last-applied annotation on a Secret made with `kubectl create`, which is harmless.
 2. Roll the api and the worker, which read the keys as environment variables at start:
    `kubectl -n exradius rollout restart deploy/exradius-api deploy/exradius-worker`, then
    `kubectl -n exradius rollout status` for both. While old and new pods run side by side,

@@ -457,8 +457,8 @@ secret of a KV version 2 engine, and the secret's fields are the store's keys.
   `exradius-worker`) through Vault's Kubernetes auth method, `POST
   /v1/auth/<authMount>/login {role, jwt}`. Exradius stores no Vault credential. The
   ServiceAccount token file is read again at every sign-in (the kubelet rotates it), and the
-  Vault token is kept until a minute before its lease ends; a `403` signs in once more before
-  it counts. With `vault.audience` set, the pods send a projected token for that audience
+  Vault token is kept until a minute before its lease ends (halfway, for a lease under two
+  minutes); a `403` signs in once more before it counts. With `vault.audience` set, the pods send a projected token for that audience
   only, and the role must name the same audience; without it, their own token, which the
   Kubernetes API accepts too.
 - **Key names** come from `GET /v1/<mount>/subkeys/<path>?depth=1`, which lists the fields

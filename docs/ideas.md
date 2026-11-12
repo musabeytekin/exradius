@@ -60,6 +60,12 @@ every Verify lists every connection again and the panel shows when (`agent-routi
   list then goes stale silently. Idea: list again on a schedule, or compare at intake.
 - **Pins cover the package, not its dependencies.** `npx` and `uvx` still resolve those
   within their declared ranges. Idea: lock files per catalog entry, or images.
+- **A cold server can outlast Verify's wait.** On the k3s test server `jira`
+  (`mcp-atlassian` 0.24.1, 63 tools) did not list its tools within Verify's 50 s the first
+  time, and did once a setup command had run `uvx mcp-atlassian@0.24.1 --help`; a cold start
+  took 47 s on a laptop. Nothing was refused (the egress records show only the two PyPI
+  hosts). The other launcher entries list in 2 to 6 s. Idea: start each launcher connection
+  once at the end of setup, or let a first listing wait longer.
 - **A Postgres entry.** The catalog has none since 2026-11-12 (`config-repo.md` §5): no
   maintained server turns read-only mode on from its command line or environment. Idea: an
   entry that brings its own file, or one that runs in its own container.
