@@ -47,7 +47,7 @@ dev-gvisor:
 # Vault in dev mode in the cluster, its Kubernetes auth role for the api and the worker, and a
 # sample secret (deploy/kind/dev-vault.sh). Local only. Run again after the Vault pod restarts.
 dev-vault:
-	./dev-vault.sh
+	CONTEXT=$(CONTEXT) ./dev-vault.sh
 
 images:
 	docker build -f $(ROOT)/deploy/backend.Dockerfile -t $(REGISTRY)/exradius-backend:$(TAG) $(ROOT)

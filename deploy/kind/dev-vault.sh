@@ -14,11 +14,12 @@
 # `make -C deploy/kind install VAULT=1`.
 #
 # LOCAL ONLY: dev mode is unsealed, keeps everything in memory, speaks plain HTTP, and its
-# root token is "root".
+# root token is "root". CONTEXT names another throwaway cluster's kubectl context (a test
+# server), never one that holds anything real.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-context=kind-exradius
+context=${CONTEXT:-kind-exradius}
 
 say() { printf '==> %s\n' "$*"; }
 # The vault CLI inside the Vault pod (VAULT_ADDR and VAULT_TOKEN are set there).
