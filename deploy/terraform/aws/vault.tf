@@ -34,20 +34,16 @@ output "vault_kubernetes_auth" {
     # Vault outside the cluster, with an audience: the reviewer's token, once the chart is installed.
     token_reviewer_jwt = var.vault.token_reviewer ? "kubectl -n exradius get secret exradius-vault-reviewer -o jsonpath='{.data.token}' | base64 -d" : ""
     # One pair per store's mount and path, or a prefix with * (the kind loop's convention below).
-    policy   = <<-EOT
+    policy = <<-EOT
       path "secret/data/exradius/*"    { capabilities = ["read"] }
       path "secret/subkeys/exradius/*" { capabilities = ["read"] }
     EOT
+    # Optional lines as interpolations: a %{if ~} line keeps the next line's indentation in
+    # an indented heredoc.
     commands = <<-EOT
-      %{if var.vault.namespace != ""~}
-      export VAULT_NAMESPACE=${var.vault.namespace}
-      %{endif~}
-      terraform output -json vault_kubernetes_auth | python3 -c 'import json,sys; print(json.load(sys.stdin)["kubernetes_ca_cert"], end="")' > cluster-ca.pem
+      ${var.vault.namespace != "" ? "export VAULT_NAMESPACE=${var.vault.namespace}\n" : ""}terraform output -json vault_kubernetes_auth | python3 -c 'import json,sys; print(json.load(sys.stdin)["kubernetes_ca_cert"], end="")' > cluster-ca.pem
       terraform output -json vault_kubernetes_auth | python3 -c 'import json,sys; print(json.load(sys.stdin)["policy"], end="")' > exradius-policy.hcl
-      %{if var.vault.token_reviewer~}
-      kubectl -n exradius get secret exradius-vault-reviewer -o jsonpath='{.data.token}' | base64 -d > reviewer.jwt
-      %{endif~}
-      vault auth enable -path=${var.vault.auth_mount} kubernetes
+      ${var.vault.token_reviewer ? "kubectl -n exradius get secret exradius-vault-reviewer -o jsonpath='{.data.token}' | base64 -d > reviewer.jwt\n" : ""}vault auth enable -path=${var.vault.auth_mount} kubernetes
       vault write auth/${var.vault.auth_mount}/config kubernetes_host=${local.kubernetes_host} kubernetes_ca_cert=@cluster-ca.pem%{if var.vault.token_reviewer} token_reviewer_jwt=@reviewer.jwt%{endif}
       vault policy write ${var.vault.role} exradius-policy.hcl
       vault write auth/${var.vault.auth_mount}/role/${var.vault.role} bound_service_account_names=exradius-api,exradius-worker bound_service_account_namespaces=exradius%{if var.vault.audience != ""} audience=${var.vault.audience}%{endif} token_policies=${var.vault.role} token_ttl=1h
