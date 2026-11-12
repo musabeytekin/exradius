@@ -448,3 +448,38 @@ chromium`, with the version from the lockfile). The browser by a setup command
 (`cd web && pnpm exec playwright install chromium`): it lands in the home, always matches
 the lockfile, and setup's network is open. When the team does not expect agents to run
 the end-to-end suite, leave it out and say so in `notes`.
+
+## The Playwright connection has no browser
+
+**Symptom:** Verify passes, but in a task every `browser_*` tool answers that the browser
+is not installed, or the browser exits on a missing shared library, and the agent
+delivers a user interface change it never saw.
+
+**Cause:** the catalog's `playwright` connection starts the server only. Chromium's system
+libraries need root, the browser is a download, and the agent phase is not allowed that
+download. Verify's "List tools" step starts no browser, so nothing fails before a task.
+
+**Fix:** both from the server's own package at the version the catalog pins (0.0.85), so
+they match what the connection starts: another version looks for another build of the
+browser. The libraries in the workstation Dockerfile:
+
+```dockerfile
+RUN npx -y -p @playwright/mcp@0.0.85 playwright install-deps chromium \
+ && rm -rf /root/.npm /var/lib/apt/lists/*
+```
+
+The browser as a setup command (it lands in the home, about half a minute):
+
+```yaml
+workstation:
+  setup:
+    - npx -y @playwright/mcp@0.0.85 install-browser chromium
+connections:
+  playwright:
+    catalog: playwright
+```
+
+Give the connection to the agents that change what users see, and say in `notes` how to
+start the app and on which port, so the agent can open it on `localhost`. Prove it with
+the check's `--run`: start the app and take a screenshot with the same Playwright
+(`npx -y -p @playwright/mcp@0.0.85 playwright screenshot http://localhost:<port> /tmp/shot.png`).

@@ -232,6 +232,10 @@ version. A custom `npx` or `uvx` connection should too (`npx -y <package>@1.2.3`
 `uvx <command>@1.2.3`, or `uvx --from '<package>==1.2.3' <command>`); without one, each
 session runs the latest release with the connection's secrets, and Exradius warns.
 
+`playwright` gives the agent a headless Chromium to look at the app with (open a page,
+resize, click, take a screenshot and attach it). It brings no browser: the image and a
+setup command do, see "The Playwright connection has no browser" in `pitfalls.md`.
+
 **Secrets.** `${secret:NAME}` (NAME of letters, digits, `_`, `.`, `-`) may appear only in
 string values under `repositories[].credential`, `services.*.env`, `env`, and
 `connections.*` `config`, `env` and `headers`. Anywhere else it is an error. The set of

@@ -81,7 +81,7 @@ Take the hosts from evidence, in this order:
 | Bundler | `rubygems.org`, `index.rubygems.org` |
 | Composer | `repo.packagist.org` (packages are then downloaded from their source host, usually `api.github.com` and `codeload.github.com`) |
 | NuGet | `api.nuget.org` |
-| Playwright browsers | `cdn.playwright.dev`, `playwright.download.prss.microsoft.com` |
+| Playwright browsers | none: install them in setup. The download is redirected to `storage.googleapis.com`, where anyone can keep files, so listing it would open far more than the browser |
 
 The table is a starting point from the tools' defaults; the check's list is what the
 project really used. When they differ, the check is right.

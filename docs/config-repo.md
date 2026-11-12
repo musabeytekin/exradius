@@ -279,7 +279,7 @@ Each `npx` and `uvx` entry is pinned to an exact version, read from its registry
 | `sentry`     | `npx -y @sentry/mcp-server@0.49.0`                        |
 | `jira`       | `uvx mcp-atlassian@0.24.1`                                |
 | `fetch`      | `uvx mcp-server-fetch@2026.11.11`                         |
-| `playwright` | `npx -y @playwright/mcp@0.0.85 --headless`                |
+| `playwright` | `npx -y @playwright/mcp@0.0.85 --headless --browser chromium` |
 | `filesystem` | `npx -y @modelcontextprotocol/server-filesystem@1.0.0 <path>` |
 
 A new version is a commit to `catalog.py` (its docstring says how), so no server code runs
@@ -328,6 +328,15 @@ they are (2026-11-12):
   ```
 
   The server decides by reading the SQL; a database role that cannot write is what holds.
+
+`playwright` starts the server with `--browser chromium` and brings no browser: the
+project's workstation image holds Chromium's system libraries (they need root) and a setup
+command downloads the browser the server's own version expects
+(`npx -y @playwright/mcp@0.0.85 install-browser chromium`). Its `hosts` are the package
+registry only. The browser's download is redirected to `storage.googleapis.com`, where
+anyone can keep files, so the agent phase is not given it. Verify's "List tools" starts no
+browser, so it passes without one (seen live 2026-11-12: `/opt/google/chrome/chrome` not
+found with the server's default, then a `403` on the download).
 
 A custom connection is the `mcpServers` shape: `command` + `args` + `env` (stdio) or
 `url` + `headers` (http); `type` is accepted and ignored. Exactly one of `catalog`,

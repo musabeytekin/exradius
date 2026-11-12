@@ -93,6 +93,15 @@ def test_the_design_notes_table_shows_the_catalogs_commands():
     assert rows == commands
 
 
+def test_the_skills_playwright_recipe_installs_the_pinned_servers_browser():
+    # The browser comes from the server's own package in a project's setup, so a recipe at
+    # another version downloads a build the connection does not look for.
+    text = "".join(path.read_text() for path in (SCRIPT.parents[1] / "references").glob("*.md"))
+    text += (ROOT / "docs" / "config-repo.md").read_text()
+    versions = set(re.findall(r"@playwright/mcp@[^\s`]+", text))
+    assert versions == {PINS["playwright"]}
+
+
 # -- what an exact version is ------------------------------------------------------------------
 
 NPX = [

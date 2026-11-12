@@ -148,6 +148,16 @@ The skill's references are the developer documentation for Exradius projects:
 
 A change of the file's schema in Exradius is followed by a release of this plugin.
 
+### 0.4.1
+
+- The `playwright` connection: the catalog starts it with Chromium and no longer lists the
+  browser's download hosts, so the references say what a project adds for an agent that
+  looks at the app (Chromium's libraries in the Dockerfile, the browser in setup) and
+  `network.md` no longer suggests those hosts for `network.allow`.
+- The catalog has no `postgres` entry any more, and `gitlab`, `slack` and `filesystem` run
+  other pinned packages with the same settings: `schema.md` shows a read-only database
+  connection written as a custom one.
+
 ### 0.4.0
 
 For the egress proxy, agent routing and bridges, and for a setup an agent can work in,

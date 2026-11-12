@@ -183,12 +183,17 @@ CATALOG: tuple[CatalogEntry, ...] = (
     CatalogEntry(
         key="playwright",
         name="Playwright",
-        description="Drive a headless browser: navigate, click, read the page.",
+        description="Drive a headless Chromium: navigate, click, read the page, take screenshots.",
         transport="stdio",
         command="npx",
-        args=("-y", "@playwright/mcp@0.0.85", "--headless"),
+        # Without --browser the server looks for Google Chrome in /opt/google/chrome, which
+        # a workstation does not have and Linux on Arm cannot. Chromium is the browser its
+        # own `install-browser chromium` downloads, in a setup command: the download is
+        # redirected to storage.googleapis.com, where anyone's files live, so the agent
+        # phase does not get it (docs/config-repo.md §5).
+        args=("-y", "@playwright/mcp@0.0.85", "--headless", "--browser", "chromium"),
         requires="npx",
-        hosts=(*NPM, "cdn.playwright.dev", "playwright.download.prss.microsoft.com"),
+        hosts=NPM,
     ),
     CatalogEntry(
         key="filesystem",
