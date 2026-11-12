@@ -304,13 +304,13 @@ def test_git_credentials_are_write_only(admin, sync_db):
 
 def test_catalog(admin):
     entries = {e["key"]: e for e in admin.get("/api/catalog").json()}
-    assert set(entries) == {"github", "gitlab", "postgres", "slack", "sentry", "linear", "jira", "fetch",
-                            "playwright", "filesystem"}
+    assert set(entries) == {"github", "gitlab", "slack", "sentry", "linear", "jira", "fetch", "playwright",
+                            "filesystem"}
     assert entries["github"]["config"] == [{
         "key": "token", "label": "GitHub token", "required": True, "target": "header",
         "name": "Authorization", "format": "Bearer {}", "default": None,
     }]
-    assert entries["filesystem"]["config"][0]["default"] == "/work" and entries["postgres"]["requires"] == "uvx"
+    assert entries["filesystem"]["config"][0]["default"] == "/work" and entries["jira"]["requires"] == "uvx"
 
 
 def make_run(admin, sync_db, root: Path, state="running", with_token="tok") -> tuple[str, str]:
