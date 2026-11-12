@@ -309,7 +309,7 @@ def test_connection_rules():
     assert conn_errors("  exradius: {url: a}\n") == ["connections.exradius: the name 'exradius' is reserved for the built-in connection"]
     assert conn_errors("  X: {url: a}\n") == ["connections.X: connection names must match ^[a-z][a-z0-9-]*$"]
     assert conn_errors("  x: {catalog: gitbub}\n") == [
-        "connections.x.catalog: unknown catalog entry 'gitbub' (known: github, gitlab, postgres, slack, sentry, "
+        "connections.x.catalog: unknown catalog entry 'gitbub' (known: github, gitlab, slack, sentry, "
         "linear, jira, fetch, playwright, filesystem)"
     ]
     assert conn_errors("  x: {catalog: github}\n") == ["connections.x.config.token: required by catalog github (GitHub token)"]
@@ -350,8 +350,8 @@ def test_catalog_expansion():
     assert gitlab["env"] == {"GITLAB_PERSONAL_ACCESS_TOKEN": "t", "GITLAB_API_URL": "https://gitlab.com/api/v4"}
     assert catalog.expand(catalog.entry("filesystem"), {})["args"][-1] == "/work"
     assert catalog.expand(catalog.entry("filesystem"), {"path": "/work/app"})["args"] == [
-        "-y", "@modelcontextprotocol/server-filesystem@2.3.0", "/work/app"]
-    assert {e.key for e in catalog.CATALOG if e.requires == "uvx"} == {"postgres", "jira", "fetch"}
+        "-y", "@modelcontextprotocol/server-filesystem@1.0.0", "/work/app"]
+    assert {e.key for e in catalog.CATALOG if e.requires == "uvx"} == {"jira", "fetch"}
 
 
 def test_connection_specs_resolve_from_the_store():

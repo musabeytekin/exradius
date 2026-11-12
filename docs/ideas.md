@@ -60,9 +60,12 @@ every Verify lists every connection again and the panel shows when (`agent-routi
   list then goes stale silently. Idea: list again on a schedule, or compare at intake.
 - **Pins cover the package, not its dependencies.** `npx` and `uvx` still resolve those
   within their declared ranges. Idea: lock files per catalog entry, or images.
-- **Catalog entries to replace.** `postgres` cannot be installed (`postgres-mcp` 0.3.0 needs
-  `pglast==7.2.0`, which is gone from PyPI); the `gitlab` and `slack` packages are deprecated
-  on npm; `filesystem` 2.3.0 needs Node 24 or later.
+- **A Postgres entry.** The catalog has none since 2026-11-12 (`config-repo.md` §5): no
+  maintained server turns read-only mode on from its command line or environment. Idea: an
+  entry that brings its own file, or one that runs in its own container.
+- **The Slack entry runs a package with one release.** `@zencoderai/slack-mcp-server` is
+  the reference server's named successor and has not changed since 2025-07. Idea: Slack's
+  hosted MCP server as an `http` entry, once someone has a workspace to try its sign-in with.
 
 ## Secret management for more than one team
 

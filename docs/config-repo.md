@@ -266,7 +266,7 @@ variable, a header with a format, or an argument), and `requires` (a launcher su
 `hosts`: what it reaches besides its URL, which the agent phase allows (the package registry
 the launcher downloads it from, the service's API; a config key marked `host`, such as
 GitLab's `api_url` or Jira's `url`, adds its URL's host).
-Entries: github, gitlab, postgres, slack, sentry, linear, jira, fetch, playwright,
+Entries: github, gitlab, slack, sentry, linear, jira, fetch, playwright,
 filesystem (`/work` default). A catalog connection with a missing required key, or an
 unknown key, is a validation error naming the connection and the key.
 
@@ -274,17 +274,60 @@ Each `npx` and `uvx` entry is pinned to an exact version, read from its registry
 
 | entry        | command                                                   |
 |--------------|-----------------------------------------------------------|
-| `gitlab`     | `npx -y @modelcontextprotocol/server-gitlab@2025.4.25`    |
-| `postgres`   | `uvx postgres-mcp@0.3.0 --access-mode=restricted`         |
-| `slack`      | `npx -y @modelcontextprotocol/server-slack@2025.4.25`     |
+| `gitlab`     | `npx -y @zereight/mcp-gitlab@2.3.14`                      |
+| `slack`      | `npx -y @zencoderai/slack-mcp-server@0.0.1`               |
 | `sentry`     | `npx -y @sentry/mcp-server@0.49.0`                        |
 | `jira`       | `uvx mcp-atlassian@0.24.1`                                |
 | `fetch`      | `uvx mcp-server-fetch@2026.11.11`                         |
 | `playwright` | `npx -y @playwright/mcp@0.0.85 --headless`                |
-| `filesystem` | `npx -y @modelcontextprotocol/server-filesystem@2.3.0 <path>` |
+| `filesystem` | `npx -y @modelcontextprotocol/server-filesystem@1.0.0 <path>` |
 
 A new version is a commit to `catalog.py` (its docstring says how), so no server code runs
-with a connection's secrets without one (agent-routing.md §3.1).
+with a connection's secrets without one (agent-routing.md §3.1). A pin is to a release at
+least two weeks old that the oldest supported Node, 22, can run, and a package its registry
+marks deprecated is replaced or its entry removed. That is how three entries came to what
+they are (2026-11-12):
+
+- `gitlab` and `slack` ran the reference servers, which npm marks deprecated ("Package no
+  longer supported"). `@zereight/mcp-gitlab` is the maintained fork of the first: the same
+  `GITLAB_PERSONAL_ACCESS_TOKEN` and `GITLAB_API_URL`, a release most days, so a project's
+  config does not change. `@zencoderai/slack-mcp-server` is the reference Slack server under
+  the maintainer its own repository names, with the same variables and the same eight tools;
+  it has had one release (2025-07), which is why it stays only while npm does not deprecate
+  it. The more active `slack-mcp-server` (korotovsky) was not taken: it wants other
+  variables, signs in when it starts, so it lists no tools without a working token, and
+  could not be tried here without a workspace.
+- `filesystem` 2.0.0 and later declare `engines.node >= 24`; 1.0.0 is the newest release
+  before that and starts on Node 22.
+- There is no `postgres` entry any more. `postgres-mcp` 0.3.0 cannot be installed
+  (`pglast==7.2.0` is gone from PyPI, and the package has had no release since 2025-05), the
+  reference server is archived with a known way around its read-only transaction, and DBHub
+  (`@bytebase/dbhub`), the maintained one, takes read-only mode only from a file, which a
+  catalog entry cannot write. A project writes it as a custom connection, with the file in
+  its repository (tried with 1.5.0: `select` answers, `create table` and a `drop` after a
+  `select;` are refused):
+
+  ```yaml
+  connections:
+    database:
+      command: npx
+      args: [-y, "@bytebase/dbhub@1.5.0", --transport, stdio, --config, /work/app/dbhub.toml]
+      env: {DSN: "postgres://app:${secret:DB_PASSWORD}@localhost:5432/app?sslmode=disable"}
+  ```
+
+  ```toml
+  # dbhub.toml
+  [[sources]]
+  id = "default"
+  dsn = "${DSN}"
+
+  [[tools]]
+  name = "execute_sql"
+  source = "default"
+  readonly = true
+  ```
+
+  The server decides by reading the SQL; a database role that cannot write is what holds.
 
 A custom connection is the `mcpServers` shape: `command` + `args` + `env` (stdio) or
 `url` + `headers` (http); `type` is accepted and ignored. Exactly one of `catalog`,

@@ -213,7 +213,6 @@ accepted for `mcpServers` compatibility and ignored. Catalog entries and their c
 |--------------|--------------------------------------|-----------|
 | `github`     | `token`                              | http (GitHub's hosted server) |
 | `gitlab`     | `token`, `api_url` (optional)        | `npx` |
-| `postgres`   | `url` (a connection string)          | `uvx` |
 | `slack`      | `bot_token`, `team_id`               | `npx` |
 | `sentry`     | `token`                              | `npx` |
 | `linear`     | `api_key`                            | http (Linear's hosted server) |
@@ -221,6 +220,11 @@ accepted for `mcpServers` compatibility and ignored. Catalog entries and their c
 | `fetch`      | none                                 | `uvx` |
 | `playwright` | none                                 | `npx` |
 | `filesystem` | `path` (optional, default `/work`)   | `npx` |
+
+There is no `postgres` entry. A connection to the project's database is a custom one, for
+example `npx -y @bytebase/dbhub@1.5.0 --transport stdio --config /work/<repo>/dbhub.toml`
+with `env: {DSN: ...}` and a `dbhub.toml` in the repository whose `execute_sql` tool has
+`readonly = true` (its `dsn` can be `"${DSN}"`). It reaches a database in `services`.
 
 A connection that runs with `npx` or `uvx` needs that launcher in the workstation image
 (the default image has neither; Exradius warns). The catalog pins each package to an exact

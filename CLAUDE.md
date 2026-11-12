@@ -162,7 +162,7 @@ The schema is strict pydantic with `extra="forbid"` in `schemas/project_config.p
 - `network.py` is what the agent phase may reach (`network.allow`, the install's
   `egress.allow`, the connections' catalog `hosts`): the proxy's policy and the environment
   section's network line come from it.
-- `catalog.py` holds the MCP connection catalog (github, postgres, slack, ...); custom
+- `catalog.py` holds the MCP connection catalog (github, gitlab, slack, ...); custom
   connections use the `mcpServers` shape.
 
 **Backend package `backend/exradius/`.**

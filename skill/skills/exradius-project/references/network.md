@@ -127,8 +127,8 @@ which is where a developer finds the entry a failed task was missing.
 - **Only HTTP and HTTPS.** Anything else cannot leave the pod: an external Postgres or
   Redis, SMTP, an SSH remote. A database the tests need is a `services` entry, not an
   external host. Repository URLs must be `https://`; rewrite `git@host:owner/repo.git`
-  as `https://host/owner/repo.git`. The same holds for the `postgres` catalog connection:
-  it reaches a database in `services`, not one outside the run.
+  as `https://host/owner/repo.git`. The same holds for a connection that talks to a
+  database: it reaches one in `services`, not one outside the run.
 - **Tools that ignore the proxy variables.** Every container gets `HTTP_PROXY`,
   `HTTPS_PROXY` and `NO_PROXY` (and lower case), `YARN_HTTP_PROXY` and `YARN_HTTPS_PROXY`
   (Yarn 2+ reads only those), and `JAVA_TOOL_OPTIONS` with Java's proxy properties and

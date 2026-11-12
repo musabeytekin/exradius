@@ -28,6 +28,17 @@ docs/config-repo.md §5, and run Verify on a project that uses the entry. The ne
 changes the connection's definition hash, so routing stops using that connection's stored
 tools until a Verify lists them again. The hosted entries (``github``, ``linear``) have no version to pin: their tools can change
 without a commit.
+
+A pin is to a release at least two weeks old whose ``engines`` (npm) the oldest supported
+Node, 22, satisfies: a release that was published yesterday has been read by nobody. A
+package its registry marks deprecated is replaced or its entry removed.
+
+There is no Postgres entry. A server here must be able to promise read-only access from its
+command line or environment, and no maintained one does: ``postgres-mcp`` 0.3.0 cannot be
+installed any more (it needs a ``pglast`` release that is gone from PyPI), the reference
+server is archived with a known way around its read-only transaction, and DBHub reads the
+setting only from a file. A project that wants one writes a custom connection, with a
+database role that cannot write (docs/config-repo.md §5).
 """
 
 from __future__ import annotations
@@ -96,25 +107,17 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Projects, merge requests and issues on GitLab.com or self-managed.",
         transport="stdio",
         command="npx",
-        args=("-y", "@modelcontextprotocol/server-gitlab@2025.4.25"),
+        # The reference server (@modelcontextprotocol/server-gitlab) is deprecated on npm.
+        # This is its maintained fork: the same two variables, more tools.
+        args=("-y", "@zereight/mcp-gitlab@2.3.14"),
         config=(
             ConfigKey("token", "GitLab personal access token", "env", "GITLAB_PERSONAL_ACCESS_TOKEN"),
             ConfigKey("api_url", "GitLab API URL", "env", "GITLAB_API_URL", required=False,
                       default="https://gitlab.com/api/v4", host=True),
         ),
         requires="npx",
+        docs="https://github.com/zereight/gitlab-mcp",
         hosts=NPM,
-    ),
-    CatalogEntry(
-        key="postgres",
-        name="Postgres",
-        description="Schema inspection and queries. Restricted mode runs read-only transactions.",
-        transport="stdio",
-        command="uvx",
-        args=("postgres-mcp@0.3.0", "--access-mode=restricted"),
-        config=(ConfigKey("url", "Database connection string", "env", "DATABASE_URI"),),
-        requires="uvx",
-        hosts=PYPI,
     ),
     CatalogEntry(
         key="slack",
@@ -122,12 +125,15 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Read channels and post messages with a bot token.",
         transport="stdio",
         command="npx",
-        args=("-y", "@modelcontextprotocol/server-slack@2025.4.25"),
+        # The reference server (@modelcontextprotocol/server-slack) is deprecated on npm;
+        # Zencoder took it over with the same variables and tools. It has one release.
+        args=("-y", "@zencoderai/slack-mcp-server@0.0.1"),
         config=(
             ConfigKey("bot_token", "Slack bot token", "env", "SLACK_BOT_TOKEN"),
             ConfigKey("team_id", "Slack team id", "env", "SLACK_TEAM_ID"),
         ),
         requires="npx",
+        docs="https://github.com/zencoderai/slack-mcp-server",
         hosts=(*NPM, "slack.com"),
     ),
     CatalogEntry(
@@ -190,7 +196,8 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="File operations limited to one directory; /work is the project directory.",
         transport="stdio",
         command="npx",
-        args=("-y", "@modelcontextprotocol/server-filesystem@2.3.0"),
+        # 2.0.0 and later declare Node 24; 1.0.0 is the newest release for Node 22.
+        args=("-y", "@modelcontextprotocol/server-filesystem@1.0.0"),
         config=(ConfigKey("path", "Directory", "arg", required=False, default="/work"),),
         requires="npx",
         hosts=NPM,
