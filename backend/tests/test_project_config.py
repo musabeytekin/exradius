@@ -353,7 +353,7 @@ def test_catalog_expansion():
         "-y", "@modelcontextprotocol/server-filesystem@1.0.0", "/work/app"]
     # Chromium, which a setup command installs: not Chrome, and no download in the agent phase.
     playwright = catalog.entry("playwright")
-    assert catalog.expand(playwright, {})["args"] == ["-y", "@playwright/mcp@0.0.85", "--headless", "--browser", "chromium"]
+    assert catalog.expand(playwright, {})["args"] == ["-y", "@playwright/mcp@0.0.83", "--headless", "--browser", "chromium"]
     assert playwright.hosts == catalog.NPM
     assert {e.key for e in catalog.CATALOG if e.requires == "uvx"} == {"jira", "fetch"}
 

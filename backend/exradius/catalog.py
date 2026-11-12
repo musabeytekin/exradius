@@ -142,7 +142,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Issues, events and stack traces from Sentry.",
         transport="stdio",
         command="npx",
-        args=("-y", "@sentry/mcp-server@0.49.0"),
+        args=("-y", "@sentry/mcp-server@0.42.0"),
         config=(ConfigKey("token", "Sentry access token", "env", "SENTRY_ACCESS_TOKEN"),),
         requires="npx",
         hosts=(*NPM, "sentry.io", "*.sentry.io"),
@@ -161,7 +161,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Jira issues and Confluence pages through mcp-atlassian.",
         transport="stdio",
         command="uvx",
-        args=("mcp-atlassian@0.24.1",),
+        args=("mcp-atlassian@0.23.1",),
         config=(
             ConfigKey("url", "Jira URL", "env", "JIRA_URL", host=True),
             ConfigKey("username", "Jira username", "env", "JIRA_USERNAME"),
@@ -176,7 +176,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         description="Fetch a URL and return it as markdown.",
         transport="stdio",
         command="uvx",
-        args=("mcp-server-fetch@2026.11.11",),
+        args=("mcp-server-fetch@2026.10.28",),
         requires="uvx",
         hosts=PYPI,
     ),
@@ -191,7 +191,7 @@ CATALOG: tuple[CatalogEntry, ...] = (
         # own `install-browser chromium` downloads, in a setup command: the download is
         # redirected to storage.googleapis.com, where anyone's files live, so the agent
         # phase does not get it (docs/config-repo.md §5).
-        args=("-y", "@playwright/mcp@0.0.85", "--headless", "--browser", "chromium"),
+        args=("-y", "@playwright/mcp@0.0.83", "--headless", "--browser", "chromium"),
         requires="npx",
         hosts=NPM,
     ),

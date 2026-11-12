@@ -276,16 +276,16 @@ Each `npx` and `uvx` entry is pinned to an exact version, read from its registry
 |--------------|-----------------------------------------------------------|
 | `gitlab`     | `npx -y @zereight/mcp-gitlab@2.3.14`                      |
 | `slack`      | `npx -y @zencoderai/slack-mcp-server@0.0.1`               |
-| `sentry`     | `npx -y @sentry/mcp-server@0.49.0`                        |
-| `jira`       | `uvx mcp-atlassian@0.24.1`                                |
-| `fetch`      | `uvx mcp-server-fetch@2026.11.11`                         |
-| `playwright` | `npx -y @playwright/mcp@0.0.85 --headless --browser chromium` |
+| `sentry`     | `npx -y @sentry/mcp-server@0.42.0`                        |
+| `jira`       | `uvx mcp-atlassian@0.23.1`                                |
+| `fetch`      | `uvx mcp-server-fetch@2026.10.28`                         |
+| `playwright` | `npx -y @playwright/mcp@0.0.83 --headless --browser chromium` |
 | `filesystem` | `npx -y @modelcontextprotocol/server-filesystem@1.0.0 <path>` |
 
 A new version is a commit to `catalog.py` (its docstring says how), so no server code runs
 with a connection's secrets without one (agent-routing.md §3.1). A pin is to a release at
 least two weeks old that the oldest supported Node, 22, can run, and a package its registry
-marks deprecated is replaced or its entry removed. That is how three entries came to what
+marks deprecated is replaced or its entry removed. That is how the entries came to what
 they are (2026-11-12):
 
 - `gitlab` and `slack` ran the reference servers, which npm marks deprecated ("Package no
@@ -297,6 +297,12 @@ they are (2026-11-12):
   it. The more active `slack-mcp-server` (korotovsky) was not taken: it wants other
   variables, signs in when it starts, so it lists no tools without a working token, and
   could not be tried here without a workspace.
+- `sentry`, `jira`, `fetch` and `playwright` were pinned to releases one to five days old
+  and went back to the newest one older than two weeks: 0.42.0 (2026-09-25), 0.23.1
+  (2026-08-19), 2026.10.28 and 0.0.83 (2026-09-28). Each starts and lists its tools on
+  Node 22 or Python 3.13: 9, 63, 1 and 25. Sentry's 0.42.0 lists nine tools where 0.49.0
+  listed 73: the rest are reached through its `search_sentry_tools` and
+  `execute_sentry_tool`. It declares `node >=22.13`; on 22.12 `npx` warns and it starts.
 - `filesystem` 2.0.0 and later declare `engines.node >= 24`; 1.0.0 is the newest release
   before that and starts on Node 22.
 - There is no `postgres` entry any more. `postgres-mcp` 0.3.0 cannot be installed
@@ -332,7 +338,7 @@ they are (2026-11-12):
 `playwright` starts the server with `--browser chromium` and brings no browser: the
 project's workstation image holds Chromium's system libraries (they need root) and a setup
 command downloads the browser the server's own version expects
-(`npx -y @playwright/mcp@0.0.85 install-browser chromium`). Its `hosts` are the package
+(`npx -y @playwright/mcp@0.0.83 install-browser chromium`). Its `hosts` are the package
 registry only. The browser's download is redirected to `storage.googleapis.com`, where
 anyone can keep files, so the agent phase is not given it. Verify's "List tools" starts no
 browser, so it passes without one (seen live 2026-11-12: `/opt/google/chrome/chrome` not

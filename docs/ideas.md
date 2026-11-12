@@ -63,7 +63,8 @@ every Verify lists every connection again and the panel shows when (`agent-routi
 - **A cold server can outlast Verify's wait.** On the k3s test server `jira`
   (`mcp-atlassian` 0.24.1, 63 tools) did not list its tools within Verify's 50 s the first
   time, and did once a setup command had run `uvx mcp-atlassian@0.24.1 --help`; a cold start
-  took 47 s on a laptop. Nothing was refused (the egress records show only the two PyPI
+  took 47 s on a laptop. The catalog has since gone back to 0.23.1, which listed its tools
+  12 s after a cold start on the same laptop and has not been through Verify. Nothing was refused (the egress records show only the two PyPI
   hosts). The other launcher entries list in 2 to 6 s. Idea: start each launcher connection
   once at the end of setup, or let a first listing wait longer.
 - **A Postgres entry.** The catalog has none since 2026-11-12 (`config-repo.md` §5): no

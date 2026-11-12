@@ -24,10 +24,10 @@ MINIMAL = "version: 1\nproject: {slug: p}\nagents:\n  a: {}\n"
 PINS = {
     "gitlab": "@zereight/mcp-gitlab@2.3.14",
     "slack": "@zencoderai/slack-mcp-server@0.0.1",
-    "sentry": "@sentry/mcp-server@0.49.0",
-    "jira": "mcp-atlassian@0.24.1",
-    "fetch": "mcp-server-fetch@2026.11.11",
-    "playwright": "@playwright/mcp@0.0.85",
+    "sentry": "@sentry/mcp-server@0.42.0",
+    "jira": "mcp-atlassian@0.23.1",
+    "fetch": "mcp-server-fetch@2026.10.28",
+    "playwright": "@playwright/mcp@0.0.83",
     "filesystem": "@modelcontextprotocol/server-filesystem@1.0.0",
 }
 """The package each launcher entry runs. A new version is a change here too, on purpose: it
