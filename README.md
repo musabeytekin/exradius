@@ -114,6 +114,11 @@ Several runs of one project can go at once, each in its own pod.
 
 ## Quick start
 
+Three steps: start Exradius on your machine, describe your project with the setup skill,
+then add it in the panel and send a task.
+
+### 1. Start Exradius
+
 Exradius runs locally on [kind](https://kind.sigs.k8s.io) with [Tilt](https://tilt.dev).
 You need:
 - Docker, with at least 4 GB of memory; 8 GB or more for larger projects;
@@ -130,23 +135,67 @@ make -C deploy/kind dev-up     # local registry, kind cluster, operators, Secret
 tilt up                        # build the images, install the chart, live-reload the backend
 ```
 
-Read the generated admin password:
+The first `tilt up` builds every image, which takes a while; Tilt's own page
+(http://localhost:10350) shows when everything is up. Read the generated admin password:
 
 ```bash
 kubectl --context kind-exradius -n exradius get secret exradius-admin -o jsonpath='{.data.password}' | base64 -d; echo
 ```
 
-Then open the panel at http://localhost:3100 and:
+Open the panel at http://localhost:3100 and sign in as `admin`.
 
-1. add a model provider (**Providers**);
-2. add a credential for the git host of your config repository (**Settings**);
-3. add the project by its config repository URL (**Projects**);
-4. create the secret store your config names and allow the project to use it (**Create
-   store** on the project's **Secrets** tab does both).
+### 2. Describe your project
 
-Once the store has every key the config references, **Verify** builds the workstation,
-starts the services and runs setup. If anything fails, it names the cause. Then send a task
-from the **Tasks** page.
+A project is a git repository with an `exradius.yaml`. The setup skill, a
+[Claude Code](https://claude.com/claude-code) plugin, writes it for you. It needs Docker,
+git and Python 3.8 or later on your machine, and the `gh` CLI if it should create the
+repository. Install it once:
+
+```bash
+claude plugin marketplace add musabeytekin/exradius
+claude plugin install exradius@exradius
+```
+
+Then open Claude Code in a checkout of the code agents should work on, and run:
+
+```
+/exradius:exradius-project
+```
+
+The skill:
+- reads the code: languages and tool versions, services, the checks as CI runs them, how
+  the application is started;
+- asks the few things it cannot read, in one round, such as whether agents may push;
+- writes `exradius.yaml`, a workstation Dockerfile when a stock image is not enough, and a
+  README that lists every secret the project needs and where to get it;
+- proves it locally with Docker under a run's conditions: the setup commands, your own
+  test and lint commands, and the start of the application;
+- creates the config repository `exradius-<slug>`, private, once you have seen the files
+  and agreed.
+
+It ends with what the next step needs: the repository's URL and the keys of its secret
+store. To write the file by hand instead, see [Configuring a project](#configuring-a-project).
+
+### 3. Add the project and send a task
+
+In the panel:
+
+1. **Providers**: add a model provider with your model credential.
+2. **Settings**, "Config repository access": add a credential for the git host, when the
+   config repository is private. For GitHub, a fine-grained token that can read it.
+3. **Projects**, **Add project**: paste the config repository's URL.
+4. The project's **Secrets** tab, when the config names a secret store: **Create store**
+   creates it and allows the project to use it. Fill the keys the config repository's
+   README lists.
+
+Once the store has every key the config references, **Verify** runs by itself: it builds
+the workstation, starts the services and runs setup, and if anything fails, it names the
+cause. When it has passed, send a task with **Send a task** on the **Tasks** page, or from
+a shell (this needs [uv](https://docs.astral.sh/uv/)):
+
+```bash
+make -C deploy/kind e2e PROJECT=<slug>     # sends one task and waits for its result
+```
 
 Tilt also forwards the API to http://localhost:8100 (OpenAPI at `/docs`) and RabbitMQ to
 `localhost:5673` (UI at http://localhost:15673). Stop with Ctrl-C. `tilt down` uninstalls
@@ -217,19 +266,19 @@ The full format is in [docs/config-repo.md](docs/config-repo.md).
 
 ### The setup skill
 
-The setup skill can write this file for you. It is a Claude Code plugin in
-[`skill/`](skill/). Run it in your project's checkout:
-- it reads the code and writes `exradius.yaml`, a workstation Dockerfile when a stock
-  image is not enough, and a README for the Exradius admin;
-- it checks all of it locally with Docker: Verify's steps, then your own test and lint
-  commands as an agent would run them, with the agent's network.
+The [setup skill](skill/) of the quick start writes this file from your code and keeps it
+current. Run `/exradius:exradius-project` again in the same checkout when the code has
+changed (a new service, a tool version, a repository): it compares the config with the
+code, proposes the edits and checks them. Give it a failed Verify step or task with its
+log, and it finds whether the cause is the config, the store or the installation,
+reproduces it locally and fixes what is the config's.
+
+Its local check also runs without Claude:
 
 ```bash
-claude plugin marketplace add musabeytekin/exradius
-claude plugin install exradius@exradius
+skill/skills/exradius-project/scripts/check.sh --repo myapp=../myapp \
+  --run 'cd myapp && npm test' ../exradius-myapp
 ```
-
-Then run `/exradius:exradius-project` inside Claude Code.
 
 ## Sending tasks
 
@@ -263,7 +312,8 @@ From a shell, with the backend's CLI:
 
 ```bash
 cd backend
-export EXRADIUS_BROKER_URL=amqp://<user>:<password>@localhost:5673/
+secret() { kubectl --context kind-exradius -n exradius get secret exradius-rabbitmq-default-user -o jsonpath="{.data.$1}" | base64 -d; }
+export EXRADIUS_BROKER_URL="amqp://$(secret username):$(secret password)@localhost:5673/"
 uv run exradius publish-task --task-id PLANE-214 --project plane \
   --instructions "Estimates created through the public API return 404. Fix it."
 uv run exradius events --task-id PLANE-214 --until-result
