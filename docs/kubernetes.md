@@ -1129,11 +1129,28 @@ address and open to `allowed_cidrs` only, the Secrets from Terraform's outputs),
     runtime to containerd (`systemd-cgroup = true`, as kind's kubelet uses systemd) and
     creates the RuntimeClass `gvisor`. It works in the arm64 kind node on this Mac;
     `runs.runtimeClassName: gvisor` then runs every run pod in it.
+  - `make dev-vault` (added 2026-11-12) runs HashiCorp Vault for stores of kind `vault`
+    (config-repo.md §7.4) in the namespace `vault`: `hashicorp/vault:2.2.2`, pinned by digest,
+    in **dev mode, for the local cluster only** (unsealed, in memory, plain HTTP, root token
+    `root`; `deploy/kind/vault.yaml`). `dev-vault.sh` then enables the Kubernetes auth method
+    against the cluster's own API (`kubernetes_host=https://kubernetes.default.svc`; Vault
+    reviews tokens with its own ServiceAccount, bound to `system:auth-delegator`), writes the
+    policy `exradius` (read `secret/data/exradius/*` and `secret/subkeys/exradius/*`), the role
+    `exradius` (the ServiceAccounts `exradius-api` and `exradius-worker` in `exradius`, audience
+    `vault`) and a sample secret `secret/exradius/demo` with `DEMO_TOKEN` and `DEMO_PASSWORD`.
+    It is idempotent, and dev mode forgets everything when its pod restarts, so it is run
+    again then. The chart reaches it with `deploy/kind/values-vault.yaml` on top of
+    `values-local.yaml` (`vault.address`, and `vault.audience: vault`, so the api and the
+    worker send a projected token only Vault accepts): `tilt up -- --vault`, or
+    `make install VAULT=1`. A store of kind `vault` with mount `secret` and path
+    `exradius/demo` then lists both keys. More secrets: `kubectl --context kind-exradius -n
+    vault exec deploy/vault -- vault kv put -mount=secret exradius/<name> KEY=value`.
 - **Tilt** (`Tiltfile` at the root):
   - `tilt up` builds the images (backend, frontend, operator, egress, builder, runtime
     bundle, project default) and
     pushes them to `localhost:5001`;
-  - installs the chart with `values-local.yaml`;
+  - installs the chart with `values-local.yaml` (and `deploy/kind/values-vault.yaml` with
+    `tilt up -- --vault`);
   - syncs changed Python files into the api and worker pods and restarts the process, with no
     image rebuild;
   - port-forwards the panel, API and RabbitMQ to `localhost:3100`, `8100`, `5673` and `15673`.

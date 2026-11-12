@@ -54,6 +54,9 @@ egress:
   allowPrivate: [kind-registry:5000]
   logLevel: debug
 
+# Stores of kind vault: deploy/kind/values-vault.yaml on top of this file points the api and
+# the worker at the dev-mode Vault of `make -C deploy/kind dev-vault` (tilt up -- --vault).
+
 builds:
   # The kind registry (deploy/kind/dev-up.sh), over HTTP; the node's containerd pulls from it
   # through its hosts.toml.

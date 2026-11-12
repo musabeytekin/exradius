@@ -1,0 +1,11 @@
+# The local Vault of `make -C deploy/kind dev-vault` (docs/kubernetes.md §17), on top of
+# values-local.yaml: `tilt up -- --vault`, or `make -C deploy/kind install VAULT=1`.
+# Local only: that Vault runs in dev mode.
+
+vault:
+  address: http://vault.vault.svc.cluster.local:8200
+  authMount: kubernetes
+  role: exradius
+  # The api and the worker send a projected token for this audience alone; the role
+  # dev-vault.sh writes accepts only it.
+  audience: vault

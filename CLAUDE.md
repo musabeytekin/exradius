@@ -88,6 +88,8 @@ Local cluster (kind, kubectl, helm, tilt):
 ```bash
 make -C deploy/kind dev-up      # registry localhost:5001, kind cluster "exradius", CloudNativePG, RabbitMQ operator, Secrets
 tilt up                         # build every image, install charts/exradius with values-local.yaml, live-update Python
+make -C deploy/kind dev-vault   # Vault in dev mode (local only) for stores of kind vault: auth role, policy, secret/exradius/demo
+tilt up -- --vault              # the same install plus deploy/kind/values-vault.yaml (make ... install VAULT=1 without Tilt)
 tilt down                       # uninstall (the exradius namespace and its Secrets stay)
 make -C deploy/kind dev-down    # delete the cluster and the registry
 make -C deploy/kind images install   # the same without Tilt, images tagged with the version

@@ -2,6 +2,7 @@
 #
 #   make -C deploy/kind dev-up    # once: registry, cluster, operators, Secrets
 #   tilt up                       # build every image, install the chart, live-update Python
+#   tilt up -- --vault            # the same with the local Vault (make -C deploy/kind dev-vault)
 #   tilt down                     # uninstall (the exradius namespace and its Secrets stay)
 #
 # Panel http://localhost:3100, API http://localhost:8100, RabbitMQ localhost:5673 and its
@@ -87,12 +88,20 @@ docker_build(
 
 # -- manifests -----------------------------------------------------------------------------
 
+# `tilt up -- --vault` adds deploy/kind/values-vault.yaml: the local Vault of
+# `make -C deploy/kind dev-vault`, for stores of kind vault (docs/kubernetes.md §17).
+config.define_bool('vault', usage='install with deploy/kind/values-vault.yaml (run make -C deploy/kind dev-vault first)')
+tilt_config = config.parse()
+chart_values = ['charts/exradius/values-local.yaml']
+if tilt_config.get('vault', False):
+    chart_values.append('deploy/kind/values-vault.yaml')
+
 k8s_yaml('deploy/kind/namespace.yaml')
 k8s_yaml(helm(
     'charts/exradius',
     name='exradius',
     namespace='exradius',
-    values=['charts/exradius/values-local.yaml'],
+    values=chart_values,
     # Bare image names, which Tilt replaces with the images it pushed.
     set=['images.registry=', 'dev.restartWrapper=true'],
 ))
