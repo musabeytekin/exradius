@@ -205,6 +205,7 @@ class FakeBroker:
     def __init__(self):
         self.tasks: list[dict[str, Any]] = []
         self.answers: list[dict[str, Any]] = []
+        self.cancels: list[dict[str, Any]] = []
         self.handler = None
         self.connected = False
         self.down = False
@@ -224,6 +225,11 @@ class FakeBroker:
         if self.down:
             raise ConnectionError("broker down")
         self.answers.append(json.loads(json.dumps(message)))
+
+    async def publish_cancel(self, message: dict[str, Any]) -> None:
+        if self.down:
+            raise ConnectionError("broker down")
+        self.cancels.append(json.loads(json.dumps(message)))
 
     async def consume(self, handler) -> None:
         self.handler = handler

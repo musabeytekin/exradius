@@ -22,7 +22,7 @@ import uuid
 from pathlib import Path
 
 from exradius import messaging
-from exradius.schemas.messages import AnswerMessage, TaskMessage
+from exradius.schemas.messages import AnswerMessage, CancelMessage, TaskMessage
 
 
 def _broker_url(args: argparse.Namespace) -> str:
@@ -73,6 +73,11 @@ async def answer(args: argparse.Namespace) -> None:
         attachments=_attachments(args.attach or []),
     )
     await _publish(_broker_url(args), messaging.ANSWERS_QUEUE, message.model_dump(mode="json"))
+
+
+async def cancel(args: argparse.Namespace) -> None:
+    message = CancelMessage(task_id=args.task_id, reason=args.reason)
+    await _publish(_broker_url(args), messaging.CANCELS_QUEUE, message.model_dump(mode="json", exclude_none=True))
 
 
 async def events(args: argparse.Namespace) -> None:
@@ -183,6 +188,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--answer", required=True)
     p.add_argument("--attach", action="append")
     p.set_defaults(func=answer)
+
+    p = sub.add_parser("cancel", help="cancel a task through exradius.cancels")
+    p.add_argument("--task-id", required=True)
+    p.add_argument("--reason", help="the cancelled event's reason (default: cancelled by the integration)")
+    p.set_defaults(func=cancel)
 
     p = sub.add_parser("events", help="print outbound events")
     p.add_argument("--routing-key", default="task.#")

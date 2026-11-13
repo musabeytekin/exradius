@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from exradius.schemas.messages import (
     AnswerMessage,
+    CancelMessage,
     EventEnvelope,
     ResultPayload,
     TaskMessage,
@@ -168,3 +169,13 @@ def test_routing_on_the_status_payload():
     assert decided["routing"] == {"method": "decided", "confidence": 0.48, "guess": True,
                                   "probabilities": {"a": 0.6, "b": 0.4}}
     assert "routing" not in status_payload(State.RUNNING, State.PREPARING)
+
+
+def test_cancel_message():
+    message = CancelMessage.model_validate({"version": 1, "task_id": "T-1", "extra": True})
+    assert message.reason is None and message.status_reason == "cancelled by the integration"
+    assert CancelMessage.model_validate({"version": 1, "task_id": "T-1", "reason": "stop"}).status_reason == "stop"
+    for bad in ({"version": 1}, {"version": 1, "task_id": ""}, {"version": 2, "task_id": "T"},
+                {"version": 1, "task_id": "T", "reason": "x" * 501}):
+        with pytest.raises(ValidationError):
+            CancelMessage.model_validate(bad)

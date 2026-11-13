@@ -17,23 +17,21 @@ import time
 import zlib
 from collections import deque
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 import httpx
 
-from exradius_bridge_kit.exradius import Broker, ExradiusError, IntegrationApi
+from exradius_bridge_kit.exradius import Broker, IntegrationApi
 from exradius_bridge_kit.flow import Flow
 from exradius_bridge_kit.projects import Problem, Projects
 from exradius_bridge_kit.settings import KitSettings
+from exradius_bridge_kit.status import HEARTBEAT, StatusReporter  # noqa: F401 - HEARTBEAT kept for importers
 from exradius_bridge_kit.tracker import ItemRef, Tracker, TrackerProblem
 
 log = logging.getLogger(__name__)
 
 STRIPES = 256
-HEARTBEAT = 300.0
-"""Seconds between status reports when nothing changes (integration-api.md §7)."""
 RECENT_FAILURES = 5
 FAILURES_FOR = 900.0
 """Seconds a failed hand-over, comment or event stays among the reported problems."""
@@ -44,6 +42,11 @@ def kit_version() -> str:
         return version("exradius-bridge-kit")
     except PackageNotFoundError:
         return "0+unknown"
+
+
+def software_name(software: str) -> str:
+    """What a bridge reports as its software: its own name and version, and the kit's."""
+    return f"{software} (exradius-bridge-kit {kit_version()})"
 
 
 class Kit:
@@ -60,7 +63,7 @@ class Kit:
     ):
         self.tracker = tracker
         self.settings = settings
-        self.software = f"{software} (exradius-bridge-kit {kit_version()})"
+        self.software = software_name(software)
         self.broker = broker if broker is not None else Broker(settings.broker_url, tracker.bridge)
         self.api = api or IntegrationApi(settings.api_url, settings.integration_token)
         self.projects = Projects(tracker)
@@ -72,15 +75,14 @@ class Kit:
             max_attachment_bytes=settings.max_attachment_bytes,
             downloads=self._downloads,
         )
-        self.started_at = datetime.now(UTC)
+        self.status = StatusReporter(self.api, self.software, self.problems)
+        self.started_at = self.status.started_at
         self.tracker_problems: list[Problem] = []
         self._failures: deque[tuple[float, Problem]] = deque(maxlen=RECENT_FAILURES)
         self._clock = clock
         self._locks = [asyncio.Lock() for _ in range(STRIPES)]
         self._directory_lock = asyncio.Lock()
         self._work: set[asyncio.Task] = set()
-        self._last_report: list[dict] | None = None
-        self._heartbeat: asyncio.Task | None = None
 
     def lock(self, item_id: str) -> asyncio.Lock:
         return self._locks[zlib.crc32(item_id.encode()) % STRIPES]
@@ -151,26 +153,7 @@ class Kit:
         return [*self.tracker_problems, *self.projects.problems, *recent]
 
     async def report(self, *, only_if_changed: bool = False) -> None:
-        problems = [{"project": p.project, "message": p.message[:1000]} for p in self.problems()[:100]]
-        if only_if_changed and problems == self._last_report:
-            return
-        report = {
-            "version": 1,
-            "software": self.software[:200],
-            "started_at": self.started_at.isoformat().replace("+00:00", "Z"),
-            "problems": problems,
-        }
-        try:
-            await self.api.report(report)
-        except ExradiusError as exc:
-            log.warning("could not report the bridge's status: %s", exc)
-            return
-        self._last_report = problems
-
-    async def _beat(self) -> None:
-        while True:
-            await asyncio.sleep(HEARTBEAT)
-            await self.report()
+        await self.status.report(only_if_changed=only_if_changed)
 
     # -- running ----------------------------------------------------------------------------------
 
@@ -195,7 +178,7 @@ class Kit:
     async def listen(self) -> None:
         """After ``start``: consume Exradius's events and report the status every 5 minutes."""
         await self.broker.consume(self.on_event)
-        self._heartbeat = asyncio.create_task(self._beat())
+        self.status.start()
         log.info("bridge %s is running for %s", self.tracker.bridge, self.tracker.instance)
 
     async def run(self) -> None:
@@ -205,8 +188,7 @@ class Kit:
         await asyncio.Event().wait()
 
     async def close(self) -> None:
-        if self._heartbeat is not None:
-            self._heartbeat.cancel()
+        await self.status.stop()
         await self.idle()
         await self.broker.close()
         await self.api.aclose()

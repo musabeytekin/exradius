@@ -100,6 +100,7 @@ async def system_integration(state: State, _: Admin):
         ),
         tasks_queue=messaging.TASKS_QUEUE,
         answers_queue=messaging.ANSWERS_QUEUE,
+        cancels_queue=messaging.CANCELS_QUEUE,
         events_exchange=messaging.EVENTS_EXCHANGE,
         routing_keys=list(ROUTING_KEYS.values()),
         public_api_url=settings.public_api_url,

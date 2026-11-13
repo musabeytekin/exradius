@@ -95,6 +95,26 @@ class AnswerMessage(_Message):
         return _unique_names(value)
 
 
+CANCEL_REASON_DEFAULT = "cancelled by the integration"
+
+
+class CancelMessage(_Message):
+    """Inbound on queue ``exradius.cancels`` (§4.5, docs/integration-api.md §10): stop the
+    task's run if it has not ended."""
+
+    task_id: str = Field(min_length=1, max_length=255)
+    reason: str | None = Field(default=None, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def _blank_is_none(cls, value: str | None) -> str | None:
+        return (value.strip() or None) if value is not None else None
+
+    @property
+    def status_reason(self) -> str:
+        return self.reason or CANCEL_REASON_DEFAULT
+
+
 # --- Outbound -----------------------------------------------------------------
 
 

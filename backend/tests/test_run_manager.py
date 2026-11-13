@@ -678,3 +678,47 @@ async def test_two_runs_of_a_project_run_in_parallel(manager, sessions, store, c
     await cluster.idle()
     assert sorted(seen) == sorted([first, second])
     assert [r["state"] for r in results(published)] == ["completed", "completed"]
+
+
+async def test_public_cancel_through_the_worker(settings, sessions, store, cluster, configured, accept):
+    """``exradius.cancels`` (architecture §4.5): the worker cancels the task's run with the
+    message's reason, then the cancelled result follows."""
+    from exradius.worker.main import Worker
+
+    class Publisher:
+        def __init__(self):
+            self.envelopes = []
+
+        async def publish(self, envelope, message_id=None):
+            self.envelopes.append(envelope)
+
+    class Incoming:
+        def __init__(self, body: bytes):
+            self.body = body
+            self.acked = False
+
+        async def ack(self):
+            self.acked = True
+
+    worker = Worker(settings, cluster=cluster)
+    worker.store = worker.runs.store = store
+    worker.publisher = Publisher()
+    try:
+        await submit_task(accept, [], task_id="desk-k7q2-1")
+        message = Incoming(json.dumps({"version": 1, "task_id": "desk-k7q2-1",
+                                       "reason": "cancelled by Ada in Desk"}).encode())
+        await worker.on_cancel(message)
+        while worker._background:
+            await asyncio.gather(*list(worker._background))
+        assert message.acked
+        statuses = [e.payload for e in worker.publisher.envelopes if e.type == "status"]
+        assert statuses == [{"state": "cancelled", "previous": "queued", "reason": "cancelled by Ada in Desk"}]
+        [result] = [e.payload for e in worker.publisher.envelopes if e.type == "result"]
+        assert result["state"] == "cancelled"
+
+        again = Incoming(json.dumps({"version": 1, "task_id": "desk-k7q2-1"}).encode())
+        await worker.on_cancel(again)  # ended: dropped, nothing published
+        assert again.acked and worker._background == set()
+        assert len(worker.publisher.envelopes) == 2
+    finally:
+        await worker.engine.dispose()

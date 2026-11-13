@@ -1,4 +1,4 @@
-"""``exradius-worker``: consume tasks, answers and control messages, drive Runs, publish events.
+"""``exradius-worker``: consume tasks, answers, cancels and control messages, drive Runs, publish events.
 
 The worker holds the master key, Postgres and the broker, and in Kubernetes it may only ask
 for Runs and write their Secrets (docs/kubernetes.md §3). It never creates pods: the
@@ -26,7 +26,7 @@ from exradius.routing import Router
 from exradius.storage import make_store
 from exradius.worker import run_objects
 from exradius.worker.heartbeat import Heartbeat, operator_status, runtimes
-from exradius.worker.intake import accept_answer, accept_task
+from exradius.worker.intake import accept_answer, accept_cancel, accept_task
 from exradius.worker.kube import Cluster, Gone, KubeCluster
 from exradius.worker.lifecycle import PendingEvent
 from exradius.worker.presence import make_presence, new_worker_id
@@ -133,6 +133,19 @@ class Worker:
         await message.ack()
         if intake.run_id is not None:
             self._spawn(self._resume(intake.run_id))
+
+    async def on_cancel(self, message: AbstractIncomingMessage) -> None:
+        """A public cancel (architecture §4.5): the same as the admin's, with its reason."""
+        try:
+            intake = await accept_cancel(self.sessions, message.body)
+        except Exception:
+            log.exception("cancel intake failed; message will be redelivered")
+            await message.nack(requeue=True)
+            await asyncio.sleep(5)
+            return
+        await message.ack()
+        if intake.run_id is not None:
+            self._spawn(self.runs.cancel(intake.run_id, intake.reason))
 
     async def _resume(self, run_id: uuid.UUID) -> None:
         async with self.slots:
@@ -263,6 +276,7 @@ class Worker:
             await other_channel.set_qos(prefetch_count=20)
             tasks_queue = await tasks_channel.declare_queue(messaging.TASKS_QUEUE, durable=True)
             answers_queue = await other_channel.declare_queue(messaging.ANSWERS_QUEUE, durable=True)
+            cancels_queue = await other_channel.declare_queue(messaging.CANCELS_QUEUE, durable=True)
             control_queue = await other_channel.declare_queue(messaging.CONTROL_QUEUE, durable=True)
 
             await self.presence.start()
@@ -273,6 +287,7 @@ class Worker:
 
             await tasks_queue.consume(self.on_task)
             await answers_queue.consume(self.on_answer)
+            await cancels_queue.consume(self.on_cancel)
             await control_queue.consume(self.on_control)
             log.info(
                 "worker %s ready (concurrency %s, Runs in %s)",

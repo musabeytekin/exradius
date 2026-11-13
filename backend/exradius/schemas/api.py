@@ -648,6 +648,7 @@ class IntegrationOut(BaseModel):
     broker: BrokerInfoOut
     tasks_queue: str
     answers_queue: str
+    cancels_queue: str
     events_exchange: str
     events_exchange_type: str = "topic"
     routing_keys: list[str]

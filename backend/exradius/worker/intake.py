@@ -20,9 +20,9 @@ from exradius.db import SessionFactory
 from exradius.models import Attachment, InfoRequest, Project, Run, Task, utcnow
 from exradius.project_state import assess, read_config, remember
 from exradius.providers import provider_problem, resolve_provider
-from exradius.schemas.messages import AnswerMessage, AttachmentIn, TaskMessage, status_payload
+from exradius.schemas.messages import AnswerMessage, AttachmentIn, CancelMessage, TaskMessage, status_payload
 from exradius.secret_backends import SecretBackends
-from exradius.states import State
+from exradius.states import State, is_terminal
 from exradius.storage import ObjectStore
 from exradius.worker.lifecycle import PendingEvent, make_event, transition
 
@@ -231,3 +231,30 @@ async def accept_answer(sessions: SessionFactory, store: ObjectStore, body: byte
         await session.commit()
         log.info("answer received for request %s on run %s", request.id, run.id)
         return AnswerIntake(run_id=run.id if run.state == State.WAITING_FOR_INPUT else None)
+
+
+@dataclass
+class CancelIntake:
+    run_id: uuid.UUID | None
+    """Set when the task has a run that has not ended: cancel it with ``reason``."""
+    reason: str = ""
+
+
+async def accept_cancel(sessions: SessionFactory, body: bytes) -> CancelIntake:
+    """A public cancel (architecture §4.5). A task that has ended, or that Exradius has not
+    accepted, is logged and dropped: nothing is published for it."""
+    try:
+        message = CancelMessage.model_validate_json(body)
+    except ValidationError as exc:
+        log.warning("dropping invalid cancel: %s", _first_error(exc).removeprefix("invalid task: "))
+        return CancelIntake(run_id=None)
+    async with sessions() as session:
+        run = await session.scalar(select(Run).where(Run.task_id == message.task_id))
+    if run is None:
+        log.info("dropping cancel for task %s: no such task", message.task_id)
+        return CancelIntake(run_id=None)
+    if is_terminal(run.state):
+        log.info("dropping cancel for task %s: it is %s", message.task_id, run.state)
+        return CancelIntake(run_id=None)
+    log.info("cancel requested for task %s (run %s)", message.task_id, run.id)
+    return CancelIntake(run_id=run.id, reason=message.status_reason)

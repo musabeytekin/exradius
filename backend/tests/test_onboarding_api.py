@@ -91,6 +91,7 @@ def test_system_integration_never_returns_the_password(admin, settings):
     assert info["broker"] == {"host": "rabbitmq", "port": 5672, "vhost": "prod/eu", "username": "exradius",
                               "password_set": True}
     assert info["tasks_queue"] == "exradius.tasks" and info["answers_queue"] == "exradius.answers"
+    assert info["cancels_queue"] == "exradius.cancels"
     assert info["events_exchange"] == "exradius.events" and info["events_exchange_type"] == "topic"
     assert info["routing_keys"] == ["task.status", "task.info_request", "task.result", "directory.changed"]
 

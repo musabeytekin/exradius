@@ -5,9 +5,10 @@ owns the flow from hand-over to hand-back.
 """
 
 from exradius_bridge_kit.exradius import Broker, ExradiusError, IntegrationApi
-from exradius_bridge_kit.kit import Kit
-from exradius_bridge_kit.projects import Problem
+from exradius_bridge_kit.kit import Kit, software_name
+from exradius_bridge_kit.projects import Problem, validation_problems
 from exradius_bridge_kit.settings import KitSettings, SettingsError
+from exradius_bridge_kit.status import StatusReporter
 from exradius_bridge_kit.tracker import (
     AttachmentInfo,
     Comment,
@@ -45,6 +46,9 @@ __all__ = [
     "Reply",
     "SettingsError",
     "Span",
+    "StatusReporter",
     "Tracker",
     "TrackerProblem",
+    "software_name",
+    "validation_problems",
 ]

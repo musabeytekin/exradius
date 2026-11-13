@@ -160,7 +160,42 @@ async def test_the_real_broker_round_trip():
     # mandatory publishing: an answer no queue takes would raise. Nothing reads it back,
     # since a running Exradius worker consumes the queue (and drops an unknown request).
     await broker.publish_answer({"version": 1, "task_id": "T-none", "request_id": str(uuid.uuid4()), "answer": "x"})
+    await broker.publish_cancel({"version": 1, "task_id": "T-none"})  # the queue exists: declared on connect
     events_queue = await channel.declare_queue(broker.queue_name, durable=True)
     await events_queue.delete(if_unused=False, if_empty=False)
     await connection.close()
     await broker.close()
+
+
+async def test_status_reporter_on_its_own():
+    """A bridge without the kit's flow (Desk) reports through ``StatusReporter``."""
+    from exradius_bridge_kit import Problem, StatusReporter
+
+    exradius = FakeExradius()
+    api = IntegrationApi(SETTINGS.api_url, SETTINGS.integration_token, transport=exradius.transport())
+    problems = [Problem("plane", "x" * 1500)] + [Problem(None, f"p{n}") for n in range(150)]
+    reporter = StatusReporter(api, "exradius-desk 0.1.0", lambda: problems, heartbeat=0.01)
+    await reporter.report()
+    [report] = exradius.reports
+    assert report["software"] == "exradius-desk 0.1.0" and report["started_at"].endswith("Z")
+    assert len(report["problems"]) == 100 and len(report["problems"][0]["message"]) == 1000
+    await reporter.report(only_if_changed=True)
+    assert len(exradius.reports) == 1
+    reporter.start()
+    import asyncio
+
+    while len(exradius.reports) < 3:
+        await asyncio.sleep(0.01)
+    await reporter.stop()
+    exradius.status_code = 500
+    await reporter.report()  # logged, not raised
+    await api.aclose()
+
+
+async def test_fake_broker_records_cancels():
+    broker = FakeBroker()
+    await broker.publish_cancel({"version": 1, "task_id": "T-1", "reason": "stop"})
+    assert broker.cancels == [{"version": 1, "task_id": "T-1", "reason": "stop"}]
+    broker.down = True
+    with pytest.raises(ConnectionError):
+        await broker.publish_cancel({"version": 1, "task_id": "T-2"})

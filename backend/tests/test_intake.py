@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from exradius.models import Event, InfoRequest, Project, Run, SecretStore, SecretStoreEntry, SecretStoreProject, Task
 from exradius.states import State
-from exradius.worker.intake import accept_answer
+from exradius.worker.intake import accept_answer, accept_cancel
 from tests.conftest import BASE_CONFIG, commit_config
 
 
@@ -177,3 +177,37 @@ async def test_answers_for_unknown_requests_are_dropped(sessions, store, configu
     assert (await accept_answer(sessions, store, answer_body("not-a-uuid"))).run_id is None
     assert (await accept_answer(sessions, store, answer_body(request_id, task_id="OTHER"))).run_id is None
     assert (await accept_answer(sessions, store, b"{}")).run_id is None
+
+
+# Public cancel (architecture §4.5, integration-api.md §10) ----------------------------------------
+
+
+def cancel_body(task_id="JIRA-1", **extra) -> bytes:
+    return json.dumps({"version": 1, "task_id": task_id, **extra}).encode()
+
+
+async def test_cancel_names_the_unfinished_run_and_its_reason(sessions, store, configured, accept):
+    intake = await accept(task_body(attachments=[]))
+    named = await accept_cancel(sessions, cancel_body(reason="  cancelled by Ada in Desk  "))
+    assert named.run_id == intake.run_id and named.reason == "cancelled by Ada in Desk"
+    plain = await accept_cancel(sessions, cancel_body(unknown_field=1))
+    assert plain.run_id == intake.run_id and plain.reason == "cancelled by the integration"
+    blank = await accept_cancel(sessions, cancel_body(reason="   "))
+    assert blank.reason == "cancelled by the integration"
+
+
+async def test_cancel_of_an_ended_unknown_or_invalid_task_is_dropped(sessions, store, configured, accept):
+    intake = await accept(task_body(attachments=[]))
+    async with sessions() as session:
+        run = await session.get(Run, intake.run_id)
+        run.state = run.task.state = State.COMPLETED
+        await session.commit()
+    assert (await accept_cancel(sessions, cancel_body())).run_id is None
+    assert (await accept_cancel(sessions, cancel_body(task_id="NEVER-SENT"))).run_id is None
+    assert (await accept_cancel(sessions, cancel_body(reason="x" * 501))).run_id is None
+    assert (await accept_cancel(sessions, b"not json")).run_id is None
+    assert (await accept_cancel(sessions, cancel_body(version=2))).run_id is None
+    # Nothing is published for any of them: there may be no task to attach it to.
+    async with sessions() as session:
+        events = (await session.scalars(select(Event))).all()
+    assert len(events) == 1  # the task's queued event
