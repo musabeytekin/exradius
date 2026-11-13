@@ -38,7 +38,7 @@ turns it into a pod; Exradius itself never starts a container. The design is
 
 ```
  integration layer ──▶ RabbitMQ ◀──────────────────────────────┐
-                          │ tasks, answers, control            │ events
+                          │ tasks, answers, cancels, control   │ events
                           ▼                                    │
  Frontend ──▶ api (Python) ◀── internal port 8001 ──┐    worker (Python) ──▶ Postgres
               │                                      │      │  master key
@@ -57,7 +57,7 @@ turns it into a pod; Exradius itself never starts a container. The design is
 - **api.** FastAPI, one process on two ports: 8000 for the admin panel API, the integration
   API, hooks and signed downloads; 8001 (`/internal/*` only) for run pods. Owns the Postgres
   schema.
-- **worker.** Consumes tasks, answers and control messages from the broker, reads the
+- **worker.** Consumes tasks, answers, cancels and control messages from the broker, reads the
   config, creates a `Run` and its per-run Secret for each run, settles runs from the Run's
   status and from what the runner reported, publishes outbound events, and deletes the Run at
   the end. It holds the master key and may only ask for Runs: it cannot create pods or read
@@ -188,6 +188,21 @@ projects whose config repository has that bridge's file (`bridges/<name>.yaml`),
 file's content. Bridges report the problems they find through
 `PUT /api/integration/v1/status`, and the panel shows them.
 
+### 4.5 Inbound: cancels
+
+Queue: `exradius.cancels`. Published by the user to stop a task (agreed 2026-11-14,
+`docs/integration-api.md` §10).
+
+```json
+{ "version": 1, "task_id": "JIRA-4821", "reason": "optional text, at most 500 characters" }
+```
+
+A task whose run has not ended is cancelled as the admin's cancel does (§5.5, §12): a
+`cancelled` status event whose `reason` is the message's (`cancelled by the integration`
+without one), then the `cancelled` result. A cancel for a task that has ended, or that
+Exradius has not accepted yet (still waiting in `exradius.tasks`), is logged and dropped,
+and nothing is published.
+
 ## 5. Run lifecycle
 
 States of a task (and its single run):
@@ -198,7 +213,7 @@ queued ──▶ preparing ──▶ running ──▶ completed
                             │  └── resuming ◀── waiting_for_input
                             │                       ▲
                             └───────────────────────┘
-   any non-terminal state ──▶ cancelled   (admin action)
+   any non-terminal state ──▶ cancelled   (admin or integration, §4.5)
    any state ─────────────▶ failed       (error)
    on intake ──────────────▶ rejected    (invalid task)
 ```
@@ -305,7 +320,7 @@ when the answer arrives, and its runner starts in resume mode (`docs/kubernetes.
 ### 5.5 Ending
 
 The run ends when the session finishes (`completed`), the runner reports an error or the pod
-ends without an outcome (`failed`), or the admin cancels (`cancelled`: the operator deletes
+ends without an outcome (`failed`), or the admin or an integration cancels (`cancelled`: the operator deletes
 the pod with its 30-second grace period). After the session the runner runs the delivery check
 and reports its warnings with the outcome. The worker uploads the transcript, publishes
 `task.result`, revokes the token and deletes the Run, which removes the pod, the workspace and
@@ -499,7 +514,7 @@ did it with Docker, the Kubernetes section is named instead.
 - The worker is the only publisher of outbound events. Each event is first stored in `events`, then published with AMQP `message_id` = `events.id`. If publishing fails, the row keeps `published_at = NULL` and the run continues. Version one does not republish.
 - Event timestamps are UTC with second precision (`2026-11-05T19:12:03Z`).
 - `result.output` is the JSON value passed to `submit_result`, or `null`. It is not wrapped in an object. `summary` is the final assistant message (the SDK `ResultMessage.result`).
-- Admin cancel travels from the API to the workers over an internal durable queue, `exradius.control`. That queue is not part of the public contract in §4. Any worker can handle it. The same queue carries `{"action": "run_reported", "run_id"}` when the runner reports through `/reported` (below), and Verify and provider-test requests.
+- Admin cancel travels from the API to the workers over an internal durable queue, `exradius.control`. That queue is not part of the public contract in §4. Any worker can handle it. The same queue carries `{"action": "run_reported", "run_id"}` when the runner reports through `/reported` (below), and Verify and provider-test requests. Integrations cancel through the public queue `exradius.cancels` (§4.5): the worker looks up the task's run and cancels it the same way, with the message's reason.
 
 **Run lifecycle** (`worker/runs.py`, `docs/kubernetes.md` §4, §8)
 

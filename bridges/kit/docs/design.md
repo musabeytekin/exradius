@@ -22,7 +22,8 @@ repository and image and depends on the kit. The first is the Jira bridge
 
 Like every bridge, the kit speaks only Exradius's public contract and imports nothing from
 Exradius:
-- the broker: `exradius.tasks` and `exradius.answers` in, `exradius.events` out;
+- the broker: `exradius.tasks`, `exradius.answers` and `exradius.cancels` in, `exradius.events`
+  out;
 - the integration API: the directory with the bridge's files, its `directory.changed`
   notice, and the bridge status report.
 
@@ -230,6 +231,10 @@ The problems are those of §3, plus the tracker's own: `start()` raising `Tracke
 ("Jira answered 401 for the bot account"), and the tracker failing repeatedly afterwards.
 A report that fails is logged and retried with the next one; it never stops the bridge.
 
+`StatusReporter` holds this part (the report's shape, the `only_if_changed` check, the
+5-minute heartbeat), so a bridge that does not use `Kit`'s flow can still report the way
+`Kit` does. Exradius Desk is the first (`bridges/desk/docs/design.md` §11).
+
 ## 10. Exradius side
 
 - **Directory.** Fetched at startup with the integration token, and again on every
@@ -263,6 +268,7 @@ exradius_bridge_kit/
   texts.py        every sentence the kit posts
   projects.py     bridge files: validation, claims, problems (§3)
   exradius.py     broker, directory, status clients
+  status.py       StatusReporter (§9)
   settings.py
   testing.py      FakeTracker, FakeBroker, FakeExradius, for the kit's tests and the bridges'
 tests/
@@ -290,5 +296,7 @@ Against `FakeTracker`, `FakeBroker` and `FakeExradius` (httpx `MockTransport`):
 - The GitHub bridge on the kit (an issue's repository is its scope; state in a hidden
   comment or the issue's metadata).
 - A mention of the bot after a run ended starting a follow-up run.
-- Cancel, once Exradius has a public cancel.
+- Cancel in the flow (in Jira, unassigning the bot). Exradius has a public cancel since
+  2026-11-14 (integration-api.md §10), and `Broker.publish_cancel` sends it; the flow does
+  not use it yet.
 - Texts in other languages.

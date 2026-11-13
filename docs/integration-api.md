@@ -65,7 +65,7 @@ admin API.
   git host, because the panel shows state, not help.
 
 Whoever owns the config repository registers the hook. The `exradius-project` skill can do
-it later when it creates the config repository, if it is given the URL (§10).
+it later when it creates the config repository, if it is given the URL (§11).
 
 ## 3. Directory notice
 
@@ -299,11 +299,50 @@ Done before this revision (migration `0004`): the hook, `directory_state`,
 - `ETag` and `304`.
 - Status: stored per bridge and replaced by the next report; limits answered with `413`.
 
-## 10. Not in v1
+## 10. Cancel
+
+Added 2026-11-14, for Exradius Desk (`bridges/desk/docs/design.md`), which lets people
+stop a run. Before this, only the admin could cancel, through the panel and the internal
+`exradius.control` queue.
+
+**The message.** Queue `exradius.cancels`, durable, published by the integration layer:
+
+```json
+{ "version": 1, "task_id": "desk-k7q2-12", "reason": "cancelled by Ada Lovelace in Desk" }
+```
+
+- `task_id` names the task. A task has one run, so the task is enough.
+- `reason` is optional text, at most 500 characters. It becomes the `reason` of the
+  `cancelled` status event. Without it the reason is `cancelled by the integration`.
+  The admin's cancel keeps `cancelled by admin`.
+- Unknown fields are ignored, as on every message (architecture §4).
+
+**Effect.** A task with an unfinished run is cancelled exactly as the admin's cancel does
+(architecture §12): a `task.status` event `cancelled` with the reason, the operator deletes
+the pod, and the `task.result` with `state: cancelled` follows once the runner has
+reported, or after 90 s. Every state that can still end is covered, `queued` and
+`waiting_for_input` included.
+
+**Nothing happens** for a task that has ended, for a task id Exradius has never accepted,
+and for an invalid message. Each is logged by the worker and acknowledged. No event is
+published, because there may be no task to attach one to. In particular, a task that still
+waits in `exradius.tasks` for a free worker slot has not been accepted yet, so a cancel
+sent then does nothing. An integration that wants it stopped sends the cancel again after
+the task's `queued` event. Cancelling twice is harmless.
+
+**Trust.** It is the same as for tasks and answers: whoever may publish to the broker may
+cancel any task. The broker cannot tell one publisher from another (§7), so a cancel is
+not tied to the bridge that sent the task.
+
+**Where.** `CancelMessage` sits next to `TaskMessage` in `schemas/messages.py`, and
+`CANCELS_QUEUE` in `messaging/`. The worker consumes the queue on its answers and control
+channel. `GET /api/system/integration` lists it as `cancels_queue`. The kit's `Broker`
+publishes it (`publish_cancel`), and `exradius cancel --task-id <id>` sends one from a shell.
+
+## 11. Not in v1
 
 - Verifying git host signatures on the hook (the token in the URL is the check).
 - Registering the hook from the `exradius-project` skill.
-- A public cancel message.
 - Reason codes on rejections. Today a bridge that wants to retry a duplicate task id
   matches the text of the rejection's `reason` (`duplicate task_id '...'`).
 - Secrets in bridge files.

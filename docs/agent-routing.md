@@ -307,4 +307,4 @@ task", "the project's only agent", or "picked automatically" with the confidence
 - Routing again when an answer arrives, or a person overriding the pick.
 - Routing evaluations and calibrating `GUESS_BELOW`; deliberately postponed until the
   system is built.
-- Rejection reason codes (integration-api.md §10).
+- Rejection reason codes (integration-api.md §11).
