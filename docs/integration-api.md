@@ -308,7 +308,7 @@ stop a run. Before this, only the admin could cancel, through the panel and the 
 **The message.** Queue `exradius.cancels`, durable, published by the integration layer:
 
 ```json
-{ "version": 1, "task_id": "desk-k7q2-12", "reason": "cancelled by Ada Lovelace in Desk" }
+{ "version": 1, "task_id": "plane-12+k7q2", "reason": "cancelled by Ada Lovelace in Desk" }
 ```
 
 - `task_id` names the task. A task has one run, so the task is enough.
