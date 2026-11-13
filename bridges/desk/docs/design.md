@@ -431,12 +431,14 @@ Every problem is reported at once, and Desk does not start (as the Jira bridge d
   `http://keycloak.keycloak.svc.cluster.local:8080`. Its backchannel endpoints follow the
   address asked (`KC_HOSTNAME_BACKCHANNEL_DYNAMIC`), and Desk reads discovery from the
   cluster address (`DESK_OIDC_DISCOVERY_URL`).
-- `tilt up -- --desk` installs with `deploy/kind/values-desk.yaml` (Desk on, its
-  CloudNativePG database, the dev identity provider), builds `exradius-desk`, and forwards
-  Desk to `localhost:3200` and Keycloak to `localhost:8180`.
+- Desk is on in `charts/exradius/values-local.yaml`, with the dev identity provider, so
+  `tilt up` builds `exradius-desk` (a `custom_build`, since the kit is a named build
+  context), creates its CloudNativePG database and forwards Desk to `localhost:3200`. A
+  Tilt resource `keycloak` forwards Keycloak to `localhost:8180` once it exists.
 - `make -C deploy/kind desk-token` signs in to the local API as the admin, creates an
   integration token for the bridge `desk`, stores it in the Secret `exradius-desk`, and
-  restarts Desk. Until then Desk stops at startup, saying the token is missing.
+  restarts Desk. Until then Desk stops at startup, saying the token is missing. The chart
+  marks that Secret optional, so the pod starts as soon as the Secret exists.
 - A project shows in Desk once its config repository has `bridges/desk.yaml` with
   `groups: [team-a]`.
 

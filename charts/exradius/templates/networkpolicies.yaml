@@ -109,9 +109,13 @@ spec:
         {{- include "exradius.peer" (list . "egress") | nindent 8 }}
       ports:
         - {protocol: TCP, port: 8001}
-    # The admin and integration API: the panel, and what values add (an ingress controller).
+    # The admin and integration API: the panel, Desk (the integration API and result files),
+    # and what values add (an ingress controller).
     - from:
         {{- include "exradius.peer" (list . "frontend") | nindent 8 }}
+        {{- if .Values.desk.enabled }}
+        {{- include "exradius.peer" (list . "desk") | nindent 8 }}
+        {{- end }}
         {{- with $np.apiFrom }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
