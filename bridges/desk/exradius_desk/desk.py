@@ -82,9 +82,9 @@ class Upload:
 
 
 def exradius_task_id(key: str, install: str, run: int) -> str:
-    """``plane-12+k7q2``, then ``plane-12+k7q2-2`` (design §6)."""
-    base = f"{key}+{install}"
-    return base if run <= 1 else f"{base}-{run}"
+    """``plane-12-kqxz``, then ``plane-12-2-kqxz`` (design §6). The last part is the install
+    code, letters only, so the id never ends in ``-<digits>`` as every Jira and GitHub id does."""
+    return f"{key}-{install}" if run <= 1 else f"{key}-{run}-{install}"
 
 
 def parse_key(key: str) -> tuple[str, int] | None:

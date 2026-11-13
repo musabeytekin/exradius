@@ -704,8 +704,8 @@ async def test_public_cancel_through_the_worker(settings, sessions, store, clust
     worker.store = worker.runs.store = store
     worker.publisher = Publisher()
     try:
-        await submit_task(accept, [], task_id="desk-k7q2-1")
-        message = Incoming(json.dumps({"version": 1, "task_id": "desk-k7q2-1",
+        await submit_task(accept, [], task_id="plane-1-kqxz")
+        message = Incoming(json.dumps({"version": 1, "task_id": "plane-1-kqxz",
                                        "reason": "cancelled by Ada in Desk"}).encode())
         await worker.on_cancel(message)
         while worker._background:
@@ -716,7 +716,7 @@ async def test_public_cancel_through_the_worker(settings, sessions, store, clust
         [result] = [e.payload for e in worker.publisher.envelopes if e.type == "result"]
         assert result["state"] == "cancelled"
 
-        again = Incoming(json.dumps({"version": 1, "task_id": "desk-k7q2-1"}).encode())
+        again = Incoming(json.dumps({"version": 1, "task_id": "plane-1-kqxz"}).encode())
         await worker.on_cancel(again)  # ended: dropped, nothing published
         assert again.acked and worker._background == set()
         assert len(worker.publisher.envelopes) == 2

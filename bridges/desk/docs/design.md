@@ -204,19 +204,23 @@ answerers     task_id, person_id                    (pk: both) for §10
 
 ## 6. Task ids sent to Exradius
 
-Exradius rejects a task id it has seen before, forever and from any bridge. The Jira
-bridge uses issue keys (`PLANE-101`, `PLANE-101-2`) and the GitHub bridge
-`<repository>-<number>` with any repository name. So any id of the form `<name>-<digits>`
-could one day be a GitHub id, and Desk's ids need a character that neither of them can
-produce.
+Exradius rejects a task id it has seen before, forever and from any bridge. The task id
+also begins every branch the agent pushes, so it should hold only `[a-z0-9-]`: a `+`, for
+instance, is legal for git but not for host branch rules, image tags made from branch names,
+or URLs.
 
-- When Desk's database is created, the first migration stores four random characters from
-  `[a-z0-9]` as `meta.install`.
-- A task's first run is `<key>+<install>` (`plane-12+k7q2`), and later runs are
-  `<key>+<install>-<n>` (`plane-12+k7q2-2`, `-3`), numbered as the Jira bridge numbers
-  reruns. Neither a Jira key nor a GitHub repository name can contain `+`. The install
-  part keeps the ids unique after Desk's database is replaced, and git accepts `+` in
-  branch names, which start with the task id, so the branch begins with the task's key.
+**The invariant.** Every Jira id (`PLANE-101`, `PLANE-101-2`) and every GitHub id
+(`plane-123`, `plane-123-2`) ends in a hyphen followed by digits only. An id whose last
+hyphen-separated part contains a letter can never equal one of theirs. A later bridge
+should keep to one side of that line as well.
+
+- When Desk's database is created, the first migration stores four random letters from
+  `[a-z]` as `meta.install`.
+- A task's first run is `<key>-<install>` (`plane-12-kqxz`), and later runs are
+  `<key>-<n>-<install>` (`plane-12-2-kqxz`, `plane-12-3-kqxz`), numbered as the Jira bridge
+  numbers reruns. The id still begins with the task's key, so the branch does too. The
+  install code keeps ids unique after Desk's database is replaced, and since it is last
+  and has no digit, no id of Desk's ends in `-<digits>`. A test checks this.
 - **Duplicate ids.** If a rejection's reason starts with `duplicate task_id`, Desk takes
   the next run number and publishes again, up to five times, without posting anything.
   This is the kit's rule (kit §7) and the same text match (integration-api.md §11).
@@ -524,6 +528,6 @@ The frontend has its own lint, tests (vitest, jsdom) and build.
   accepted yet (§7.3), so Desk re-sends it on `queued`. An Exradius-side record of early
   cancels would make that unnecessary, but it would also let a cancel reserve task ids that
   were never sent.
-- **Task id characters.** Nothing in the contract says which characters a task id may
-  hold. Desk relies on `+` being accepted (it is today: any string up to 255 characters),
-  and on other bridges never producing it.
+- **Task id shapes.** Nothing in the contract reserves a shape of task id for one bridge.
+  Desk relies on the other bridges' ids always ending in `-<digits>` (§6). A documented
+  rule, such as one id prefix per bridge, would make that a guarantee.

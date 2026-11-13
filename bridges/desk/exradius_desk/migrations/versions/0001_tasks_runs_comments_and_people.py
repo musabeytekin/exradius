@@ -11,7 +11,7 @@ from alembic import op
 
 import exradius_desk.models
 
-ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
 
 revision = '0001'
@@ -205,7 +205,8 @@ def upgrade() -> None:
         batch_op.create_index(batch_op.f('ix_mentions_comment_id'), ['comment_id'], unique=False)
 
 
-    # Four random characters that keep task ids unique after this database is replaced.
+    # Four random letters that keep task ids unique after this database is replaced, and
+    # that end every task id, so none ends in -<digits> (design §6).
     install = "".join(secrets.choice(ALPHABET) for _ in range(4))
     op.execute(sa.text("INSERT INTO meta (key, value) VALUES ('install', :value)").bindparams(value=install))
 

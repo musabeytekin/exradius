@@ -32,7 +32,7 @@ async def test_a_run_from_assignment_to_result(browser, desk, broker, smtp):
 
     assert (await ada.post(f"/api/tasks/{key}/assignee", json={"assignee": "exradius"})).status_code == 204
     [message] = broker.tasks
-    task_id = f"plane-1+{desk.install}"
+    task_id = f"plane-1-{desk.install}"
     assert message["task_id"] == task_id and "agent" not in message and message["project"] == "plane"
     assert message["instructions"] == "Fix invoice totals\n\nNegative since Monday."
     assert message["correlation"] == {"bridge": "desk", "instance": "http://desk.test", "install": desk.install,
@@ -125,7 +125,7 @@ async def test_a_mention_starts_the_next_run_with_the_thread(browser, desk, brok
     ada = await browser("ada")
     ben = await browser("ben")
     key = await new_task(ada, assignee="exradius")  # creating assigned to Exradius starts a run
-    first = f"plane-1+{desk.install}"
+    first = f"plane-1-{desk.install}"
     assert [t["task_id"] for t in broker.tasks] == [first]
     await broker.deliver(event(desk, "status", first, {"state": "queued", "previous": None,
                                                        "routing": {"method": "only_agent"}}, agent="developer"))
@@ -138,7 +138,7 @@ async def test_a_mention_starts_the_next_run_with_the_thread(browser, desk, brok
                               files=[("files", ("fixtures.sql", b"insert", "text/plain"))])
     assert response.json()["effect"] == "started"
     second = broker.tasks[-1]
-    assert second["task_id"] == f"{first}-2"
+    assert second["task_id"] == f"plane-1-2-{desk.install}"
     texts = [(c["author"], c["kind"], c["text"]) for c in second["context"]["comments"]]
     assert texts[0] == ("Exradius", "started", "Developer started working on this (run 1).")
     assert texts[1] == ("Exradius", "result", "Developer could not finish.\n\ntests failed")
@@ -148,7 +148,7 @@ async def test_a_mention_starts_the_next_run_with_the_thread(browser, desk, brok
 
     task = (await ada.get(f"/api/tasks/{key}")).json()
     assert comments(task)[-1]["started_run"] == 2 and task["run"]["seq"] == 2
-    await broker.deliver(event(desk, "result", f"{first}-2", {"state": "completed", "summary": "Done."}))
+    await broker.deliver(event(desk, "result", f"plane-1-2-{desk.install}", {"state": "completed", "summary": "Done."}))
     task = (await ada.get(f"/api/tasks/{key}")).json()
     assert task["assignee"]["name"] == "Ben"  # back to whoever wrote the mention
 
@@ -185,11 +185,11 @@ async def test_rejections_and_the_duplicate_id_retry(browser, desk, broker, smtp
     first = broker.tasks[0]["task_id"]
     await broker.deliver(event(desk, "status", first, {"state": "rejected", "previous": None,
                                                        "reason": f"duplicate task_id '{first}'"}))
-    assert broker.tasks[-1]["task_id"] == f"{first}-2"
+    assert broker.tasks[-1]["task_id"] == f"plane-1-2-{desk.install}"
     task = (await ada.get(f"/api/tasks/{key}")).json()
-    assert task["run"]["task_id"] == f"{first}-2" and comments(task) == []
+    assert task["run"]["task_id"] == f"plane-1-2-{desk.install}" and comments(task) == []
 
-    await broker.deliver(event(desk, "status", f"{first}-2", {
+    await broker.deliver(event(desk, "status", f"plane-1-2-{desk.install}", {
         "state": "rejected", "previous": None, "reason": "missing secret DB_PASSWORD in store plane"}))
     task = (await ada.get(f"/api/tasks/{key}")).json()
     [rejected] = comments(task)
@@ -200,7 +200,7 @@ async def test_rejections_and_the_duplicate_id_retry(browser, desk, broker, smtp
 
     # The next run takes the next number, past the retried one.
     await ada.post(f"/api/tasks/{key}/assignee", json={"assignee": "exradius"})
-    assert broker.tasks[-1]["task_id"] == f"{first}-3"
+    assert broker.tasks[-1]["task_id"] == f"plane-1-3-{desk.install}"
     assert (await ada.get(f"/api/tasks/{key}")).json()["run"]["seq"] == 2
 
 
@@ -210,7 +210,7 @@ async def test_events_of_others_are_ignored(browser, desk, broker):
     task_id = broker.tasks[0]["task_id"]
     for other in (event(desk, "status", task_id, {"state": "queued"}, install="zzzz"),
                   event(desk, "status", task_id, {"state": "queued"}, bridge="jira"),
-                  event(desk, "status", "plane-9+" + desk.install, {"state": "queued"}),
+                  event(desk, "status", f"plane-9-{desk.install}", {"state": "queued"}),
                   {"version": 1, "type": "status", "task_id": task_id, "payload": {"state": "queued"}}):
         await broker.deliver(other)
     task = (await ada.get(f"/api/tasks/{key}")).json()
@@ -243,8 +243,8 @@ async def test_files_beyond_the_cap_are_listed_not_sent(browser, desk, broker):
 
 
 def test_ids_guesses_and_download_urls():
-    assert exradius_task_id("plane-12", "k7q2", 1) == "plane-12+k7q2"
-    assert exradius_task_id("plane-12", "k7q2", 3) == "plane-12+k7q2-3"
+    assert exradius_task_id("plane-12", "kqxz", 1) == "plane-12-kqxz"
+    assert exradius_task_id("plane-12", "kqxz", 3) == "plane-12-3-kqxz"
     assert guess_text({"method": "decided", "guess": False}, {}) is None
     assert guess_text({"method": "decided", "guess": True, "probabilities": {"a": 0.2, "b": 0.5, "c": 0.2,
                                                                              "d": 0.1}}, {"b": "Bee"}) == \
@@ -252,3 +252,16 @@ def test_ids_guesses_and_download_urls():
     assert download_url("https://x.test/p/api/artifacts/1/content?sig=s", "http://api:8000/") == \
         "http://api:8000/api/artifacts/1/content?sig=s"
     assert download_url("https://files.test/report.md", "http://api:8000") == "https://files.test/report.md"
+
+
+async def test_no_id_ends_in_digits(desk):
+    """Every Jira and GitHub id ends in -<digits>; Desk's never do (design §6)."""
+    import re
+
+    assert re.fullmatch(r"[a-z]{4}", desk.install)
+    for key in ("plane-1", "billing-platform-12", "a-1-2-3"):
+        for run in range(1, 8):
+            task_id = exradius_task_id(key, desk.install, run)
+            assert not re.search(r"-[0-9]+$", task_id), task_id
+            assert re.fullmatch(r"[a-z0-9-]+", task_id) and task_id.startswith(f"{key}-")
+    assert len({exradius_task_id("plane-1", desk.install, run) for run in range(1, 8)}) == 7

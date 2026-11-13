@@ -13,7 +13,7 @@ function waitingTask(): Task {
     handed_over_by: { id: 1, name: "Ada Lovelace" }, created_at: NOW, updated_at: NOW,
     files: [{ id: 5, name: "trace.txt", content_type: "text/plain", size: 2048, uploaded_by: null, created_at: NOW }],
     run: {
-      seq: 1, task_id: "plane-1+k7q2", state: "waiting_for_input", agent: "scout", agent_name: "Scout", routing: null,
+      seq: 1, task_id: "plane-1-kqxz", state: "waiting_for_input", agent: "scout", agent_name: "Scout", routing: null,
       created_at: NOW, ended_at: null, handed_over_by: { id: 1, name: "Ada Lovelace" }, cancel_requested_by: null,
     },
     runs: [],

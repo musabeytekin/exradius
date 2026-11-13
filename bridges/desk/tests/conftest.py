@@ -7,6 +7,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -280,9 +281,10 @@ def browser(app, idp, desk):
 def event(desk: Desk, type_: str, task_id: str, payload: dict[str, Any], *, task: str | None = None,
           agent: str | None = None, install: str | None = None, bridge: str = "desk") -> dict[str, Any]:
     """A task event as Exradius publishes it (architecture §4.3), for a Desk task."""
-    key = task or task_id.split("+")[0]
+    install = install or desk.install
+    key = task or re.sub(rf"(-\d+)?-{install}$", "", task_id)
     return {
         "version": 1, "task_id": task_id, "run_id": "r-1", "project": key.rsplit("-", 1)[0], "agent": agent,
-        "correlation": {"bridge": bridge, "instance": PUBLIC, "install": install or desk.install, "task": key},
+        "correlation": {"bridge": bridge, "instance": PUBLIC, "install": install, "task": key},
         "timestamp": "2026-11-14T10:00:00Z", "type": type_, "payload": payload,
     }
