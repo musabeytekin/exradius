@@ -145,12 +145,12 @@ tasks         id, project, number, title, description, status, reporter_id,
               assignee_kind (none | person | exradius), assignee_id, handed_over_by,
               runs, created_at, updated_at                 unique (project, number)
 runs          id, task_id, seq, exradius_task_id (unique), state, agent, agent_name,
-              routing (json), handed_over_by, started_by_comment_id, created_at,
-              ended_at, reason, summary, error, warnings (json),
+              routing (json), handed_over_by, started_by_comment_id, retries,
+              created_at, ended_at, reason, summary, error, warnings (json),
               cancel_requested_by, cancel_requested_at
 comments      id, task_id, author_kind (person | exradius), author_id, kind, body,
-              run_id, request_id, answered_by_id, answers_request_id, started_run_id,
-              created_at
+              data (json), run_id, request_id, answered_by_id, answers_request_id,
+              started_run_id, created_at
 mentions      comment_id, person_id (null for Exradius), exradius (bool)
 attachments   id, task_id, comment_id (null: the task's own), name, content_type, size,
               data (blob), uploaded_by, created_at
@@ -159,6 +159,8 @@ history       id, task_id, person_id (null: Desk), field, old, new, created_at
 answerers     task_id, person_id                    (pk: both) for §10
 ```
 
+- **tasks.runs** counts the run numbers the task has used for ids (§6), retries
+  included; **runs.seq** is the run's place among the task's runs, as people see it.
 - **tasks.status** is `todo`, `in_progress` or `done`. **assignee_kind** with
   **assignee_id** is the assignee. **handed_over_by** is the person who handed the task to
   Exradius for the live run (by assigning or by a mention), and whom it goes back to.
@@ -169,7 +171,9 @@ answerers     task_id, person_id                    (pk: both) for §10
   then a final one (`completed`, `failed`, `cancelled`, `rejected`).
 - **comments.kind**: `comment` (a person's), `question` (the agent's, with `request_id`
   and `answered_by_id` once a comment answers it), `started` (Exradius names the agent
-  routing picked), `result`, `rejected` and `cancel`. The effect of a person's comment that
+  routing picked), `result`, `rejected` and `cancel`. `data` holds what Exradius's
+  comments carry besides text: a question's context, the agent and the guess of
+  `started`, a result's state, error and warnings. The effect of a person's comment that
   mentions Exradius is stored on it: `answers_request_id` or `started_run_id` (§7), and
   the thread shows it from there.
 - **history** records changes to the title, description, status and assignee, by whom,
@@ -449,8 +453,9 @@ bridges/desk/
     access.py      bridges/desk.yaml and who sees what (§2)
     models.py      SQLAlchemy models (§4); migrations/ with Alembic
     desk.py        tasks, assignment, runs and Exradius's events (§5–§7)
-    comments.py    mentions and their effects (§8)
-    files.py       attachments and result files (§8)
+    mentions.py    mentions as references, and as plain text (§8)
+    files.py       where result files are fetched from (§8)
+    db.py          migrations under an advisory lock
     live.py        the stream hub (§9)
     mail.py        notifications (§10)
   web/             the frontend (React 19, TypeScript, Vite, Tailwind 4, TanStack)
