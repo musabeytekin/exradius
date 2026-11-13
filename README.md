@@ -327,7 +327,8 @@ Bridges connect trackers to Exradius:
 |---|---|
 | [`bridges/jira`](bridges/jira) | Assigning an issue to the bot account starts a task. Questions and results arrive as comments; mention the bot to answer. |
 | [`bridges/github`](bridges/github) | A GitHub App that starts tasks from issue labels and answers in comments. |
-| [`bridges/kit`](bridges/kit) | The library both are meant to build on, for writing a bridge for another tracker. |
+| [`bridges/desk`](bridges/desk) | Exradius Desk: a small task system. Tasks are assigned to people or to Exradius, which starts a run; the agent's questions and results are comments. |
+| [`bridges/kit`](bridges/kit) | The library the bridges build on (the GitHub bridge not yet), for writing a bridge for another tracker. |
 
 Bridges use only the public contracts in
 [docs/integration-api.md](docs/integration-api.md). They run as separate containers.
@@ -416,7 +417,7 @@ builder/      credential helpers for in-cluster image builds
 frontend/     the admin panel (React, TypeScript, Vite, Tailwind)
 charts/       the Helm chart
 deploy/       Dockerfiles, the kind setup, Terraform for the clouds
-bridges/      the bridge kit and the Jira and GitHub bridges
+bridges/      the bridge kit, the Jira and GitHub bridges, and Exradius Desk
 skill/        the setup skill (a Claude Code plugin)
 docs/         design notes
 ```

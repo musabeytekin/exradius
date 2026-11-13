@@ -90,6 +90,8 @@ Local cluster (kind, kubectl, helm, tilt):
 make -C deploy/kind dev-up      # registry localhost:5001, kind cluster "exradius", CloudNativePG, RabbitMQ operator, Secrets
 tilt up                         # build every image, install charts/exradius with values-local.yaml, live-update Python
 make -C deploy/kind dev-vault   # Vault in dev mode (local only) for stores of kind vault: auth role, policy, secret/exradius/demo
+make -C deploy/kind dev-desk    # Keycloak in dev mode (local only): Desk's identity provider, people ada/ben (team-a), cem (team-b)
+make -C deploy/kind desk-token  # after tilt up: an integration token for the bridge desk in the Secret exradius-desk
 tilt up -- --vault              # the same install plus deploy/kind/values-vault.yaml (make ... install VAULT=1 without Tilt)
 tilt down                       # uninstall (the exradius namespace and its Secrets stay)
 make -C deploy/kind dev-down    # delete the cluster and the registry
@@ -100,7 +102,8 @@ kubectl --context kind-exradius -n exradius get secret exradius-admin -o jsonpat
 ```
 
 Panel http://localhost:3100, API http://localhost:8100 (`/docs`), RabbitMQ `localhost:5673`
-and its UI :15673 (Tilt's port-forwards; they avoid a v0.1.0 compose install's ports).
+and its UI :15673, Desk http://localhost:3200 and its Keycloak :8180 (Tilt's port-forwards;
+they avoid a v0.1.0 compose install's ports).
 Publishing a task from a shell: `uv run exradius publish-task --project <slug> --agent <slug>
 --task-id <id> --instructions ...` and `uv run exradius events --task-id <id> --until-result`
 (broker from `EXRADIUS_BROKER_URL`, credentials in the `exradius-rabbitmq-default-user`
@@ -110,8 +113,9 @@ Bridges and the setup skill (each its own Python project; `bridges/jira` depends
 
 ```bash
 cd bridges/kit && uv run pytest              # the kit (tests/test_broker.py needs a real RabbitMQ URL)
-cd bridges/jira && uv run pytest             # the Jira bridge; bridges/github likewise
-cd bridges/jira && docker build --build-context kit=../kit -t exradius-jira .
+cd bridges/jira && uv run pytest             # the Jira bridge; bridges/github and bridges/desk likewise
+cd bridges/jira && docker build --build-context kit=../kit -t exradius-jira .   # bridges/desk likewise
+cd bridges/desk/web && npm install && npm run lint && npm test && npm run build   # Desk's frontend
 claude plugin validate . && claude plugin validate skill   # the marketplace (repo root) and the plugin
 ```
 
@@ -280,8 +284,12 @@ information exists nowhere else.
 **Bridges and the skill.** `bridges/` holds the integration layer that Exradius itself
 leaves outside its core: `kit/` (the bridge kit library: directory fetch, routing hand-off,
 task publishing, events, bridge status, over the integration API and the broker),
-`jira/` (Jira Cloud on the kit) and `github/` (GitHub issues; written before the kit and
-agent routing, so it still uses agent labels). They speak only the public contracts
+`jira/` (Jira Cloud on the kit), `github/` (GitHub issues; written before the kit and
+agent routing, so it still uses agent labels) and `desk/` (Exradius Desk, the first-party
+task system: OIDC sign-in, projects from `bridges/desk.yaml` groups, tasks assigned to people
+or to Exradius, @mentions, its own Postgres and React frontend, the chart's optional `desk`
+component). Bridges stop a run with the public cancel on `exradius.cancels`
+(integration-api.md §10). They speak only the public contracts
 (`docs/integration-api.md`) and import nothing from `backend/`. Their design notes are in
 each one's `docs/`. `skill/` is the setup skill (a Claude Code plugin); the repository
 root's `.claude-plugin/marketplace.json` publishes it, so it installs with
