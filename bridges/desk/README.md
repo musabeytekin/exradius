@@ -53,7 +53,7 @@ docker build --build-context kit=../kit -t exradius-desk .
 exradius-desk migrate     # the database; the chart's init container runs it
 ```
 
-Locally against the kind cluster:
+Locally against the kind cluster, from the repository root:
 
 ```bash
 make -C deploy/kind dev-desk     # Keycloak with ada/ada, ben/ben (team-a), cem/cem (team-b)
