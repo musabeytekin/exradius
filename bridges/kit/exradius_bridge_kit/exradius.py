@@ -19,6 +19,8 @@ log = logging.getLogger(__name__)
 
 TASKS_QUEUE = "exradius.tasks"
 ANSWERS_QUEUE = "exradius.answers"
+CANCELS_QUEUE = "exradius.cancels"
+"""The public cancel (integration-api.md §10)."""
 EVENTS_EXCHANGE = "exradius.events"
 BINDINGS = ("task.*", "directory.changed")
 
@@ -84,12 +86,14 @@ class Publisher(Protocol):
 
     async def publish_answer(self, message: dict[str, Any]) -> None: ...
 
+    async def publish_cancel(self, message: dict[str, Any]) -> None: ...
+
 
 EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class Broker:
-    """Publishes tasks and answers; consumes the bridge's own queue of events."""
+    """Publishes tasks, answers and cancels; consumes the bridge's own queue of events."""
 
     def __init__(self, url: str, bridge: str, *, retry_after: float = 5.0):
         self.url = url
@@ -107,7 +111,7 @@ class Broker:
         await consume.set_qos(prefetch_count=1)
         # The same declarations as Exradius's own (durable, no arguments), so either side
         # may come up first.
-        for name in (TASKS_QUEUE, ANSWERS_QUEUE):
+        for name in (TASKS_QUEUE, ANSWERS_QUEUE, CANCELS_QUEUE):
             await self._publish.declare_queue(name, durable=True)
         exchange = await consume.declare_exchange(EVENTS_EXCHANGE, aio_pika.ExchangeType.TOPIC, durable=True)
         self._queue = await consume.declare_queue(self.queue_name, durable=True)
@@ -134,6 +138,11 @@ class Broker:
 
     async def publish_answer(self, message: dict[str, Any]) -> None:
         await self._send(ANSWERS_QUEUE, message)
+
+    async def publish_cancel(self, message: dict[str, Any]) -> None:
+        """``{"version": 1, "task_id": ..., "reason": ...}``: Exradius cancels the task's run
+        if it has not ended, and drops the message otherwise (integration-api.md §10)."""
+        await self._send(CANCELS_QUEUE, message)
 
     async def consume(self, handler: EventHandler) -> None:
         assert self._queue is not None, "connect() first"

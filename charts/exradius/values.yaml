@@ -20,6 +20,8 @@ images:
   # Build pods' image: rootless BuildKit with the clouds' credential helpers
   # (deploy/builder.Dockerfile); builds.builderImage overrides it.
   builder: exradius-builder
+  # Exradius Desk (desk below), built from bridges/desk/Dockerfile.
+  desk: exradius-desk
 
 runtime:
   claudeCode:
@@ -351,6 +353,64 @@ nodeSetup:
   nodeSelector: {}
   # Every node, the tainted run pool's too.
   tolerations: [{operator: Exists}]
+
+# Exradius Desk (bridges/desk/docs/design.md): Exradius's own task system and bridge. People
+# sign in with OpenID Connect, keep tasks in projects whose config repositories have
+# bridges/desk.yaml, and assign them to people or to Exradius. One replica, its own database.
+desk:
+  enabled: false
+  # Desk's address as browsers reach it: links in mail, the OIDC redirect URI
+  # (<publicUrl>/auth/callback), the Origin check.
+  publicUrl: ""
+  # An integration token for the bridge desk (panel: Settings, Integrations), in a Secret.
+  integrationToken: {existingSecret: exradius-desk, key: integration-token}
+  oidc:
+    # The issuer, exactly as the ID tokens' iss.
+    issuer: ""
+    # Where Desk reads the discovery document, when it reaches the provider at another
+    # address than browsers do. Empty: <issuer>/.well-known/openid-configuration.
+    discoveryUrl: ""
+    clientId: ""
+    # A Secret with a confidential client's secret. Empty: a public client (PKCE only).
+    existingSecret: ""
+    secretKey: client-secret
+    scopes: "openid profile email"
+    # The claim with the person's groups; a dotted name reads a nested claim.
+    groupsClaim: groups
+  database:
+    # A Secret whose uriKey holds postgresql://user:password@host:5432/db for Desk alone.
+    # Empty with inCluster.cloudnativepg: that Cluster's <name>-app Secret.
+    existingSecret: ""
+    uriKey: uri
+    inCluster:
+      cloudnativepg: true
+      name: exradius-desk-postgres
+      instances: 1
+      storage: 5Gi
+      storageClass: ""
+      resources: {}
+  # Mail for assignments, mentions, questions and ended runs. Empty host: no mail.
+  smtp:
+    host: ""
+    port: 587
+    # starttls, tls or none.
+    tls: starttls
+    from: ""
+    # A Secret with the user name and password, if the server wants them.
+    existingSecret: ""
+    usernameKey: username
+    passwordKey: password
+  # Files per upload, in MB (they travel inline in the task message).
+  maxAttachmentMb: 10
+  sessionHours: 12
+  resources: {}
+  # Desk's own Ingress, on a host name of its own.
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    annotations: {}
+    tls: []
 
 crds:
   # The Run and Build CRDs, kept on uninstall (helm.sh/resource-policy: keep) and upgraded

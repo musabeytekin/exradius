@@ -413,6 +413,6 @@ export interface ProviderStatus {
 export interface Runtime { name: string; label: string; providers?: ProviderKindSpec[] }
 export interface Integration {
   broker: { host: string; port: number; vhost: string; username: string | null; password_set: boolean };
-  tasks_queue: string; answers_queue: string; events_exchange: string; events_exchange_type: string;
+  tasks_queue: string; answers_queue: string; cancels_queue: string; events_exchange: string; events_exchange_type: string;
   routing_keys: string[]; public_api_url: string;
 }

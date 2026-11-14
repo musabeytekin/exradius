@@ -8,6 +8,8 @@
 #   make -C deploy/kind dev-gvisor   # gVisor (runsc) in the node and a RuntimeClass "gvisor" (runs.runtimeClassName)
 #   make -C deploy/kind dev-vault    # Vault in dev mode (LOCAL ONLY) for stores of kind vault; then
 #                                    # tilt up -- --vault, or install VAULT=1 (values-vault.yaml)
+#   make -C deploy/kind dev-desk     # Keycloak in dev mode (LOCAL ONLY): Exradius Desk's identity provider
+#   make -C deploy/kind desk-token   # after tilt up: an integration token for Desk, and Desk restarted
 #
 # Without Tilt: `make -C deploy/kind images install` builds every image with tag $(TAG),
 # pushes it to the local registry and installs the chart with values-local.yaml (and
@@ -23,7 +25,7 @@ TAG ?= 0.2.0
 # The Python package version, which the runtime bundle checks (backend/pyproject.toml).
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' $(ROOT)/backend/pyproject.toml | head -1)
 
-.PHONY: dev-up dev-down dev-seccomp dev-gvisor dev-vault images install uninstall e2e
+.PHONY: dev-up dev-down dev-seccomp dev-gvisor dev-vault dev-desk desk-token images install uninstall e2e
 
 dev-up:
 	./dev-up.sh
@@ -49,6 +51,16 @@ dev-gvisor:
 dev-vault:
 	CONTEXT=$(CONTEXT) ./dev-vault.sh
 
+# Keycloak in dev mode with the realm exradius (people ada, ben, cem) and the Secret
+# exradius-desk-oidc (deploy/kind/dev-desk.sh, bridges/desk/docs/design.md §14). Local only.
+dev-desk:
+	CONTEXT=$(CONTEXT) ./dev-desk.sh
+
+# An integration token for the bridge desk through the local API (localhost:8100), stored in the
+# Secret exradius-desk; Desk is restarted to read it (deploy/kind/desk-token.sh).
+desk-token:
+	CONTEXT=$(CONTEXT) ./desk-token.sh
+
 images:
 	docker build -f $(ROOT)/deploy/backend.Dockerfile -t $(REGISTRY)/exradius-backend:$(TAG) $(ROOT)
 	docker build -t $(REGISTRY)/exradius-frontend:$(TAG) $(ROOT)/frontend
@@ -58,7 +70,8 @@ images:
 	docker build -f $(ROOT)/deploy/runtime-claude-code.Dockerfile --build-arg EXRADIUS_VERSION=$(VERSION) \
 	  -t $(REGISTRY)/exradius-runtime-claude-code:$(TAG) $(ROOT)
 	docker build -f $(ROOT)/deploy/project-default.Dockerfile -t $(REGISTRY)/exradius-project-default:$(TAG) $(ROOT)/deploy
-	for image in backend frontend operator egress builder runtime-claude-code project-default; do \
+	docker build --build-context kit=$(ROOT)/bridges/kit -t $(REGISTRY)/exradius-desk:$(TAG) $(ROOT)/bridges/desk
+	for image in backend frontend operator egress builder runtime-claude-code project-default desk; do \
 	  docker push -q $(REGISTRY)/exradius-$$image:$(TAG) || exit 1; \
 	done
 
