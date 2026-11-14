@@ -13,6 +13,10 @@ So a setup is done when the application was started once under the run's conditi
 `notes` say how. A library or a one-shot command line tool has nothing to keep running:
 run its main function once the same way (build the binary and call it), and say that.
 
+The running application has a second use, on far more tickets: the agent that added a
+button starts it, sees the button, and sends a picture of it with its result. "Proof of
+a change" below says what the roles ask for and what the setup must provide for it.
+
 ## What to find while reading
 
 - **How developers start it**: the dev compose file's `command:`, a devcontainer's
@@ -33,6 +37,9 @@ run its main function once the same way (build the binary and call it), and say 
   development database and who creates and migrates it, the seed.
 - **A login**: the user the development seed creates, the command that creates one, or
   the first-run wizard's API, called once in the start script and written into `notes`.
+- **How a change would be seen**: pages a browser shows (a single-page frontend,
+  server-rendered pages, an admin site), an API, a command's output. Pages mean the
+  agents that change code get a browser ("Proof of a change").
 - **A user interface in another repository**: either that repository belongs to the
   project (step 2 asks), or the server is started without it (a `--nowebclient` kind of
   switch) and `notes` say the API is what there is.
@@ -95,6 +102,13 @@ fi
   non-zero when the evidence is missing. A script that proves only an open port has let
   a server pass that could not reach its queue.
 - When it is cheap, one real action: log in as the seeded user, create a record.
+- With the `playwright` connection, end the script with a screenshot of a page that
+  needs the assets, taken by the Playwright the connection pins (pitfalls.md has the
+  version), and fail when the file is missing or empty:
+  `npx -y -p @playwright/mcp@<pinned> playwright screenshot http://localhost:<port>/<page> /tmp/page.png && test -s /tmp/page.png`.
+  It is the only proof before a task that the agent's browser starts under the run's
+  conditions: Verify lists the connection's tools without starting Chromium. The request
+  before it proved what the page holds; this proves the browser.
 - Without `curl` in the image, use the language's own client (`python3 -c`, `node -e`)
   or add `curl` to the Dockerfile: the agent needs it for the same purpose.
 - What the script leaves running ends with the step. In a run nothing ends it for the
@@ -135,16 +149,60 @@ notes: |
   There is no browser here: check a page through its API calls and its HTML.
 ```
 
+With a browser, the last sentence of either becomes what to open: "Look at pages with
+the browser tool on http://localhost:3000/ (log in as `test` / `test`)."
+
 Say what the seed holds when an empty page would mislead ("users only, no stories"), and
 the duration and memory of any step that is not quick. Say what is needed and nothing
 else: the commands in order, the port and URL, the login,
 what takes long, how to stop it when that matters, and what cannot work.
 
+## Proof of a change
+
+A result reaches a person who did not watch the agent work. "Tests pass" tells them the
+code agrees with itself; it does not show them that the button is on the page. So the
+role of every agent that changes code asks for proof from the running application when
+the change can be observed there, and only then (the wording is in SKILL.md, "Roles").
+The setup's part is to make that possible and cheap:
+
+| The change shows in | The agent's proof | The setup provides |
+|---|---|---|
+| a page a browser renders | a screenshot of the state that shows it, attached to the result | the `playwright` connection for the agents that change code, Chromium's libraries in the Dockerfile, the browser in setup and its folder in `cache` (pitfalls.md, "The Playwright connection has no browser"); in `notes` the URL to open and the login |
+| an API or a webhook | the request and the part of the response that shows it, quoted in the result | `curl` or the language's client in the image; in `notes` how to get a token or session for a request |
+| a command line tool | the command and its output, quoted | in `notes` how the binary is built and called |
+| a background job, an email, a file written | the log line, the message in the mail catcher, the row or file, quoted | the service that catches it (a mailpit kind of service) and where to look, in `notes` |
+| nothing that runs (a refactor, a dependency update, tests, documentation, CI files) | the checks, and the result says so | nothing |
+
+- **A project with pages gets the browser by default.** It is stated as an assumption
+  (step 2), with its cost: the libraries in the image, a browser download in setup
+  (about half a minute) that the cache keeps, and Chromium's memory on top of the
+  application's. The developer can take it out; then the role asks for the HTML and the
+  API responses instead and `notes` say there is no browser.
+- **Where the files go.** An agent attaches files from the project directory. The
+  browser tool saves a screenshot there when it is given a file name; a file inside a
+  repository would be picked up by `git add`. The role says both in one sentence.
+- **What a good screenshot is**, for the role's wording: the state the ticket asked for,
+  after doing what the ticket describes (the dialog open, the row saved, the error
+  gone), not the landing page; one per thing shown, two when before and after matter.
+- **Data to look at.** A page that lists nothing proves little. When the seed is thin,
+  `notes` name the command that makes realistic data, or the agent creates the record
+  its change needs and says so.
+- **Not on every ticket.** Starting the application costs minutes and memory, so the
+  role names the changes that need no proof from it. An agent that cannot tell asks
+  itself whether the person could see the difference in the running application.
+- **When it cannot be shown**: the application did not start, the page needs a host that
+  is out of reach, the change shows only at a scale or on hardware a run does not have.
+  The result says which, and what was checked instead. It never claims a sight.
+
+The first real ticket that changes something visible is the test of all this: if its
+result arrives without a picture, read the agent's transcript for what stopped it (the
+browser, the login, the data) and fix that in the config.
+
 ## What cannot work, and what to say instead
 
-- **No browser**, unless the project gives its agents the `playwright` connection
-  (pitfalls.md). Without it a bug that exists only in the rendered page is checked
-  through the HTML and the API; `notes` say so.
+- **No browser**, when the project has no pages or the developer took the `playwright`
+  connection out. Then a bug that exists only in the rendered page is checked through
+  the HTML and the API; `notes` say so.
 - **Features that call hosts outside `network.allow`**: fetching a feed, a plugin
   catalogue, a metadata provider, a model download. Either the host goes on the list
   (ask the developer: it is where an agent's code may send data), or `notes` name the

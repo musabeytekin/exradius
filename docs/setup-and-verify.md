@@ -202,13 +202,13 @@ changing the other. The check does not cover the runtime bundle, providers or pu
 which only a real run exercises. Since skill 0.4.0 it stands in for the egress proxy
 (§2.7).
 
-### 2.5 Update mode
+### 2.5 An existing config
 
-With an `exradius.yaml` already present (in the folder or in `.exradius/`), the skill
-reads it, diffs the code against it (new services in compose, tool versions the lockfiles
-now need, new repositories, new secret names in env examples), proposes the edits, runs
-the check and pushes to the config repository's branch. Exradius reads the branch head
-on every run, so nothing else is needed.
+With an `exradius.yaml` already present (in the folder or in `.exradius/`), the work is
+the second skill's, `exradius-update` (§2.8). Until skill 0.6.0 this was a mode of
+`exradius-project`: it read the project again, diffed the code against the file, proposed
+the edits, ran the check and pushed. Exradius reads the branch head on every run, so a
+push is all an update needs.
 
 ### 2.6 Out of scope
 
@@ -257,3 +257,76 @@ leave the agent unable to add a dependency or run a test. What changed:
   missed again.
 - **Gone:** `--classic` and the classic-builder rules (v0.1.0), and the assumption that the
   cluster is `amd64`.
+
+### 2.8 Skill 0.6.0: the update skill
+
+Added 2026-11-14. A config describes the code as of the day it was written, and nothing
+in Exradius notices when the code moves away from it: Verify proves that the workspace
+can be prepared, not that the image has the Node version the lockfile now wants or that
+`notes` name a script that still exists. The update mode of §2.5 had no memory of what
+it had last looked at, so each update was a second setup. `exradius-update`
+(`skill/skills/exradius-update/`) replaces it:
+
+- **A baseline.** `check/reviewed.json` next to `exradius.yaml` holds, per repository,
+  the commit the config was last checked against, and the skill release that wrote it.
+  Both skills write it after a passing check (`changes.sh --record`: the newest commit
+  that is both in the checkout's HEAD and in the config's branch). Exradius does not read
+  the file, and it is outside the default build context (the Dockerfile's folder), so it
+  rebuilds nothing. Without it the baseline is estimated: the last commit of the code
+  before the config's own last commit; `--since` names another.
+- **A report, not a reread.** `scripts/changes.sh` (standard library, git only) compares
+  the baseline with the head of the config's branch (`origin/<branch>`) and lists only
+  what the config depends on, grouped by the part of the config: paths the config itself
+  names (setup, notes, roles, `check/start-app.sh`) that are gone or changed, tool
+  versions with old and new value, package managers and workspaces, registries, compose
+  services and images next to the config's own, env names, CI, scripts, the team's guide.
+  It prints names and versions and never the content of an env file or a registry
+  configuration. It imports the YAML reader and validator of `exradius_check.py`.
+- **The check first.** Before any edit the skill runs the local check on the old config
+  and the new code with the commands in `notes`: what fails is drift without argument,
+  what passes is left alone.
+- **A small diff, in both directions.** Stale lines are removed as well as new ones
+  added; comments, order and wording stay.
+- **Three sources.** The code (the report), Exradius and the skill (`--validate`, and
+  what a file written by an earlier release lacks), and the runs (what the developer
+  brings: a check an agent could not run, a refused host). The skill still never calls
+  the Exradius API.
+- **Publishing around keys.** Intake rejects a project's tasks while a referenced key is
+  missing from the store (config-repo.md §7), so a change that references a new key goes
+  out as a pull request and is merged after the admin added the key.
+
+`backend/tests/test_skill_changes.py` runs the report on local git repositories.
+
+### 2.9 Skill 0.7.0: proof from the running application
+
+Added 2026-11-14. Since 0.5.0 a setup is done only when the application starts in a run
+and `notes` say how, but the roles the skill wrote still ended at "say which checks ran".
+A result for a ticket such as "add an export button" could say that the tests passed
+without anyone, the agent included, having seen the button. What changed:
+
+- **The role asks for proof.** The role of every agent that changes code says: when the
+  change can be observed in the running application, start it as `notes` say, see the
+  change there, and put what was seen into the result (a screenshot for a page, the
+  request and response for an API, the command and output for a command line). It also
+  names what needs no such proof (a refactor, a dependency update, tests,
+  documentation), because every run pays for a start, and it forbids describing as seen
+  what was not seen. This is role text only: the operating rules (architecture.md §13)
+  already say "attach files that help", and the result's artifacts are the files an
+  agent names from its working directory (`runner/tools.py`).
+- **A browser by default where there are pages.** For an application with pages a
+  browser shows, the agents that change code get the catalog's `playwright` connection,
+  with Chromium's libraries in the workstation Dockerfile, the browser as a setup
+  command and `~/.cache/ms-playwright` in `workstation.cache`. Until now a connection
+  other than `github` or `gitlab` was written only when the developer asked; this one is
+  an assumption shown with its cost, which the developer can take out. The browser tool
+  saves a screenshot under a relative file name in the session's working directory,
+  which is where artifacts are read from; the role tells the agent to keep such files
+  out of the repositories.
+- **The check proves the browser.** `check/start-app.sh` ends with a screenshot taken by
+  the Playwright the catalog pins. Verify's "List tools" starts no browser, so this is
+  the only place it is tried before a task.
+- **The update skill** proposes the role's sentences, and the connection, for a config
+  written by an earlier release.
+
+Not changed: Exradius itself. Whether a result's artifacts reach the person is the
+bridge's business (integration-api.md).

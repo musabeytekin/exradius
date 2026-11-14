@@ -609,7 +609,10 @@ connections:
     catalog: playwright
 ```
 
-Give the connection to the agents that change what users see, and say in `notes` how to
-start the app and on which port, so the agent can open it on `localhost`. Prove it with
-the check's `--run`: start the app and take a screenshot with the same Playwright
+Add `~/.cache/ms-playwright` to `workstation.cache`, so only the first run downloads.
+Give the connection to the agents that change what users see: their role asks for a
+screenshot of a visible change with the result (running-the-app.md, "Proof of a
+change"). Say in `notes` how to start the app and on which port, so the agent can open
+it on `localhost`. Prove it with the check: at the end of `check/start-app.sh`, with the
+app up, take a screenshot with the same Playwright
 (`npx -y -p @playwright/mcp@0.0.83 playwright screenshot http://localhost:<port> /tmp/shot.png`).

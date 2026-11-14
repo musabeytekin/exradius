@@ -7,7 +7,11 @@ skill, passed first time. The files are brought up to this skill release: each d
 tickets an agent takes, and `model` is left to the install's default. The agents'
 identity email is replaced by `dev-bot@example.com`. They were written before this
 release asked `notes` to say how the application is started; for that part see
-running-the-app.md, whose two `notes` excerpts come from later projects.
+running-the-app.md, whose two `notes` excerpts come from later projects. The developer
+roles carry this release's sentence about proof from the running application, in the
+form for a project without a browser: none of the four has the `playwright` connection.
+A project with pages that is set up today gets it, and the screenshot wording of
+SKILL.md ("Roles").
 
 Read the one closest to the project at hand, not all four:
 
@@ -103,6 +107,15 @@ agents:
       Before you finish, run the tests of every service you touched (the notes say how)
       and say in your result which you ran and what they showed; if one cannot run here,
       say that rather than skipping it.
+      When the change can be seen in the running application (a page or an endpoint
+      answers differently), the tests are not the whole proof: start the service you changed as the notes
+      say, request the page or the endpoint the way the person who asked would use it,
+      and quote in your result the request and the part of the response that shows the
+      change (for a bug: what was wrong, now right). A change nothing in the running
+      application shows (a refactor, a dependency update, tests, documentation) needs
+      none of this: say that the checks are its proof. If you could not start the
+      application or reach your change in it, say what stopped you; never describe as
+      seen what you did not see.
       After pushing, open a pull request against the repository's main branch with the
       GitHub tool and link it in your result. Do not leave this to the reviewer.
   scout:
@@ -253,6 +266,15 @@ agents:
       Before you finish, run the tests that cover what you touched and `yarn lint`, and
       say in your result which you ran and what they showed; if one cannot run here, say
       that rather than skipping it.
+      When the change can be seen in the running application (a page or an endpoint
+      answers differently), the tests are not the whole proof: start the application as the notes
+      say, request the page or the endpoint the way the person who asked would use it,
+      and quote in your result the request and the part of the response that shows the
+      change (for a bug: what was wrong, now right). A change nothing in the running
+      application shows (a refactor, a dependency update, tests, documentation) needs
+      none of this: say that the checks are its proof. If you could not start the
+      application or reach your change in it, say what stopped you; never describe as
+      seen what you did not see.
       After pushing, open a pull request against the repository's main branch with the
       GitHub tool and link it in your result. Do not leave this to the reviewer.
   scout:
@@ -393,6 +415,15 @@ agents:
       Before you finish, run the tests and linters for what you touched (the notes say
       how, per repository) and say in your result which you ran and what they showed; if
       one cannot run here, say that rather than skipping it.
+      When the change can be seen in the running application (a page or an endpoint
+      answers differently), the tests are not the whole proof: start the API or the dashboard as the notes
+      say, request the page or the endpoint the way the person who asked would use it,
+      and quote in your result the request and the part of the response that shows the
+      change (for a bug: what was wrong, now right). A change nothing in the running
+      application shows (a refactor, a dependency update, tests, documentation) needs
+      none of this: say that the checks are its proof. If you could not start the
+      application or reach your change in it, say what stopped you; never describe as
+      seen what you did not see.
       After pushing, open a pull request against each changed repository's main branch
       with the GitHub tool and link them in your result. Do not leave this to the reviewer.
   scout:
@@ -607,9 +638,18 @@ agents:
       `makemigrations --check` when models changed); for the web apps and packages
       `check:format`, `check:lint`, `check:types` and the vitest tests of the affected
       packages. Say in your result which you ran and what they showed; if one cannot run
-      here, say that rather than skipping it. After pushing, open a pull request against
-      `preview` with the GitHub tool and link it in your result. Do not leave this to the
-      reviewer.
+      here, say that rather than skipping it.
+      When the change can be seen in the running application (a page or an endpoint
+      answers differently), the tests are not the whole proof: start the API or the web app as the notes
+      say, request the page or the endpoint the way the person who asked would use it,
+      and quote in your result the request and the part of the response that shows the
+      change (for a bug: what was wrong, now right). A change nothing in the running
+      application shows (a refactor, a dependency update, tests, documentation) needs
+      none of this: say that the checks are its proof. If you could not start the
+      application or reach your change in it, say what stopped you; never describe as
+      seen what you did not see.
+      After pushing, open a pull request against `preview` with the GitHub tool and link
+      it in your result. Do not leave this to the reviewer.
   scout:
     name: Scout
     role: |

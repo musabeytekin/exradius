@@ -234,8 +234,10 @@ version. A custom `npx` or `uvx` connection should too (`npx -y <package>@1.2.3`
 session runs the latest release with the connection's secrets, and Exradius warns.
 
 `playwright` gives the agent a headless Chromium to look at the app with (open a page,
-resize, click, take a screenshot and attach it). It brings no browser: the image and a
-setup command do, see "The Playwright connection has no browser" in `pitfalls.md`.
+resize, click, take a screenshot and attach it). A screenshot taken under a file name
+lands in the project directory, where the files an agent attaches to its result come
+from. It brings no browser: the image and a setup command do, see "The Playwright
+connection has no browser" in `pitfalls.md`.
 
 **Secrets.** `${secret:NAME}` (NAME of letters, digits, `_`, `.`, `-`) may appear only in
 string values under `repositories[].credential`, `services.*.env`, `env`, and
@@ -279,7 +281,8 @@ rules, a generated "your environment" section, then `role`.
   `notes` quoted as the maintainers' notes.
 - So `notes` and `role` carry only what neither of those says: `notes` what is true of
   the project for every agent (how to run the checks, where things are, what cannot run
-  here), `role` what this agent is for and when its work is done.
+  here), `role` what this agent is for, when its work is done and what it shows as
+  proof of a change.
 
 A task names the project and usually an agent. When it names none, Exradius picks one
 from each agent's `name`, `role` and the tools of its `connections` (as the last Verify

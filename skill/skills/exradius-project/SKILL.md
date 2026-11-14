@@ -1,8 +1,8 @@
 ---
 name: exradius-project
-description: Set up or update a project for Exradius, the self-hosted harness that runs AI agents on a team's code. Reads the code, writes the project's exradius.yaml (config version 1), a workstation Dockerfile when the stock image is not enough, and a README for the Exradius admin, proves locally with Docker that the setup and the project's own test commands work under a run's conditions, and creates the config repository. Use when someone wants to put a codebase on Exradius, write or fix an exradius.yaml, or understand why Verify or a task failed.
+description: Set up a project for Exradius, the self-hosted harness that runs AI agents on a team's code. Reads the code, writes the project's exradius.yaml (config version 1), a workstation Dockerfile when the stock image is not enough, and a README for the Exradius admin, proves locally with Docker that the setup and the project's own test commands work under a run's conditions, and creates the config repository. Use when someone wants to put a codebase on Exradius, write a first exradius.yaml, or understand why Verify or a task failed. For a project that already has a config and whose code has moved on, use exradius-update.
 argument-hint: "[code checkout paths or repository URLs; default: the current folder]"
-allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/check.sh *), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/check.sh *)
+allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/check.sh *), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/check.sh *), Bash(${CLAUDE_SKILL_DIR}/scripts/record.sh *), Bash(bash ${CLAUDE_SKILL_DIR}/scripts/record.sh *)
 ---
 
 # Set up an Exradius project
@@ -20,8 +20,9 @@ push and a Verify in the cluster.
 The file is good when an agent, on its first ticket, is where a new engineer is after a
 well-run first day: the tools are installed at the right versions, the dependencies are
 there, the services answer, it knows which command checks its work and that command
-works, it can start the application to reproduce a bug, and it knows how the team wants
-changes delivered. Everything below serves that. A file that only passes Verify is not
+works, it can start the application to reproduce a bug and to see its own change working,
+and it knows how the team wants changes delivered and what the person who asked wants to
+see with them. Everything below serves that. A file that only passes Verify is not
 done: Verify proves the workspace can be prepared, not that anyone can work in it. A file
 whose tests pass is not done either while the application cannot start.
 
@@ -40,7 +41,7 @@ each is needed.
 | `${CLAUDE_SKILL_DIR}/references/network.md` | before writing `network.allow`, and whenever a registry, a mirror or a proxy is involved |
 | `${CLAUDE_SKILL_DIR}/references/stacks.md` | before writing a Dockerfile: the rows of the project's languages and services |
 | `${CLAUDE_SKILL_DIR}/references/pitfalls.md` | its cache table ("Every run downloads all dependencies again") before writing `workstation.cache`; the section a symptom points at when a check step fails. Not the whole file |
-| `${CLAUDE_SKILL_DIR}/references/running-the-app.md` | before writing `services` and `notes`: what the application needs to start, and how to prove that it does |
+| `${CLAUDE_SKILL_DIR}/references/running-the-app.md` | before writing `services`, `notes` and the roles: what the application needs to start, how to prove that it does, and what an agent shows as proof of a change |
 | `${CLAUDE_SKILL_DIR}/references/examples.md` | the one example closest to the project's stack (its first table says which) |
 | `${CLAUDE_SKILL_DIR}/references/admin-readme.md` | when writing the README |
 | `${CLAUDE_SKILL_DIR}/references/verify-failures.md` | when the developer brings a failed Verify or task |
@@ -74,7 +75,9 @@ running daemon, git and Python 3.8 or later, and pulls one small image for its p
 ## Which situation
 
 - An `exradius.yaml` (or `.exradius/exradius.yaml`) exists in the current folder, in a
-  sibling `../exradius-*` folder, or where the developer points: **Update mode** below.
+  sibling `../exradius-*` folder, or where the developer points: the project is set up.
+  Load the `exradius-update` skill of this plugin and follow it instead of the steps
+  below (**An existing config** at the end).
 - The developer brings a failed Verify step, a failed task or a log: **A failed Verify or
   task** below.
 - Otherwise: a new project, steps 1 to 6.
@@ -123,7 +126,10 @@ project keeps it: `.github/workflows/`, `.gitlab-ci.yml`, `.circleci/`, `.forgej
 - **How the application is started in development** (running-the-app.md): the processes,
   the port, a request that proves it works, a login, the switch from the test settings to
   the development ones, and what it needs at start that no test needs (a queue or cache,
-  a program such as ffmpeg, data files the development image carries).
+  a program such as ffmpeg, data files the development image carries). And how a change
+  is seen in it: pages a browser shows (a web frontend, server-rendered pages, an admin
+  site), an API, a command line. The first decides whether the agents get a browser
+  (step 3, `connections`).
 - **The checks, as CI runs them.** For each repository or workspace: the commands that
   install, generate code, build what the checks need, test, lint, type-check and format,
   with the narrow form of each (one file, one package, one test name) and the flags that
@@ -200,6 +206,10 @@ developer can edit afterwards. State these as assumptions in the summary instead
 - the agent may reach the package registries setup used, so it can add dependencies;
 - what setup prepares for running the application, and what it leaves to `notes`
   because it is slow;
+- when the application has pages a browser shows: the agents that change code get the
+  `playwright` connection (a headless Chromium), so a change a user sees arrives with a
+  screenshot of it. It costs Chromium's libraries in the image, a browser download in
+  setup that the cache keeps, and the browser's memory;
 - the cluster's CPU architecture is unknown: the check ran for this machine's, and the
   README asks the admin (use `--platform` now if the developer knows it differs).
 
@@ -244,7 +254,8 @@ a boolean, a number-like version or a date, and every string with `${secret:...}
     `.venv` or build output.
 - **`resources.memory`**: the highest peak the check prints in its Memory line, plus the
   running application's peak (the agent keeps it up while it builds and tests; the check
-  measures each step alone), plus about 1 GB for the agent, rounded up to a whole
+  measures each step alone; with a browser, the start script's screenshot puts Chromium
+  into that peak), plus about 1 GB for the agent, rounded up to a whole
   number, and never below `4g`: the commands of a real ticket are wider than the ones
   measured. Before the first check, start from `4g` (`8g` for a large JavaScript
   monorepo) and correct it from the measurement. It is
@@ -269,10 +280,17 @@ a boolean, a number-like version or a date, and every string with `${secret:...}
   the lockfiles' download URLs and the check's `reached in setup` list, not from memory.
   Nothing "just in case".
 - **`connections`**: `github` (catalog) with the repository token when agents open pull
-  requests on GitHub, `gitlab` likewise on GitLab; nothing else unless the developer asks.
-  Every connection an agent lists is started by Verify: a stdio connection needs its
-  launcher (`npx`, `uvx`) in the workstation image.
-- **`agents`**: `developer` and `scout`, each listing only the connections it uses. Leave
+  requests on GitHub, `gitlab` likewise on GitLab. `playwright` (catalog) when the
+  application has pages a browser shows: the agent opens its change on `localhost` and
+  attaches a screenshot to its result. The connection brings no browser: Chromium's
+  libraries go into the workstation Dockerfile, the browser into a setup command and its
+  folder into `cache`, all three from "The Playwright connection has no browser" in
+  pitfalls.md. Nothing else unless the developer asks. Every connection an agent lists
+  is started by Verify: a stdio connection needs its launcher (`npx`, `uvx`) in the
+  workstation image.
+- **`agents`**: `developer` and `scout`, each listing only the connections it uses
+  (`playwright` for the agents that change code; `scout` needs it only when the team
+  wants questions about the pages answered from the running application). Leave
   `model`, `provider` and `identity` out unless the developer wants them.
 
 ### Notes
@@ -289,6 +307,9 @@ those. Write what a lead would tell a new engineer and what the file cannot say:
 - how to run the application, as step 4 proved it (running-the-app.md): the commands in
   order from `/work/<repo>`, the port and a URL that shows it is up, the login, what
   takes long, and how to stop it when it holds a port or database the tests use;
+- how a change is looked at there: with the browser tool on that URL when the agents
+  have one, otherwise through the HTML and the API, said in one sentence ("there is no
+  browser: check a page through its HTML");
 - what cannot run here and what the agent does instead ("the e2e suite needs a browser
   farm; run the unit tests and say so"; "feeds from other hosts cannot be fetched");
 - how the team delivers: the branch pull requests target, one pull request per
@@ -319,7 +340,8 @@ alone can answer, and to submit a result. A role adds, in this order:
 2. **when its work is done**: which checks it runs for what it touched (by name, as
    `notes` give them), and that the result says which ran and what they showed, or why
    one could not;
-3. **how it delivers**: after pushing, a pull request against the right branch, opened by
+3. **what it shows as proof**, for every agent that changes code (below);
+4. **how it delivers**: after pushing, a pull request against the right branch, opened by
    the agent with its GitHub or GitLab tool and linked in the result. With `push: false`
    this item is one sentence or nothing: Exradius's rules already make the agent attach
    a patch, and no `github` connection is needed for it.
@@ -328,11 +350,62 @@ Add a third agent only when the team has a kind of work with its own definition 
 or its own connections (a reviewer that only comments, a triager with the tracker's
 tools). Adapt the wording in examples.md; do not invent personas.
 
+**Proof from the running application.** The person who gets the result did not watch the
+agent work, and passing tests do not show them that the button is on the page. So the
+role of an agent that changes code tells it to see its change working where a user or a
+caller would, and to put what it saw into the result. Not on every ticket: the role says
+which need it, and the agent decides per ticket.
+
+- **Needed** when the ticket's effect can be observed in the running application: a page
+  that looks or behaves differently, an endpoint that answers differently, a command
+  that prints something else, a bug that was reported from the running application.
+- **Not needed** when nothing in the running application shows the change: a refactor, a
+  dependency update, tests, documentation, build or CI files. The checks are the proof
+  there, and the role says so, or agents start the application on every ticket and
+  every run pays for it.
+- **What counts**, by what the project is (running-the-app.md, "Proof of a change"): a
+  screenshot taken with the browser tool for what a user sees; the request and the
+  response for an API; the command and its output for a command line. For a bug, the
+  state that was wrong, now right. Files are attached to the result, each with a line
+  saying what it shows; they are saved in the project directory next to the
+  repositories, not inside one, so no commit picks them up.
+- **Honest when it fails**: an agent that could not start the application, or could not
+  reach its change in it, says what stopped it. It never describes as seen what it did
+  not see.
+
+The wording, for a project whose developer has the `playwright` connection:
+
+```yaml
+    role: |
+      ...
+      When the change can be seen in the running application (a page looks or behaves
+      differently, an endpoint answers differently), the tests are not the whole proof:
+      start the application as the notes say and look at your change there the way the
+      person who asked would. Open the page with the browser tool, do what the ticket
+      describes, and take a screenshot of the state that shows it works (for a bug: of
+      what was wrong, now right). Save each screenshot under a file name of its own in
+      the project directory, not inside a repository, so that no commit picks it up.
+      Attach the screenshots to your result and say in a line each what they show. For
+      an endpoint, quote the request and the response instead. A change nothing in the
+      running application shows (a refactor, a dependency update, tests, documentation)
+      needs none of this: say that the checks are its proof. If you could not start the
+      application or reach your change in it, say what stopped you; never describe as
+      seen what you did not see.
+```
+
+Without a browser the middle sentences become "Request the page or the endpoint, and
+quote in your result the request and the part of the response that shows the change";
+for a command line tool, "run the built command as a user would and quote the command
+and its output". Keep the first sentence, the exemption and the last sentence in every
+form. Name the project's own things where that helps ("the dashboard", "the storefront
+API"), and leave the commands to `notes`: a role that repeats them goes stale with them.
+
 ### The other files
 
 - **`docker/workstation.Dockerfile`** when the stock image is not enough: `FROM` the
   official Debian or Ubuntu image of the main language at the pinned version; `git bash`
-  and the system packages the tests and the application's start need; tool versions from
+  and the system packages the tests and the application's start need (and Chromium's
+  libraries for the `playwright` connection); tool versions from
   the repositories (corepack with the exact Yarn into `COREPACK_HOME=/opt/corepack`, uv
   copied from `ghcr.io/astral-sh/uv:<version>`, Python installed by uv into
   `/opt/uv/python` and linked as `python3`, a second runtime copied from its official
@@ -354,6 +427,9 @@ tools). Adapt the wording in examples.md; do not invent personas.
   bridge).
 - **`check/start-app.sh`**, the script that proved the application starts
   (running-the-app.md). Exradius does not read it; the next update reruns it.
+- **`check/reviewed.json`**, written by `record.sh` at the end of step 4: the commit of
+  each repository the config was checked against. Exradius does not read it; the
+  `exradius-update` skill compares the code from there.
 - Nothing else; do not add files the config does not use.
 
 ## 4. Check locally
@@ -384,7 +460,10 @@ peak memory of every step and the hosts that were reached and refused.
   `/bin/sh -c`; every one is run and reported even when an earlier one failed.
 - **Give it the start of the application** as `--run-file check/start-app.sh`
   (running-the-app.md). A passing step prints its last ten lines: they must show the
-  application answering, not only the script ending.
+  application answering, not only the script ending. With the `playwright` connection
+  the script ends with a screenshot of a page, taken by the Playwright the connection
+  pins: it proves that the browser the agent will use starts under the run's conditions
+  and reaches the application, which Verify does not.
 - **Prove a registry entry** with one command per package manager that downloads with an
   empty cache, since tests and linters download nothing: `npm view <package> version`,
   `uv lock --upgrade-package <package> --dry-run`, `cargo add --dry-run <crate>`,
@@ -439,6 +518,13 @@ peak memory of every step and the hosts that were reached and refused.
 A failure that is not in pitfalls.md is worth a sentence to the developer: it is the next
 project's pitfall.
 
+When the last check has passed, record the code it ran on and commit the file with the
+rest:
+
+```bash
+bash ${CLAUDE_SKILL_DIR}/scripts/record.sh --repo <name>=<path to checkout> [--repo ...] <config folder>
+```
+
 ## 5. Show, then publish
 
 Show the developer, briefly:
@@ -446,8 +532,11 @@ Show the developer, briefly:
 - what you found (the stack, the services, the checks) and where each came from;
 - the files, with a one-line reason per choice that is not obvious;
 - the check's result: the steps, each `--run` command and its outcome, how the
-  application was started and what it answered, the memory peak, the hosts on the
-  agent's list and why;
+  application was started and what it answered (and that the browser took its
+  screenshot, when there is one), the memory peak, the hosts on the agent's list and
+  why;
+- what the agents will show as proof of a change, in a sentence: screenshots, or
+  requests and responses because there is no browser;
 - every assumption from step 2, and anything that could not be verified.
 
 Ask for the go-ahead. Then:
@@ -476,40 +565,11 @@ End with a short message the developer can forward:
   address to allow, a pull secret, the bridge that claims the tracker's space;
 - that Verify runs by itself and should pass as the local check did, what the check did
   not cover, and that the first real ticket is the test of `notes` and the roles: when
-  an agent reports a check it could not run or a host it could not reach, that is an
-  update to this repository.
-
-## Update mode
-
-With an `exradius.yaml` already present:
-
-1. Read it and its Dockerfiles; run `check.sh --validate`.
-2. Compare it with the code as it is now: new services in compose or CI, tool versions
-   the lockfiles now need, new repositories, new secret names in the env examples, setup
-   and check commands that no longer match CI.
-3. Compare it with what Exradius offers now. A file written by an earlier release of this
-   skill may lack:
-   - `network.allow` (before 0.4.0): the agent then reaches no package registry. Propose
-     it from the registries in setup;
-   - `notes` that do not say how to run the application, and services or system
-     packages only its start needs (before 0.5.0): running-the-app.md;
-   - a test mode in `env` (`RAILS_ENV=test`), which a plain start then inherits;
-   - `notes` commands that were never run under a run's conditions: run them with `--run`;
-   - roles that open with the tickets the agent takes (routing reads them);
-   - `resources.memory` and `workstation.cache` (before 0.2.0), and a service `command`
-     in place of a service Dockerfile that only changes the command;
-   - repository URLs as `https://`.
-4. Propose the edits with a reason each, keeping everything else as it is (comments,
-   order, wording of roles and notes). An update is a small diff, not a rewrite.
-5. Run the check until it passes, with `--run` for the commands in `notes` and
-   `--run-file` for the application's start. A `.exradius-cache/` folder next to the
-   file is from an earlier release: the check still uses it when it is there; delete it
-   to use the new place.
-6. With the developer's go-ahead, commit and push to the config repository's branch (or
-   open a pull request when the branch is protected or the config lives in `.exradius/`).
-   Exradius reads the branch head on every run and reruns Verify on a new commit; nothing
-   else is needed. Update the README when keys, hosts or resources changed, and tell the
-   developer which new keys the admin must add to the store before the next run.
+  an agent reports a check it could not run or a host it could not reach, or a visible
+  change arrives without its proof, that is an update to this repository;
+- that the config describes the code as of today: after changes to tool versions,
+  services, package managers or CI, `/exradius:exradius-update` finds what the config
+  must follow and updates it.
 
 ## A failed Verify or task
 
@@ -522,4 +582,18 @@ With an `exradius.yaml` already present:
 3. Reproduce it with the check before changing anything, with `--run` when the failure
    was in a task rather than in Verify. A failure the check does not reproduce is in what
    the check does not cover: say which part, and what would confirm it.
-4. Fix, rerun, and continue as in Update mode from step 4.
+4. Fix with a small diff (keep comments, order and wording of what still holds), rerun
+   until the check passes, and publish as the `exradius-update` skill's step 6 says:
+   show the diff, push or open a pull request with the developer's go-ahead, and when
+   the fix references a new key, let the admin add it before the change reaches the
+   branch Exradius reads.
+
+## An existing config
+
+Bringing a config up to date with code that has moved on is the `exradius-update` skill
+of this plugin (`/exradius:exradius-update`): it compares each repository with the
+commit recorded in `check/reviewed.json`, lists what changed that the config depends on
+(tool versions, package managers, registries, services, env names, CI, the files the
+config names), checks the config against what this release offers, and edits it as a
+small diff with the same local check. Use this skill's steps on an existing config only
+when the developer asks to write it again from scratch.
