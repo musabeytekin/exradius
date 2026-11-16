@@ -43,12 +43,39 @@ docker run --env-file bridge.env -v "$PWD/app.pem:/run/secrets/app.pem:ro" -p 80
 | `GITHUB_WEBHOOK_SECRET` | The App's webhook secret |
 | `GITHUB_API_URL` | Default `https://api.github.com`; `https://<host>/api/v3` for GitHub Enterprise Server |
 | `EXRADIUS_BROKER_URL` | `amqp://...` |
+| `EXRADIUS_BROKER_USERNAME`, `EXRADIUS_BROKER_PASSWORD` | Optional: the broker's user, quoted into the URL (the Helm chart passes it this way) |
 | `EXRADIUS_API_URL` | Exradius's public API URL |
 | `EXRADIUS_INTEGRATION_TOKEN` | From the Exradius panel |
 | `PORT` | Webhook listener, default `8080` |
 
 At startup the bridge checks each of these and lists every problem it finds before it
 exits.
+
+## On Kubernetes, with the Exradius chart
+
+The chart in `charts/exradius` runs the bridge beside the stack (values `github`). Build the
+image `exradius-github` with the others (`make -C deploy/kind images`), make the bridge's
+Secret in the release's namespace, then turn it on:
+
+```bash
+kubectl -n exradius create secret generic exradius-github \
+  --from-file=private-key=app.pem \
+  --from-literal=webhook-secret='<the App's webhook secret>' \
+  --from-literal=integration-token='<a token for the bridge github>'
+```
+
+```yaml
+github:
+  enabled: true
+  appId: "123456"
+  ingress:
+    enabled: true
+    className: traefik
+    host: exradius.example.com
+```
+
+The Ingress routes only `/webhooks/github`, so the App's webhook URL is
+`https://exradius.example.com/webhooks/github`. The broker and the API come from the chart.
 
 ## Development
 

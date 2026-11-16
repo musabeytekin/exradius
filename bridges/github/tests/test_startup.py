@@ -41,6 +41,11 @@ def test_settings(tmp_path, keys):
     settings = Settings.from_env(env)
     assert settings.github_host == "github.com" and settings.exradius_api_url == "https://exradius.acme.test"
     assert Settings.from_env(env | {"GITHUB_API_URL": "https://ghe.acme.test/api/v3"}).github_host == "ghe.acme.test"
+    assert settings.exradius_broker_url == "amqp://rabbitmq"
+    # The chart hands the broker's user over apart from the URL; it is quoted into it.
+    chart = env | {"EXRADIUS_BROKER_URL": "amqp://rabbitmq.exradius.svc:5672/",
+                   "EXRADIUS_BROKER_USERNAME": "default_user_x", "EXRADIUS_BROKER_PASSWORD": "p@ss/w:rd"}
+    assert Settings.from_env(chart).exradius_broker_url == "amqp://default_user_x:p%40ss%2Fw%3Ard@rabbitmq.exradius.svc:5672"
 
     with pytest.raises(SettingsError) as caught:
         Settings.from_env({"GITHUB_APP_ID": "my-app", "GITHUB_PRIVATE_KEY": "not a key", "PORT": "x"})

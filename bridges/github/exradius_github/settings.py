@@ -6,7 +6,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 
 class SettingsError(Exception):
@@ -15,6 +15,20 @@ class SettingsError(Exception):
     def __init__(self, problems: list[str]):
         self.problems = problems
         super().__init__("; ".join(problems))
+
+
+def broker_url(url: str, username: str, password: str) -> str:
+    """The broker's user, URL-quoted into the URL, as the Helm chart hands it over."""
+    if not url or not username:
+        return url
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    userinfo = quote(username, safe="") + (f":{quote(password, safe='')}" if password else "")
+    return urlunsplit((parts.scheme, f"{userinfo}@{host}", parts.path, parts.query, parts.fragment))
 
 
 def host_of(api_url: str) -> str:
@@ -92,7 +106,11 @@ class Settings:
             github_private_key=key,
             github_webhook_secret=text("GITHUB_WEBHOOK_SECRET"),
             github_api_url=url("GITHUB_API_URL", ("https://", "http://"), "https://api.github.com"),
-            exradius_broker_url=url("EXRADIUS_BROKER_URL", ("amqp://", "amqps://")),
+            exradius_broker_url=broker_url(
+                url("EXRADIUS_BROKER_URL", ("amqp://", "amqps://")),
+                env.get("EXRADIUS_BROKER_USERNAME", "").strip(),
+                env.get("EXRADIUS_BROKER_PASSWORD", ""),
+            ),
             exradius_api_url=url("EXRADIUS_API_URL", ("https://", "http://")),
             exradius_integration_token=text("EXRADIUS_INTEGRATION_TOKEN"),
             port=port,

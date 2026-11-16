@@ -1,0 +1,147 @@
+{{- /* The GitHub issues bridge (bridges/github/docs/design.md): one replica, no database (its
+state rides in its own issue comments), Secrets by reference only. It reaches the api's port
+8000 for the integration API (networkpolicies.yaml), the broker, and GitHub's API. Its Ingress
+routes only /webhooks/github, the one path GitHub must reach from the internet. */ -}}
+{{- if .Values.github.enabled }}
+{{- $gh := .Values.github -}}
+{{- if not $gh.appId }}{{ fail "github.appId is required with github.enabled" }}{{ end -}}
+{{- if not $gh.existingSecret }}{{ fail "github.existingSecret is required with github.enabled" }}{{ end -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exradius-github
+  labels:
+    {{- include "exradius.componentLabels" (list . "github") | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exradius-github
+  labels:
+    {{- include "exradius.componentLabels" (list . "github") | nindent 4 }}
+spec:
+  # One replica: two would both consume the bridge's event queue and race on comments.
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      {{- include "exradius.selector" (list . "github") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "exradius.componentLabels" (list . "github") | nindent 8 }}
+    spec:
+      serviceAccountName: exradius-github
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- include "exradius.stackPlacement" . | nindent 6 }}
+      securityContext:
+        {{- include "exradius.podSecurity" (list 10001 10001) | nindent 8 }}
+      containers:
+        - name: github
+          image: {{ include "exradius.image" (list . .Values.images.github) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - name: GITHUB_APP_ID
+              value: {{ $gh.appId | quote }}
+            - name: GITHUB_PRIVATE_KEY_FILE
+              value: /run/secrets/github/private-key.pem
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef: {name: {{ $gh.existingSecret }}, key: {{ $gh.webhookSecretKey }}}
+            - name: GITHUB_API_URL
+              value: {{ $gh.apiUrl | quote }}
+            - name: EXRADIUS_BROKER_URL
+              value: {{ include "exradius.brokerUrl" . | quote }}
+            {{- with include "exradius.brokerSecret" . }}
+            - name: EXRADIUS_BROKER_USERNAME
+              valueFrom:
+                secretKeyRef: {name: {{ . }}, key: {{ $.Values.broker.usernameKey }}}
+            - name: EXRADIUS_BROKER_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ . }}, key: {{ $.Values.broker.passwordKey }}}
+            {{- end }}
+            - name: EXRADIUS_API_URL
+              value: http://{{ include "exradius.serviceHost" (list . "exradius-api") }}:8000
+            - name: EXRADIUS_INTEGRATION_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ $gh.existingSecret }}, key: {{ $gh.integrationTokenKey }}}
+            - name: PORT
+              value: "8080"
+          ports:
+            - {name: http, containerPort: 8080}
+          # The listener starts once the startup checks have passed (GitHub, the directory,
+          # the broker); until then the bridge lists every problem in its log and exits.
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          {{- with $gh.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "exradius.containerSecurity" true | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: private-key, mountPath: /run/secrets/github, readOnly: true}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+        - name: private-key
+          secret:
+            secretName: {{ $gh.existingSecret }}
+            items:
+              - {key: {{ $gh.privateKeyKey }}, path: private-key.pem}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exradius-github
+  labels:
+    {{- include "exradius.componentLabels" (list . "github") | nindent 4 }}
+spec:
+  selector:
+    {{- include "exradius.selector" (list . "github") | nindent 4 }}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+{{- with $gh.ingress }}
+{{- if .enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: exradius-github
+  labels:
+    {{- include "exradius.componentLabels" (list $ "github") | nindent 4 }}
+  {{- with .annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - {{- with .host }}
+      host: {{ . | quote }}
+      {{- end }}
+      http:
+        paths:
+          - path: /webhooks/github
+            pathType: Exact
+            backend:
+              service:
+                name: exradius-github
+                port: {name: http}
+{{- end }}
+{{- end }}
+{{- end }}
