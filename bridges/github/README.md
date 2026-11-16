@@ -1,89 +1,75 @@
 # exradius-github
 
 Connects GitHub issues to one [Exradius](https://github.com/musabeytekin/exradius)
-installation. Add an agent label such as `agent: Developer` to an issue, and the bridge
-sends it to Exradius as a task. The agent's questions come back as comments, a Quote reply
-answers them, and the result is posted as a comment before the label is removed. Adding the
-label again runs the agent again.
+installation through a bot account. Assign an issue to the bot as you would to a colleague:
+Exradius picks the agent, the bot says which agent took it, the agent's questions come back
+as the bot's comments, a comment that mentions the bot answers them, and the result is
+posted before the issue is assigned back to its author. Assigning it again runs it again.
 
-The design, and the reasons behind it, are in [docs/design.md](docs/design.md).
+The design is in [docs/design.md](docs/design.md). It is built on the bridge kit
+([../kit](../kit)), like the Jira bridge.
 
 ## What it needs
 
-On GitHub, a GitHub App installed on the org or the repos that use agents:
+On GitHub:
 
-- repository permissions: Issues (read and write) and Metadata (read);
-- events: Issues and Issue comment;
-- webhook URL `<bridge URL>/webhooks/github`, with a secret;
-- a private key, downloaded from the App's settings.
+- a bot account, a collaborator on the repositories that use it (or an organization
+  member with write access to them);
+- a classic personal access token of the bot account with `repo` (`public_repo` if every
+  repository is public);
+- a webhook on each repository (or one on the organization): URL
+  `<bridge URL>/webhooks/github`, content type `application/json`, a secret, events
+  *Issues* and *Issue comments*.
 
 In Exradius:
 
-- an integration token (Settings, Integrations);
-- the broker URL;
-- the repositories in each project's `exradius.yaml`. The bridge works only in repos that a
-  runnable project lists, and keeps one `agent: …` label there per agent of that project.
+- an integration token for the bridge `github` (Settings, Integrations);
+- in each project's config repository, `bridges/github.yaml` naming its repositories:
 
-The bridge has no config file. Making it reachable from GitHub, and Exradius from the
-bridge, is up to the installation.
-
-## Running it
-
-```bash
-docker build -t exradius-github .
-docker run --env-file bridge.env -v "$PWD/app.pem:/run/secrets/app.pem:ro" -p 8080:8080 exradius-github
-```
-
-`bridge.env` holds:
-
-| Variable | Meaning |
-|---|---|
-| `GITHUB_APP_ID` | The App's id |
-| `GITHUB_PRIVATE_KEY_FILE` | `/run/secrets/app.pem`, or put the PEM text in `GITHUB_PRIVATE_KEY` instead |
-| `GITHUB_WEBHOOK_SECRET` | The App's webhook secret |
-| `GITHUB_API_URL` | Default `https://api.github.com`; `https://<host>/api/v3` for GitHub Enterprise Server |
-| `EXRADIUS_BROKER_URL` | `amqp://...` |
-| `EXRADIUS_BROKER_USERNAME`, `EXRADIUS_BROKER_PASSWORD` | Optional: the broker's user, quoted into the URL (the Helm chart passes it this way) |
-| `EXRADIUS_API_URL` | Exradius's public API URL |
-| `EXRADIUS_INTEGRATION_TOKEN` | From the Exradius panel |
-| `PORT` | Webhook listener, default `8080` |
-
-At startup the bridge checks each of these and lists every problem it finds before it
-exits.
+  ```yaml
+  repositories: [acme/plane]
+  ```
 
 ## On Kubernetes, with the Exradius chart
 
-The chart in `charts/exradius` runs the bridge beside the stack (values `github`). Build the
-image `exradius-github` with the others (`make -C deploy/kind images`), make the bridge's
-Secret in the release's namespace, then turn it on:
+The chart in `charts/exradius` runs the bridge beside the stack (values `github`). Build
+the image `exradius-github` with the others (`make -C deploy/kind images`), make the
+bridge's Secret in the release's namespace, then turn it on:
 
 ```bash
 kubectl -n exradius create secret generic exradius-github \
-  --from-file=private-key=app.pem \
-  --from-literal=webhook-secret='<the App's webhook secret>' \
+  --from-literal=bot-token='<the bot account token>' \
+  --from-literal=webhook-secret='<the webhook secret>' \
   --from-literal=integration-token='<a token for the bridge github>'
 ```
 
 ```yaml
 github:
   enabled: true
-  appId: "123456"
   ingress:
     enabled: true
     className: traefik
     host: exradius.example.com
 ```
 
-The Ingress routes only `/webhooks/github`, so the App's webhook URL is
+The Ingress routes only `/webhooks/github`, so the webhook URL is
 `https://exradius.example.com/webhooks/github`. The broker and the API come from the chart.
+
+## Running it alone
+
+```bash
+docker build --build-context kit=../kit -t exradius-github .
+docker run --env-file bridge.env -p 8080:8080 exradius-github
+```
+
+`bridge.env` holds `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `EXRADIUS_BROKER_URL`,
+`EXRADIUS_API_URL` and `EXRADIUS_INTEGRATION_TOKEN`, and optionally `GITHUB_API_URL`
+(`https://<host>/api/v3` for GitHub Enterprise Server), `MAX_ATTACHMENT_MB` and `PORT`
+(design §7). At startup the bridge lists every problem it finds before it exits.
 
 ## Development
 
 ```bash
 uv sync
 uv run pytest
-EXRADIUS_GITHUB_TEST_BROKER_URL=amqp://guest:guest@localhost:5673/ uv run pytest tests/test_broker.py
 ```
-
-The tests run against an in-memory GitHub and broker. `tests/test_broker.py` needs a
-throwaway RabbitMQ, because it declares the bridge's queue and publishes tasks.

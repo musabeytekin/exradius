@@ -284,8 +284,8 @@ information exists nowhere else.
 **Bridges and the skill.** `bridges/` holds the integration layer that Exradius itself
 leaves outside its core: `kit/` (the bridge kit library: directory fetch, routing hand-off,
 task publishing, events, bridge status, over the integration API and the broker),
-`jira/` (Jira Cloud on the kit), `github/` (GitHub issues; written before the kit and
-agent routing, so it still uses agent labels) and `desk/` (Exradius Desk, the first-party
+`jira/` (Jira Cloud on the kit), `github/` (GitHub issues on the kit: issues assigned to a
+bot account, a repository webhook, the chart's optional `github` component) and `desk/` (Exradius Desk, the first-party
 task system: OIDC sign-in, projects from `bridges/desk.yaml` groups, tasks assigned to people
 or to Exradius, @mentions, its own Postgres and React frontend, the chart's optional `desk`
 component). Bridges stop a run with the public cancel on `exradius.cancels`

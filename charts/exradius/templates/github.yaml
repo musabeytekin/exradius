@@ -1,10 +1,10 @@
-{{- /* The GitHub issues bridge (bridges/github/docs/design.md): one replica, no database (its
-state rides in its own issue comments), Secrets by reference only. It reaches the api's port
-8000 for the integration API (networkpolicies.yaml), the broker, and GitHub's API. Its Ingress
-routes only /webhooks/github, the one path GitHub must reach from the internet. */ -}}
+{{- /* The GitHub issues bridge (bridges/github/docs/design.md): a bot account people assign
+issues to. One replica, no database (its state rides in its own issue comments), Secrets by
+reference only. It reaches the api's port 8000 for the integration API (networkpolicies.yaml),
+the broker, and GitHub's API. Its Ingress routes only /webhooks/github, the one path GitHub
+must reach from the internet. */ -}}
 {{- if .Values.github.enabled }}
 {{- $gh := .Values.github -}}
-{{- if not $gh.appId }}{{ fail "github.appId is required with github.enabled" }}{{ end -}}
 {{- if not $gh.existingSecret }}{{ fail "github.existingSecret is required with github.enabled" }}{{ end -}}
 apiVersion: v1
 kind: ServiceAccount
@@ -43,10 +43,9 @@ spec:
           image: {{ include "exradius.image" (list . .Values.images.github) }}
           imagePullPolicy: {{ .Values.images.pullPolicy }}
           env:
-            - name: GITHUB_APP_ID
-              value: {{ $gh.appId | quote }}
-            - name: GITHUB_PRIVATE_KEY_FILE
-              value: /run/secrets/github/private-key.pem
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ $gh.existingSecret }}, key: {{ $gh.botTokenKey }}}
             - name: GITHUB_WEBHOOK_SECRET
               valueFrom:
                 secretKeyRef: {name: {{ $gh.existingSecret }}, key: {{ $gh.webhookSecretKey }}}
@@ -67,12 +66,14 @@ spec:
             - name: EXRADIUS_INTEGRATION_TOKEN
               valueFrom:
                 secretKeyRef: {name: {{ $gh.existingSecret }}, key: {{ $gh.integrationTokenKey }}}
+            - name: MAX_ATTACHMENT_MB
+              value: {{ $gh.maxAttachmentMb | quote }}
             - name: PORT
               value: "8080"
           ports:
             - {name: http, containerPort: 8080}
           # The listener starts once the startup checks have passed (GitHub, the directory,
-          # the broker); until then the bridge lists every problem in its log and exits.
+          # the broker); until then the bridge says what is wrong in its log and exits.
           readinessProbe:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 5
@@ -88,15 +89,9 @@ spec:
             {{- include "exradius.containerSecurity" true | nindent 12 }}
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
-            - {name: private-key, mountPath: /run/secrets/github, readOnly: true}
       volumes:
         - name: tmp
           emptyDir: {sizeLimit: 64Mi}
-        - name: private-key
-          secret:
-            secretName: {{ $gh.existingSecret }}
-            items:
-              - {key: {{ $gh.privateKeyKey }}, path: private-key.pem}
 ---
 apiVersion: v1
 kind: Service

@@ -1,231 +1,116 @@
 # exradius-github design
 
-Status: agreed 2026-11-08. Internal design note. It follows the Jira bridge
-(`exradius-jira/docs/design.md`) wherever GitHub allows, and says where it differs. The
-Exradius side it relies on is `docs/integration-api.md` in the Exradius repository.
+Status: agreed 2026-11-16. Internal design note. Replaces the first GitHub bridge (a GitHub
+App started by agent labels, 2026-11-08), which predated the bridge kit and agent routing.
+Built on `exradius-bridge-kit` (`bridges/kit/docs/design.md`, cited below as "kit §n") the
+way the Jira bridge is (`bridges/jira/docs/design.md`); the Exradius side is
+`docs/integration-api.md` and `docs/agent-routing.md`.
 
 ## 1. What it is
 
-A service that connects GitHub issues to one Exradius installation:
-- someone adds an agent label to an issue;
-- the bridge sends the issue to Exradius as a task;
-- it posts the agent's questions as comments and passes Quote replies back as answers;
-- it posts the result, then removes the label.
+A service that connects GitHub issues to one Exradius installation. People **assign an
+issue to the bot account**, as they would to a colleague, and that is all they do: Exradius
+picks the agent, the bot says which agent took it, asks the agent's questions in comments,
+posts the result and assigns the issue back to its author.
 
-It speaks only Exradius's public contract (the broker and the integration API) and imports
-nothing from Exradius.
+The kit owns the flow (kit §6). This bridge is the GitHub half: the tracker interface
+(kit §4) over GitHub's REST API, GitHub's webhooks, and GitHub-flavoured Markdown.
 
-Not in v1:
-- **Pull requests.** Only issues; labels on pull requests are ignored.
-- **Cancel.** Exradius has no public cancel.
-- **Status moves.** GitHub Projects automation can react to labels and comments.
-- **Downloading images and files from issue bodies.** GitHub has no attachments API: files
-  in an issue are links in its Markdown, and the agent gets them as links (§4).
-- **More than one GitHub host per bridge, or more than one bridge instance.**
+Not in v1, as in Jira: cancel, a mention after the run ended starting a follow-up run,
+pull requests (assigning a pull request to the bot does nothing), GitHub Apps.
 
 ## 2. What it needs on GitHub
 
-- **A GitHub App** registered by the company and installed on the org (or the repos) that
-  use agents.
-  - Repository permissions: Issues read and write (covers comments and labels), Metadata read.
-  - Events: Issues, Issue comment.
-  - Webhook URL `<bridge public URL>/webhooks/github`, with a secret.
+- **One bot account**, an ordinary GitHub user the company names (GitHub's terms allow
+  one free machine account per person). It is a collaborator on the repositories that use
+  it, or a member of the organization with write access to them: GitHub only lets people
+  assign issues to accounts with access, and the bot comments and reassigns.
+- **Its token**: a classic personal access token with `repo` (`public_repo` when every
+  repository is public). Fine-grained tokens cannot reach a personal account's repository
+  where the bot is only a collaborator. The token never leaves the bridge.
+- **A webhook** on each repository, or one on the organization: URL
+  `<bridge public URL>/webhooks/github`, content type `application/json`, a secret, events
+  *Issues* and *Issue comments*. GitHub signs each delivery
+  (`X-Hub-Signature-256: sha256=<HMAC of the body>`).
 
-  The app's private key, app id and webhook secret go to the bridge. The app comments as
-  `<slug>[bot]` and takes no seat.
-- **Why an App and not a user account.** An App cannot be assigned an issue or be
-  @mentioned. So a label starts a task (§3.1), and a Quote reply answers a question (§3.2).
-- **Which repos.** Exradius's directory lists each project's repositories. The bridge works
-  only in repos that are on this GitHub host, belong to a runnable project and have the App
-  installed. Issues anywhere else are ignored.
+Why not a GitHub App: an App can be neither assigned nor @mentioned, and people hand work
+to a colleague by assigning it. The bot account is that colleague.
 
-Making the bridge reachable from GitHub, and Exradius from the bridge, is the installer's
-job.
+## 3. Which project: `bridges/github.yaml`
 
-## 3. Flow
+Each Exradius project that takes GitHub work says so in its config repository
+(config-repo.md §2.1):
 
-### 3.1 Agent labels and starting a task
+```yaml
+repositories: [acme/plane]
+```
 
-**Labels.** In each repo in scope, the bridge keeps one label per agent of the repo's
-project:
-- **Name.** `agent: Developer`. If the repo belongs to several projects, the name includes
-  the project: `agent: Plane · Developer`. Names that clash get the slug, as in Jira, and
-  are cut to GitHub's 50 characters.
-- **Description.** `Exradius plane/developer`. This is how the bridge recognises its own
-  labels and maps a label back to its slugs. Labels without such a description are never
-  touched.
-- **Removed and non-runnable agents.** Labels for agents that were removed, or for projects
-  that are not runnable, are deleted. GitHub labels cannot be disabled, and a label that
-  could only be rejected should not be offered.
+- `repositories`: `owner/name`, at least one, no repeats, compared without case. It is the
+  only key in v1; unknown keys are errors.
+- An issue's scope (kit §3) is its repository. One GitHub host per bridge
+  (`GITHUB_API_URL`), so the file names no host.
 
-**Adding an agent label starts a task** (the `issues` webhook, action `labeled`):
-- **A run is already active on the issue:** the bot comments "**Plane · Developer** is still
-  working on this." and removes the label that was just added.
-- **The label maps to an agent that is no longer in the directory:** the bot says so and
-  removes the label.
-- **Otherwise:**
-  1. The bot posts "**Plane · Developer** is working on this." That comment holds the run's
-     state (§5).
-  2. The bridge publishes the task (§4).
-  3. If publishing fails, the comment is edited to say the task could not start, and the
-     label is removed.
+## 4. The tracker
 
-The person who added the label is recorded as the requester. Questions and results mention
-them.
-
-### 3.2 Questions and answers
-
-On `task.info_request`, the bot comments:
-
-> **Plane · Developer** asks @requester:
->
-> *question*
->
-> *context, if any*
->
-> Use Quote reply on this comment to answer.
-
-**A comment that quotes the question is the answer.** GitHub's Quote reply prefixes the
-quoted text with `>`. The bridge compares the comment's quoted lines with the lines of the
-question comment, ignoring Markdown emphasis, spacing and case. A quoted line of at least
-eight characters that appears in the question is enough, so quoting only part of the
-question works too. The answer is the comment with its quoted lines removed.
-
-Only the first such comment after the question counts. Comments without a quote, and
-comments by the App, are ignored. Edits are ignored in v1.
-
-### 3.3 Results
-
-On `task.result`, the bot posts one comment:
-
-| State | Comment |
+| Kit | GitHub |
 |---|---|
-| `completed` | "**Plane · Developer** finished. @requester", then the summary and the warnings. |
-| `failed` | "**Plane · Developer** could not finish: *error*. @requester", then the summary. |
-| `cancelled` | "**Plane · Developer** was stopped. @requester" |
+| `bridge`, `instance` | `"github"`, `https://github.com` (or the Enterprise Server's root) |
+| `ItemRef` | `id` = `owner/name#12` (lower case), `key` = `name-12`: task ids `plane-12`, `plane-12-2` |
+| `start()` | `GET /user` with the token gives the bot's login, which identifies assignments, mentions and the bot's own comments. A `401` or `403` is a `TrackerProblem`. |
+| `item()` | `GET /repos/{repo}/issues/{n}` and its comments. `details`: repository, number, state, labels, assignees, milestone, created. A `404` or `410` is `ItemGone`. |
+| `post()` | `POST .../comments`, the kit's message as Markdown; a mention is `@login`. |
+| `attach()` | GitHub issues have no attachments API. A text file is held and put into the next comment (the result's) as a `<details>` block, up to 50,000 characters in all; anything else fails and the kit names it as not attached. |
+| `hand_back()` | Only if the bot is still an assignee: add the issue's author (GitHub leaves out, silently, an author who cannot be assigned), then remove the bot. |
+| `load_state()`, `save_state()` | §5. |
+| `assigned_to_bot()` | `GET /issues?filter=assigned&state=open`, pull requests left out: the startup reconcile. |
+| `replies()` | Comments after `since`, not by the bot, that mention `@<bot>` (read through the API, never trusted from the webhook). The mention and the lines a Quote reply copies (`> ...`) are taken out. |
 
-A `task.status` with state `rejected` is reported the same way ("could not start"), except
-for duplicate ids (§4).
-
-**Artifacts.** GitHub has no API to attach files to an issue. So text artifacts (Markdown,
-plain text, patches, diffs, JSON, YAML, logs) of up to 60 000 characters each are inlined in
-collapsed `<details>` blocks, while the comment stays under GitHub's 65 536-character limit.
-Any other artifact is listed by name as not attached. The transcript link is not posted.
-
-After a result or a rejection the bridge **removes the agent label**, so adding it again
-reruns. Assignees are left alone.
-
-## 4. The task message
-
-| Field | From GitHub |
-|---|---|
-| `task_id` | `<repo>-<number>` for the first run (`plane-123`), then `plane-123-2`, `-3`. It is a valid branch-name prefix, which `owner/repo#123` is not. |
-| `project`, `agent` | From the label's description, checked against the directory and the issue's repository. |
-| `instructions` | The title, a blank line, then the body. Both are Markdown already. |
-| `context` | `issue`: repository, number, url, author, state, labels other than agent labels, created. `comments`: every comment's author, time and body, without the bridge's state markers. |
-| `attachments` | None. Images and files stay links in the body. |
-| `correlation` | `{"github": {"host": "github.com", "repository": "acme/plane", "issue": 123, "installation": 456}}` |
-
-**Duplicate ids** are handled as in Jira. A rejection whose reason starts with
-`duplicate task_id` bumps the run counter and republishes, up to five times. The start
-comment is edited, not reposted.
+Files people put in an issue are links in its Markdown (GitHub uploads them for the
+editor); the agent sees the links. `Item.attachments` is always empty.
 
 ## 5. State
 
-GitHub issues have no hidden properties. **The run's state rides in the bot's own comments**
-as a hidden HTML comment, base64-encoded JSON:
-`<!-- exradius-github:eyJydW5zIjoxLC4uLn0= -->`.
+GitHub issues have no hidden properties, so the kit's state (kit §8) rides in the bot's
+own comments as an HTML comment that never renders:
+`<!-- exradius:<base64 JSON> -->` at the end of the body.
 
-```json
-{
-  "runs": 1,
-  "task_id": "plane-123",
-  "project": "plane",
-  "agent": "developer",
-  "label": "Plane · Developer",
-  "agent_label": "agent: Developer",
-  "requester": "octocat",
-  "state": "waiting",
-  "request_id": "a7c1...",
-  "retries": 0
-}
-```
+- **Load**: the bot's latest comment that carries one.
+- **Save**: edit the bot's latest comment on the issue, replacing its marker. When the bot
+  has not commented there yet (the kit saves `starting` before publishing a task), it posts
+  "Exradius is picking an agent for this." with the marker, which is also what people see
+  until the agent's start comment.
+- People cannot write the state: only the bot's comments are read, and people cannot edit
+  them (repository admins aside).
 
-- **Current state.** The issue's state is the marker in the bot's latest comment that has
-  one. Each step that posts a comment (start, question, result) carries the new state.
-- **Steps that post nothing** (an answer passed on, a duplicate-id retry) edit the marker in
-  that latest comment.
-- **Not visible.** The marker never shows on GitHub, and Quote reply never copies it.
-- **No database.** The bridge keeps no database. A per-issue in-process lock serialises
-  webhook and event handlers for the same issue.
+## 6. Webhooks
 
-## 6. Events, webhooks, startup
+- The signature is checked first; a bad one is `401`. `X-GitHub-Delivery` is remembered
+  (the last 4,096), so a redelivery is not acted on twice. `ping` answers `pong`.
+- `issues` with `assigned` and `assignee` the bot: `handed_over`. Opening an issue with the
+  bot as an assignee sends `assigned` too, so `opened` is not used.
+- `issue_comment` with `created`, not by the bot: `commented`.
+- Deliveries for pull requests are ignored.
 
-**Events.**
-- The bridge consumes the durable queue `exradius-github.events`, bound to `task.*` and
-  `directory.changed`.
-- It ignores task events whose `correlation.github.host` is not its own host.
-- Events are handled one at a time, and a failing one is retried once, then dropped.
-- `directory_changed`: fetch the directory and sync the labels.
-
-**Webhooks.**
-- Each delivery's `X-Hub-Signature-256` (`sha256=` HMAC of the raw body) is verified, and
-  repeats are dropped by `X-GitHub-Delivery`.
-- The bridge answers `200` at once and handles the delivery in the background.
-- What it acts on:
-  - `issues`, action `labeled`, with one of its labels: start a task (§3.1);
-  - `issue_comment`, action `created`, not by the App: check for an answer (§3.2);
-  - `installation` and `installation_repositories`: sync the labels, because the repos in
-    scope changed.
-
-**Startup.**
-1. Read the environment (§7).
-2. Sign in as the App (a JWT from the private key). `GET /app` gives the slug, and from it
-   the bot's login.
-3. Fetch the directory, connect to the broker, and declare the queue.
-4. Sync the labels in every repo in scope.
-5. Reconcile, for every agent label in every repo in scope: list the open issues that carry
-   it. An issue with no active run had its label added while the bridge was down, and
-   starts. An issue that is waiting gets its comments checked for an answer.
-6. Consume events and serve webhooks.
-
-The bridge stops at any failure and lists every problem.
-
-**Installation tokens** are fetched per installation and renewed five minutes before they
-expire, after an hour.
-
-## 7. Configuration
-
-The bridge takes only environment variables; there is no config file.
+## 7. Settings
 
 | Variable | Meaning |
 |---|---|
-| `GITHUB_APP_ID` | The App's id. |
-| `GITHUB_PRIVATE_KEY_FILE` or `GITHUB_PRIVATE_KEY` | The App's private key, as a file path or as the PEM text. |
-| `GITHUB_WEBHOOK_SECRET` | The App's webhook secret. |
-| `GITHUB_API_URL` | Default `https://api.github.com`; `https://<host>/api/v3` for GitHub Enterprise Server. The host that repository URLs are matched against is derived from it. |
-| `EXRADIUS_BROKER_URL`, `EXRADIUS_API_URL`, `EXRADIUS_INTEGRATION_TOKEN` | As for the Jira bridge. |
-| `PORT` | Webhook listener, default `8080`. |
+| `GITHUB_TOKEN` | The bot account's token (§2) |
+| `GITHUB_WEBHOOK_SECRET` | The webhooks' secret |
+| `GITHUB_API_URL` | Default `https://api.github.com`; `https://<host>/api/v3` for Enterprise Server |
+| `EXRADIUS_BROKER_URL`, `EXRADIUS_API_URL`, `EXRADIUS_INTEGRATION_TOKEN`, `MAX_ATTACHMENT_MB` | The kit's (kit §10) |
+| `EXRADIUS_BROKER_USERNAME`, `EXRADIUS_BROKER_PASSWORD` | Optional: the broker's user, quoted into the URL (how the Helm chart passes it) |
+| `PORT` | Default `8080` |
 
-## 8. Layout and tests
+Every problem is listed at once before the bridge exits.
 
-Python 3.14 with uv, aio-pika, httpx, pydantic, PyJWT with cryptography, Starlette and
-uvicorn. It ships as one Docker image.
+## 8. Package and tests
 
-```
-exradius_github/
-  main.py       startup, wiring
-  settings.py   environment
-  github.py     App auth (JWT, installation tokens) and the REST calls used
-  exradius.py   broker and directory client (a copy of exradius-jira's, plus repositories)
-  repos.py      repository URLs from the directory, mapped to GitHub repos
-  labels.py     agent labels: names, sync, mapping back
-  state.py      the hidden state marker
-  replies.py    Quote reply detection
-  flow.py       start, questions, answers, results
-  webhooks.py   signature, repeats, dispatch
-```
+Python 3.14, `exradius_github/`: `github.py` (the REST client), `tracker.py`,
+`webhooks.py`, `config.py`, `settings.py`, `main.py`. The image builds with the kit as a
+named build context, like the Jira bridge's. The Helm chart runs it as the optional
+`github` component (values `github`), with an Ingress for `/webhooks/github` only.
 
-Tests run against a fake GitHub (httpx `MockTransport`, with real JWT checks against a test
-key) and a fake broker. A live trial on a real repo, against a local Exradius, is run
-together with the user.
+Tests run against an in-memory GitHub (`tests/fakes.py`: tokens, collaborators, issues,
+comments, pagination) and the kit's fake broker and Exradius: the tracker's calls, the
+state markers, replies and mentions, webhooks, and the flow from assignment to result.

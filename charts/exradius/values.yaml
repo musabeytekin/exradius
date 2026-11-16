@@ -414,22 +414,23 @@ desk:
     annotations: {}
     tls: []
 
-# The GitHub issues bridge (bridges/github): an agent label on an issue starts a task, the
-# agent's questions come back as comments, a Quote reply answers them. It needs a GitHub App
-# (bridges/github/README.md) whose webhook URL is <the Ingress's public address>/webhooks/github.
+# The GitHub issues bridge (bridges/github): people assign an issue to a bot account, Exradius
+# picks the agent, the agent's questions come back as the bot's comments, and a comment that
+# mentions the bot answers them. It needs the bot account and a repository or organization
+# webhook whose URL is <the Ingress's public address>/webhooks/github (bridges/github/README.md).
 github:
   enabled: false
-  # The App's numeric id.
-  appId: ""
   # https://<host>/api/v3 for GitHub Enterprise Server.
   apiUrl: https://api.github.com
-  # One Secret with the App's private key (the PEM file), its webhook secret, and an
-  # integration token for the bridge github (panel: Settings, Integrations). The bridge
-  # stops with a clear message until every key is there.
+  # One Secret with the bot account's token, the webhook's secret, and an integration token
+  # for the bridge github (panel: Settings, Integrations). The bridge stops with a clear
+  # message until every key is there.
   existingSecret: exradius-github
-  privateKeyKey: private-key
+  botTokenKey: bot-token
   webhookSecretKey: webhook-secret
   integrationTokenKey: integration-token
+  # Files of an issue's reply, in MB (they travel inline in the answer message).
+  maxAttachmentMb: 10
   resources: {}
   # Routes only /webhooks/github to the bridge. GitHub must reach that path from the
   # internet: host is the name GitHub calls (and the tunnel or load balancer in front of the

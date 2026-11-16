@@ -326,9 +326,9 @@ Bridges connect trackers to Exradius:
 | Bridge | What it does |
 |---|---|
 | [`bridges/jira`](bridges/jira) | Assigning an issue to the bot account starts a task. Questions and results arrive as comments; mention the bot to answer. |
-| [`bridges/github`](bridges/github) | A GitHub App that starts tasks from issue labels and answers in comments. |
+| [`bridges/github`](bridges/github) | GitHub issues assigned to a bot account become tasks; questions and results are the bot's comments. |
 | [`bridges/desk`](bridges/desk) | Exradius Desk: a small task system. Tasks are assigned to people or to Exradius, which starts a run; the agent's questions and results are comments. |
-| [`bridges/kit`](bridges/kit) | The library the bridges build on (the GitHub bridge not yet), for writing a bridge for another tracker. |
+| [`bridges/kit`](bridges/kit) | The library the bridges build on, for writing a bridge for another tracker. |
 
 Bridges use only the public contracts in
 [docs/integration-api.md](docs/integration-api.md). They run as separate containers.
@@ -437,7 +437,6 @@ Known limits:
   A DNS policy is designed but not built.
 - **Scope.** Each installation serves one organization with a single admin user. Claude
   Code is the only agent runtime.
-- **Bridges.** The GitHub bridge predates the bridge kit and agent routing.
 - **Measurement.** Usage and cost are not yet recorded per run, and there is no graded
   evaluation on real upstream bugs yet.
 

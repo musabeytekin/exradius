@@ -18,7 +18,7 @@ tracker's webhooks say (§5).
 
 It is **only a library**: no service, no image, no command line. Each bridge is its own
 repository and image and depends on the kit. The first is the Jira bridge
-(`exradius-jira`); the GitHub bridge moves onto the kit later.
+(`exradius-jira`); the GitHub bridge (`exradius-github`) followed on 2026-11-16.
 
 Like every bridge, the kit speaks only Exradius's public contract and imports nothing from
 Exradius:
@@ -293,8 +293,6 @@ Against `FakeTracker`, `FakeBroker` and `FakeExradius` (httpx `MockTransport`):
 
 ## 13. Later
 
-- The GitHub bridge on the kit (an issue's repository is its scope; state in a hidden
-  comment or the issue's metadata).
 - A mention of the bot after a run ended starting a follow-up run.
 - Cancel in the flow (in Jira, unassigning the bot). Exradius has a public cancel since
   2026-11-14 (integration-api.md §10), and `Broker.publish_cancel` sends it; the flow does

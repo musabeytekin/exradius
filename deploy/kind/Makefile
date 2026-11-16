@@ -71,7 +71,7 @@ images:
 	  -t $(REGISTRY)/exradius-runtime-claude-code:$(TAG) $(ROOT)
 	docker build -f $(ROOT)/deploy/project-default.Dockerfile -t $(REGISTRY)/exradius-project-default:$(TAG) $(ROOT)/deploy
 	docker build --build-context kit=$(ROOT)/bridges/kit -t $(REGISTRY)/exradius-desk:$(TAG) $(ROOT)/bridges/desk
-	docker build -t $(REGISTRY)/exradius-github:$(TAG) $(ROOT)/bridges/github
+	docker build --build-context kit=$(ROOT)/bridges/kit -t $(REGISTRY)/exradius-github:$(TAG) $(ROOT)/bridges/github
 	for image in backend frontend operator egress builder runtime-claude-code project-default desk github; do \
 	  docker push -q $(REGISTRY)/exradius-$$image:$(TAG) || exit 1; \
 	done
