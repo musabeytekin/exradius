@@ -27,7 +27,7 @@ from exradius_bridge_kit.flow import Flow
 from exradius_bridge_kit.projects import Problem, Projects
 from exradius_bridge_kit.settings import KitSettings
 from exradius_bridge_kit.status import HEARTBEAT, StatusReporter  # noqa: F401 - HEARTBEAT kept for importers
-from exradius_bridge_kit.tracker import ItemRef, Tracker, TrackerProblem
+from exradius_bridge_kit.tracker import ItemRef, Reply, Tracker, TrackerProblem
 
 log = logging.getLogger(__name__)
 
@@ -93,9 +93,16 @@ class Kit:
         """The item was assigned to the bot (or created assigned). Returns at once."""
         self._spawn(self._locked(ref, "hand-over", self.flow.handed_over))
 
-    async def commented(self, ref: ItemRef) -> None:
-        """A comment was written on the item. Returns at once."""
-        self._spawn(self._locked(ref, "comment", self.flow.commented))
+    async def commented(self, ref: ItemRef, *, follow_up: bool = True) -> None:
+        """A comment was written on the item. Returns at once. With ``follow_up=False`` it
+        can only answer a waiting question, never start a run (design §6.4)."""
+        self._spawn(self._locked(ref, "comment", lambda r: self.flow.commented(r, follow_up=follow_up)))
+
+    async def requested(self, ref: ItemRef, request: Reply, intro: str) -> None:
+        """The tracker asks for a run on the item, for its own reason (a review that requested
+        changes, ...): ``intro`` says why, ``request`` is what was asked (design §6.5).
+        Returns at once."""
+        self._spawn(self._locked(ref, "request", lambda r: self.flow.requested(r, request, intro)))
 
     async def idle(self) -> None:
         """Wait until every queued hand-over and comment is handled (tests, shutdown)."""

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from exradius_bridge_kit.testing import FakeBroker, FakeExradius, make_kit, project_entry
 
 from exradius_github.github import GitHub
+from exradius_github.store import Store
 from exradius_github.tracker import GitHubTracker
 from tests.fakes import API, FakeGitHub
 
@@ -22,9 +25,17 @@ def fake():
 
 
 @pytest.fixture
-async def tracker(fake):
+async def store(tmp_path):
+    store = Store(tmp_path / "data" / "bridge.db", timedelta(days=30))
+    await store.open()
+    yield store
+    await store.close()
+
+
+@pytest.fixture
+async def tracker(fake, store):
     client = GitHub(API, BOT_TOKEN, transport=fake.transport())
-    tracker = GitHubTracker(client, "https://github.com")
+    tracker = GitHubTracker(client, "https://github.com", store=store)
     await tracker.start()
     yield tracker
     await client.aclose()

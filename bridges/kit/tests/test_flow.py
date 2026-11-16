@@ -317,6 +317,27 @@ async def test_a_mention_after_the_run_starts_a_follow_up(kit, tracker, broker):
     assert tracker.items[ref.id].handed_back == 1
 
 
+async def test_a_tracker_request_starts_a_run_and_answer_only_comments(kit, tracker, broker):
+    from exradius_bridge_kit import Person, Reply
+
+    ref = tracker.add("PLANE-24", assigned=False, title="Fix the estimate route")
+    request = Reply(author=Person("u1", "Mehmet"), created=None, body="Rename `foo`.")
+    await kit.requested(ref, request, "Changes requested on pull request #7 by Mehmet")
+    await kit.idle()
+    [task] = broker.tasks
+    assert task["task_id"] == "PLANE-24"
+    assert task["instructions"] == ("Fix the estimate route\n\nThe estimate endpoint returns 404.\n\n"
+                                    "Changes requested on pull request #7 by Mehmet:\n\nRename `foo`.")
+    await kit.requested(ref, request, "again")  # while it runs: said once, nothing more
+    await kit.idle()
+    assert len(broker.tasks) == 1 and tracker.texts(ref)[-1] == "This is still being worked on."
+    await finish(kit, broker, ref, "PLANE-24")
+    tracker.comment(ref, "@bot one more thing")
+    await kit.commented(ref, follow_up=False)  # answers only: no follow-up run
+    await kit.idle()
+    assert len(broker.tasks) == 1
+
+
 async def test_without_a_run_a_mention_starts_nothing(kit, tracker, broker):
     ref = tracker.add("PLANE-21", assigned=False)
     tracker.comment(ref, "@bot have a look?")

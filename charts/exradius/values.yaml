@@ -434,6 +434,13 @@ github:
   integrationTokenKey: integration-token
   # Files of an issue's reply, in MB (they travel inline in the answer message).
   maxAttachmentMb: 10
+  # The bridge's own SQLite database: the tasks it published and the pull requests traced to
+  # them, so a review that requests changes reaches the right task. Rows live ttlDays,
+  # renewed when used.
+  database:
+    size: 1Gi
+    storageClass: ""
+    ttlDays: 30
   resources: {}
   # Routes only /webhooks/github to the bridge. GitHub must reach that path from the
   # internet: host is the name GitHub calls (and the tunnel or load balancer in front of the

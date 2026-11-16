@@ -199,6 +199,20 @@ handed over again:
 - The first run of an item still starts only by handing it over: a mention on an item that
   never ran starts nothing.
 
+### 6.5 Requests from the tracker
+
+Added 2026-11-16 for the GitHub bridge's pull request reviews.
+
+- `await kit.requested(ref, request, intro)`: the tracker asks for a run on an item for a
+  reason of its own (a review that requested changes). No hand-over and no mention are
+  needed. As in §6.1, an active run is told "still working" once, and a scope no single
+  project claims is said so. Otherwise the run starts with `instructions` = title, body,
+  then `intro` and the request's Markdown; the request's attachments go with the item's,
+  each once.
+- `await kit.commented(ref, follow_up=False)`: the comment can answer a waiting question but
+  never starts a follow-up (§6.4), for items where only the tracker's own requests start
+  runs.
+
 ## 7. The task message
 
 | Field | Value |

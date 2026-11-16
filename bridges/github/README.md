@@ -11,6 +11,11 @@ GitHub issues take no attachments through the API, so text files a run produced 
 result comment, and anything else (screenshots, binaries) is committed to a branch of the
 repository, `exradius-artifacts`, and shown from there (design §4.1).
 
+When someone requests changes in a review of a pull request the agent opened, the agent
+picks it up on the same branch, and that run talks on the pull request, not the issue. The
+bridge keeps which task opened which pull request in its own SQLite database, on a volume,
+each row for 30 days after its last use (design §10, §11).
+
 The design is in [docs/design.md](docs/design.md). It is built on the bridge kit
 ([../kit](../kit)), like the Jira bridge.
 
@@ -24,7 +29,7 @@ On GitHub:
   repository is public);
 - a webhook on each repository (or one on the organization): URL
   `<bridge URL>/webhooks/github`, content type `application/json`, a secret, events
-  *Issues* and *Issue comments*.
+  *Issues*, *Issue comments*, *Pull requests* and *Pull request reviews*.
 
 In Exradius:
 
@@ -70,7 +75,8 @@ docker run --env-file bridge.env -p 8080:8080 exradius-github
 `bridge.env` holds `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `EXRADIUS_BROKER_URL`,
 `EXRADIUS_API_URL` and `EXRADIUS_INTEGRATION_TOKEN`, and optionally `GITHUB_API_URL`
 (`https://<host>/api/v3` for GitHub Enterprise Server), `GITHUB_ARTIFACTS_BRANCH`,
-`MAX_ATTACHMENT_MB` and `PORT` (design §7). At startup the bridge lists every problem it finds before it exits.
+`GITHUB_DB_PATH` (default `/data/exradius-github.db`; mount a volume at `/data`),
+`GITHUB_DB_TTL_DAYS`, `MAX_ATTACHMENT_MB` and `PORT` (design §7). At startup the bridge lists every problem it finds before it exits.
 
 ## Development
 

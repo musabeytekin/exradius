@@ -15,7 +15,9 @@ RUN uv sync --frozen --no-dev --no-install-project --no-editable
 COPY exradius_github ./exradius_github
 RUN uv sync --frozen --no-dev --no-editable
 
-RUN useradd --system --uid 10001 bridge
+RUN useradd --system --uid 10001 bridge && mkdir /data && chown bridge /data
+# The bridge's database (GITHUB_DB_PATH, design §10); the Helm chart mounts a volume here.
+VOLUME /data
 USER bridge
 ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8080

@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from exradius_github.config import GitHubConfig
 from exradius_github.settings import Settings, web_url
-from exradius_github.tracker import decode_state, ref_for
+from exradius_github.tracker import decode_state, ref_for, ref_for_pull_request
 from exradius_github.webhooks import Webhooks, make_app, signature_ok
 from tests.conftest import REPO
 
@@ -31,14 +31,15 @@ def signed(payload: dict) -> tuple[bytes, dict[str, str]]:
 
 @pytest.fixture
 async def post(kit, tracker):
-    app = make_app(Webhooks(SECRET, kit, tracker))
+    webhooks = Webhooks(SECRET, kit, tracker)
+    app = make_app(webhooks)
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://bridge")
 
     async def _post(event_name: str, payload: dict, *, delivery: str | None = None, headers: dict | None = None) -> int:
         body, signature = signed(payload)
         extra = {"X-GitHub-Event": event_name} | ({"X-GitHub-Delivery": delivery} if delivery else {})
         response = await client.post("/webhooks/github", content=body, headers={**signature, **extra, **(headers or {})})
-        await kit.idle()
+        await webhooks.idle()
         return response.status_code
 
     yield _post
@@ -177,6 +178,103 @@ async def test_assign_ask_answer_finish(post, fake, broker, exradius):
     assert [t["task_id"] for t in broker.tasks] == ["plane-10", "plane-10-2", "plane-10-3"]
 
 
+def opened(fake, key) -> dict:
+    return {"action": "opened", "pull_request": fake.pull_payload(key), "repository": {"full_name": key[0]}}
+
+
+def review(fake, key, reviewer: str, state: str, review_id: int = 77, body: str = "") -> dict:
+    return {"action": "submitted", "pull_request": {"number": key[1]}, "repository": {"full_name": key[0]},
+            "review": {"id": review_id, "state": state, "body": body, "user": {"login": reviewer},
+                       "submitted_at": "2026-11-17T10:00:00Z"}}
+
+
+def pr_comment(key, author: str) -> dict:
+    return {"action": "created", "issue": {"number": key[1], "pull_request": {}},
+            "comment": {"id": 2, "user": {"login": author}}, "repository": {"full_name": key[0]}}
+
+
+async def test_requested_changes_run_on_the_pull_request(post, fake, broker, store):
+    issue = fake.add_issue(REPO, 30, "Rename the estimate route", author=fake.ayse, assignees=(fake.bot,))
+    assert await post("issues", assigned(REPO, 30, fake.bot)) == 200
+    assert [t["task_id"] for t in broker.tasks] == ["plane-30"]
+    assert [t.task_id for t in await store.tasks_in(REPO)] == ["plane-30"]
+
+    # The agent opened a pull request from a branch named after its task: traced and kept.
+    pr = fake.add_pull_request(REPO, 31, "Rename the estimate route", author=fake.ayse, branch="plane-30-rename",
+                               body="Renames it.")
+    assert await post("pull_request", opened(fake, pr)) == 200
+    row = await store.pull_request(REPO, 31)
+    assert (row.task_id, row.item_id, row.head_branch) == ("plane-30", "acme/plane#30", "plane-30-rename")
+    other = fake.add_pull_request(REPO, 32, "Someone else's", author=fake.mehmet, branch="feature/x")
+    assert await post("pull_request", opened(fake, other)) == 200
+    assert await store.pull_request(REPO, 32) is None
+
+    # Approvals and plain comments do not start anything; only requested changes do.
+    assert await post("pull_request_review", review(fake, pr, fake.mehmet, "approved")) == 200
+    assert await post("pull_request_review", review(fake, pr, fake.mehmet, "commented")) == 200
+    assert await post("pull_request_review", review(fake, other, fake.mehmet, "changes_requested")) == 200
+    assert len(broker.tasks) == 1
+    fake.review_comments[77] = [{"path": "src/routes.ts", "line": 12, "body": "Keep the old name as an alias."},
+                                {"path": "README.md", "original_line": 3, "body": "Mention it here."}]
+    assert await post("pull_request_review", review(fake, pr, fake.mehmet, "CHANGES_REQUESTED",
+                                                    body="Close, two things.")) == 200
+    run = broker.tasks[-1]
+    assert run["task_id"] == "plane-pr-31"
+    assert run["correlation"]["item"] == {"id": "acme/plane#31", "key": "plane-pr-31"}
+    assert run["instructions"] == (
+        "Rename the estimate route\n\nRenames it.\n\n"
+        "mehmet requested changes on pull request #31 (branch `plane-30-rename`), which task plane-30 opened for "
+        "plane-30. Continue on branch `plane-30-rename`: commit there and push it, so the pull request updates; "
+        "do not open another pull request:\n\n"
+        "Close, two things.\n\nComments on the code:\n\n"
+        "- `src/routes.ts` line 12: Keep the old name as an alias.\n\n- `README.md` line 3: Mention it here.")
+    details = run["context"]["item"]
+    assert details["pull_request"] == {"branch": "plane-30-rename", "base": "main", "state": "open",
+                                       "task": "plane-30", "issue": "acme/plane#30"}
+    assert (await store.pull_request(REPO, 31)).reviewer == "mehmet"
+
+    # Everything about the review run is on the pull request; the issue hears nothing.
+    before = list(fake.bodies(issue))
+    item = ref_for_pull_request(REPO, 31)
+
+    def deliver(kind: str, payload: dict):
+        return broker.deliver(event(kind, item, "plane-pr-31", payload, agent="developer", bridge="github",
+                                    instance=INSTANCE))
+
+    await deliver("status", {"state": "queued", "previous": None, "reason": None, "routing": {"method": "named"}})
+    await deliver("info_request", {"request_id": "q-9", "question": "Keep the alias for how long?"})
+    assert texts(fake, pr)[-1].startswith("**Developer** asks @mehmet:")  # the reviewer, not the PR's author
+    fake.add_comment(pr, fake.mehmet, "@exradius-bot until the next release")
+    assert await post("issue_comment", pr_comment(pr, fake.mehmet)) == 200
+    [answer] = broker.answers
+    assert (answer["task_id"], answer["answer"]) == ("plane-pr-31", "until the next release")
+    await deliver("result", {"state": "completed", "summary": "Pushed the alias to plane-30-rename."})
+    assert texts(fake, pr)[-1].startswith("**Developer** finished.")
+    assert fake.bodies(issue) == before
+
+    # After it, a mention on the pull request starts nothing: only requested changes do.
+    fake.add_comment(pr, fake.mehmet, "@exradius-bot thanks, and one more thing")
+    assert await post("issue_comment", pr_comment(pr, fake.mehmet)) == 200
+    assert [t["task_id"] for t in broker.tasks] == ["plane-30", "plane-pr-31"]
+    # A second round of requested changes is the pull request's second run.
+    fake.review_comments[78] = []
+    assert await post("pull_request_review", review(fake, pr, fake.ayse, "changes_requested", 78, "Also X.")) == 200
+    assert broker.tasks[-1]["task_id"] == "plane-pr-31-2"
+
+
+async def test_a_review_finds_a_pull_request_the_bridge_missed_opening(post, fake, broker, store):
+    fake.add_issue(REPO, 40, "x", author=fake.ayse, assignees=(fake.bot,))
+    assert await post("issues", assigned(REPO, 40, fake.bot)) == 200
+    pr = fake.add_pull_request(REPO, 41, "x", author=fake.ayse, branch="plane-40")
+    fork = fake.add_pull_request(REPO, 42, "x", author=fake.ayse, branch="plane-40-copy", head_repo="evil/plane")
+    fake.review_comments[1] = []
+    assert await post("pull_request_review", review(fake, fork, fake.mehmet, "changes_requested", 1)) == 200
+    assert len(broker.tasks) == 1  # a fork's branch is not the bridge's
+    assert await post("pull_request_review", review(fake, pr, fake.mehmet, "changes_requested", 1)) == 200
+    assert broker.tasks[-1]["task_id"] == "plane-pr-41"
+    assert (await store.pull_request(REPO, 41)).task_id == "plane-40"
+
+
 async def test_an_unclaimed_repository_is_told_and_handed_back(post, fake, broker):
     other = "acme/ops"
     fake.collaborators[other] |= {fake.bot, fake.ayse}
@@ -240,6 +338,10 @@ def test_settings():
     assert Settings.from_env(chart).kit.broker_url == "amqp://user_x:p%40ss%2Fw%3Ard@rabbitmq:5672/"
     assert web_url("https://ghe.acme.test/api/v3") == "https://ghe.acme.test"
     assert settings.artifacts_branch == "exradius-artifacts"
+    assert (settings.db_path, settings.db_ttl_days) == ("/data/exradius-github.db", 30)
+    assert Settings.from_env(env | {"GITHUB_DB_TTL_DAYS": "7"}).db_ttl_days == 7
+    with pytest.raises(SettingsError, match="GITHUB_DB_TTL_DAYS must be a positive number"):
+        Settings.from_env(env | {"GITHUB_DB_TTL_DAYS": "0"})
     assert Settings.from_env(env | {"GITHUB_ARTIFACTS_BRANCH": "bot/files"}).artifacts_branch == "bot/files"
     with pytest.raises(SettingsError, match="GITHUB_ARTIFACTS_BRANCH is not a branch name"):
         Settings.from_env(env | {"GITHUB_ARTIFACTS_BRANCH": "a..b"})

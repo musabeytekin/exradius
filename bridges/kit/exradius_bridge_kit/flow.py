@@ -105,14 +105,37 @@ class Flow:
             return
         await self._start(item, state, resolution.project)
 
-    async def commented(self, ref: ItemRef) -> None:
+    async def commented(self, ref: ItemRef, *, follow_up: bool = True) -> None:
         state = await self._load(ref)
         if state.state == "waiting" and state.request_id:
             replies = await self.tracker.replies(ref, state.asked_at)
             if replies:
                 await self._answer(ref, state, replies[0])
-        elif state.state == "ended":
+        elif state.state == "ended" and follow_up:
             await self._follow_up(ref, state)
+
+    async def requested(self, ref: ItemRef, request: Reply, intro: str) -> None:
+        """A run the tracker asks for (§6.5): no hand-over, no mention needed."""
+        try:
+            item = await self.tracker.item(ref)
+        except ItemGone:
+            return
+        state = await self._load(ref)
+        if state.running:
+            if not state.told_still_working:
+                await self.tracker.post(ref, texts.still_working(state.label))
+                state.told_still_working = True
+                await self._save(ref, state)
+            return
+        resolution = self.projects.resolve(item.scope)
+        if resolution.project is None:
+            if resolution.claimants:
+                await self.tracker.post(ref, texts.claimed_twice(item.scope, list(resolution.claimants),
+                                                                 self.tracker.bridge))
+            else:
+                await self.tracker.post(ref, texts.unclaimed(item.scope))
+            return
+        await self._start(item, state, resolution.project, follow_up=request, intro=intro)
 
     async def _follow_up(self, ref: ItemRef, state: ItemState) -> None:
         """A mention of the bot after a run ended starts the next run (§6.4); the first run
@@ -139,7 +162,10 @@ class Flow:
             state.ended_at = None  # told once; a later mention needs a newer comment
             await self._save(ref, state)
             return
-        await self._start(item, state, resolution.project, follow_up=replies[-1])
+        reply = replies[-1]
+        who = f" from {reply.author.name}" if reply.author else ""
+        await self._start(item, state, resolution.project, follow_up=reply,
+                          intro=f"Follow-up{who}, after the earlier run on this item")
 
     async def reconcile(self, ref: ItemRef) -> None:
         """Catch up on an item assigned to the bot while the bridge was down (§10)."""
@@ -150,7 +176,7 @@ class Flow:
             await self.handed_over(ref)
 
     async def _start(self, item: Item, state: ItemState, project: str, *, retry: bool = False,
-                     follow_up: Reply | None = None) -> None:
+                     follow_up: Reply | None = None, intro: str = "") -> None:
         previous = state.model_copy()
         state.runs += 1
         state.task_id = task_id_for(item.ref.key, state.runs)
@@ -163,7 +189,7 @@ class Flow:
         state.ended_at = None
         if not retry:
             state.retries = 0
-        message = await self._task_message(item, state.task_id, project, follow_up)
+        message = await self._task_message(item, state.task_id, project, follow_up, intro)
         # The state goes on the item first: Exradius's events for this task id may come
         # back at once, and they are matched against it.
         await self._save(item.ref, state)
@@ -175,8 +201,11 @@ class Flow:
         log.info("published %s for project %s", state.task_id, project)
 
     async def _task_message(self, item: Item, task_id: str, project: str,
-                            follow_up: Reply | None = None) -> dict[str, Any]:
-        attachments, skipped = await self._attachments(item.attachments)
+                            follow_up: Reply | None = None, intro: str = "") -> dict[str, Any]:
+        # The request's files, when the item does not list them already (a reply's usually are).
+        known = {a.id for a in item.attachments}
+        extra = [a for a in (follow_up.attachments if follow_up is not None else ()) if a.id not in known]
+        attachments, skipped = await self._attachments(item.attachments + extra)
         context: dict[str, Any] = {"item": {
             "key": item.ref.key,
             "url": item.url,
@@ -193,10 +222,9 @@ class Flow:
         body = item.body.strip()
         instructions = title + (f"\n\n{body}" if body else "")
         if follow_up is not None:
-            # The request is the newest mention; the item and the earlier runs' comments
-            # are what it follows up on.
-            who = f" from {follow_up.author.name}" if follow_up.author else ""
-            instructions += f"\n\nFollow-up{who}, after the earlier run on this item:\n\n{follow_up.body.strip()}"
+            # The request (a newer mention, a review, ...) comes last; the item and the
+            # earlier runs' comments are what it follows up on.
+            instructions += f"\n\n{intro or 'Follow-up'}:\n\n{follow_up.body.strip()}"
             context["follow_up"] = {
                 **({"author": follow_up.author.name} if follow_up.author else {}),
                 "created": _iso(follow_up.created),

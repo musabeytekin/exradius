@@ -130,6 +130,12 @@ class GitHub:
     async def issue(self, repo: str, number: int, *, full: bool = False) -> dict:
         return await self._json("GET", f"/repos/{repo}/issues/{number}", headers=FULL if full else None)
 
+    async def pull_request(self, repo: str, number: int) -> dict:
+        return await self._json("GET", f"/repos/{repo}/pulls/{number}")
+
+    async def review_comments(self, repo: str, number: int, review_id: int) -> list[dict]:
+        return await self._pages(f"/repos/{repo}/pulls/{number}/reviews/{review_id}/comments")
+
     async def assigned(self) -> list[dict]:
         """Open issues and pull requests assigned to the authenticated user, in every
         repository it can see."""

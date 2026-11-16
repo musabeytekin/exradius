@@ -6,6 +6,24 @@ must reach from the internet. */ -}}
 {{- if .Values.github.enabled }}
 {{- $gh := .Values.github -}}
 {{- if not $gh.existingSecret }}{{ fail "github.existingSecret is required with github.enabled" }}{{ end -}}
+# The bridge's own SQLite database (bridges/github/docs/design.md §10). Kept on uninstall.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: exradius-github-data
+  labels:
+    {{- include "exradius.componentLabels" (list . "github") | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: {{ $gh.database.size }}
+  {{- with $gh.database.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -21,7 +39,8 @@ metadata:
   labels:
     {{- include "exradius.componentLabels" (list . "github") | nindent 4 }}
 spec:
-  # One replica: two would both consume the bridge's event queue and race on comments.
+  # One replica: two would both consume the bridge's event queue and race on comments, and
+  # its SQLite database takes one writer.
   replicas: 1
   strategy: {type: Recreate}
   selector:
@@ -53,6 +72,10 @@ spec:
               value: {{ $gh.apiUrl | quote }}
             - name: GITHUB_ARTIFACTS_BRANCH
               value: {{ $gh.artifactsBranch | quote }}
+            - name: GITHUB_DB_PATH
+              value: /data/exradius-github.db
+            - name: GITHUB_DB_TTL_DAYS
+              value: {{ $gh.database.ttlDays | quote }}
             - name: EXRADIUS_BROKER_URL
               value: {{ include "exradius.brokerUrl" . | quote }}
             {{- with include "exradius.brokerSecret" . }}
@@ -91,9 +114,12 @@ spec:
             {{- include "exradius.containerSecurity" true | nindent 12 }}
           volumeMounts:
             - {name: tmp, mountPath: /tmp}
+            - {name: data, mountPath: /data}
       volumes:
         - name: tmp
           emptyDir: {sizeLimit: 64Mi}
+        - name: data
+          persistentVolumeClaim: {claimName: exradius-github-data}
 ---
 apiVersion: v1
 kind: Service

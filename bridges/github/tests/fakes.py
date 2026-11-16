@@ -73,6 +73,18 @@ class FakeGitHub:
         self.issues[(repo, number)] = issue
         return repo, number
 
+    def add_pull_request(self, repo: str, number: int, title: str, *, author: str, branch: str,
+                         body: str = "", head_repo: str | None = None) -> tuple[str, int]:
+        key = self.add_issue(repo, number, title, author=author, body=body, pull_request=True)
+        self.issues[key]["_pull"] = {"number": number, "state": "open", "merged": False,
+                                     "head": {"ref": branch, "repo": {"full_name": head_repo or repo}},
+                                     "base": {"ref": "main"}}
+        self.review_comments: dict = getattr(self, "review_comments", {})
+        return key
+
+    def pull_payload(self, key: tuple[str, int]) -> dict:
+        return dict(self.issues[key]["_pull"])
+
     def assign(self, key: tuple[str, int], *logins: str) -> None:
         self.issues[key]["assignees"] = [{"login": a} for a in logins]
 
@@ -111,6 +123,7 @@ class FakeGitHub:
         return f"<p>{html}</p>"
 
     def _full(self, request: httpx.Request, item: dict) -> dict:
+        item = {k: v for k, v in item.items() if not k.startswith("_")}
         if "full+json" in request.headers.get("Accept", ""):
             return dict(item, body_html=self._html(item.get("body") or ""))
         return item
@@ -159,6 +172,13 @@ class FakeGitHub:
                             comment["body"] = body["body"]
                             return _json(200, comment)
                 return _error(404, "Not Found")
+        if m := re.fullmatch(r"/repos/([^/]+/[^/]+)/pulls/(\d+)(/reviews/(\d+)/comments)?", path):
+            key = (m[1], int(m[2]))
+            if key not in self.issues or "_pull" not in self.issues[key]:
+                return _error(404, "Not Found")
+            if m[3]:
+                return self._page(request, getattr(self, "review_comments", {}).get(int(m[4]), []), query)
+            return _json(200, self.issues[key]["_pull"])
         if m := re.fullmatch(r"/repos/([^/]+/[^/]+)/git/(.+)", path):
             if login not in self.collaborators[m[1]]:
                 return _error(404, "Not Found")

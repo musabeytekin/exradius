@@ -27,6 +27,7 @@ from exradius_bridge_kit import (
 from exradius_github.config import GitHubConfig
 from exradius_github import uploads
 from exradius_github.github import GitHub, GitHubError, parse_time
+from exradius_github.store import PullRequestRow, Store, match_task
 
 _MARKER = re.compile(r"\n*<!-- exradius:([A-Za-z0-9_=-]+) -->\s*$")
 STARTING = "Exradius is picking an agent for this."
@@ -59,6 +60,13 @@ def ref_for(repo: str, number: int) -> ItemRef:
     """``id`` is ``owner/repo#12``, the address of the issue; ``key`` is ``repo-12``, the
     base of task ids and so of branch names."""
     return ItemRef(id=f"{repo.lower()}#{number}", key=f"{repo.split('/')[-1].lower()}-{number}")
+
+
+def ref_for_pull_request(repo: str, number: int) -> ItemRef:
+    """A pull request as an item of its own (design §11): its review runs and all their
+    comments stay on it. GitHub numbers issues and pull requests together, so the ``id`` is
+    as unique as an issue's; the ``key`` (``repo-pr-5``) keeps its task ids apart."""
+    return ItemRef(id=f"{repo.lower()}#{number}", key=f"{repo.split('/')[-1].lower()}-pr-{number}")
 
 
 def parse_ref(ref: ItemRef) -> tuple[str, int]:
@@ -112,10 +120,13 @@ class GitHubTracker:
     bridge = "github"
     config_model = GitHubConfig
 
-    def __init__(self, github: GitHub, instance: str, *, artifacts_branch: str = ARTIFACTS_BRANCH):
+    def __init__(self, github: GitHub, instance: str, *, artifacts_branch: str = ARTIFACTS_BRANCH,
+                 store: Store | None = None):
         self.github = github
         self.instance = instance
         self.artifacts_branch = artifacts_branch
+        self.store = store
+        """Tasks and pull requests (design §10); without it, reviews are not followed."""
         self.bot: Person | None = None
         self._pending: dict[str, list[_Pending]] = {}
         """Files handed to ``attach``, shown in the item's next comment (the result's)."""
@@ -161,8 +172,10 @@ class GitHubTracker:
         issue = await self._issue(ref, full=True)
         repo = str(issue.get("repository_url") or "").split("/repos/", 1)[-1] or parse_ref(ref)[0]
         number = int(issue.get("number") or parse_ref(ref)[1])
-        current = ref_for(repo, number)
+        is_pull = "pull_request" in issue
+        current = ref_for_pull_request(repo, number) if is_pull else ref_for(repo, number)
         repo_name, _ = parse_ref(current)
+        reporter = self._person(issue.get("user"))
         details: dict[str, Any] = {
             "repository": repo_name,
             "number": number,
@@ -173,6 +186,19 @@ class GitHubTracker:
         }
         if isinstance(issue.get("milestone"), dict):
             details["milestone"] = issue["milestone"].get("title")
+        if is_pull:
+            pull = await self.github.pull_request(repo_name, number)
+            details["pull_request"] = {
+                "branch": (pull.get("head") or {}).get("ref"),
+                "base": (pull.get("base") or {}).get("ref"),
+                "state": "merged" if pull.get("merged") else pull.get("state"),
+            }
+            row = await self.store.pull_request(repo_name, number) if self.store else None
+            if row is not None:
+                details["pull_request"].update({"task": row.task_id, "issue": row.item_id})
+                if row.reviewer:
+                    # Questions go to whoever asked for the changes, not to the PR's author.
+                    reporter = Person(row.reviewer, row.reviewer)
         # Files people dropped into the issue or its comments become the task's attachments,
         # and their links name them (design §4.2).
         used: set[str] = set()
@@ -193,7 +219,7 @@ class GitHubTracker:
             title=str(issue.get("title") or ""),
             body=body,
             url=str(issue.get("html_url") or ""),
-            reporter=self._person(issue.get("user")),
+            reporter=reporter,
             assigned_to_bot=any(self.is_bot(_login(a)) for a in issue.get("assignees") or []),
             attachments=[f.info for f in files],
             comments=comments,
@@ -296,6 +322,9 @@ class GitHubTracker:
         """Into the bot's latest comment, as a hidden marker that never renders; a first
         comment is posted when the bot has none on the issue yet."""
         repo, number = parse_ref(ref)
+        if self.store is not None and state.get("state") == "starting" and state.get("task_id"):
+            # Remembered so a pull request whose branch starts with the id finds its way back.
+            await self.store.record_task(str(state["task_id"]), repo, ref.id, ref.key)
         mine = await self._bot_comments(ref)
         if mine:
             latest = mine[-1]
@@ -340,3 +369,54 @@ class GitHubTracker:
             replies.append(Reply(author=self._person(author), created=created, body=text,
                                  attachments=tuple(f.info for f in files)))
         return replies
+
+    # -- pull requests (design §11) ---------------------------------------------------------
+
+    async def _trace(self, repo: str, number: int, branch: str | None, head_repo: str | None) -> PullRequestRow | None:
+        """The task a pull request's branch belongs to, recorded; ``None`` when it is not one
+        of this bridge's (or comes from a fork)."""
+        if self.store is None or not branch or (head_repo or "").lower() != repo.lower():
+            return None
+        tasks = await self.store.tasks_in(repo)
+        task_id = match_task(branch, [t.task_id for t in tasks])
+        if task_id is None:
+            return None
+        task = next(t for t in tasks if t.task_id == task_id)
+        return await self.store.record_pull_request(repo, number, task, branch)
+
+    async def pull_request_opened(self, repo: str, pull: dict) -> PullRequestRow | None:
+        head = pull.get("head") or {}
+        return await self._trace(repo, int(pull["number"]), head.get("ref"), (head.get("repo") or {}).get("full_name"))
+
+    async def known_pull_request(self, repo: str, number: int) -> bool:
+        return self.store is not None and await self.store.pull_request(repo, number) is not None
+
+    async def review_request(self, repo: str, number: int, review: dict) -> tuple[ItemRef, Reply, str] | None:
+        """A review that requested changes on one of the bridge's pull requests, as a request
+        for a run on the pull request (kit §6.5): the review's text and its comments on the
+        code. ``None`` for a pull request the bridge did not trace to a task."""
+        if self.store is None:
+            return None
+        row = await self.store.pull_request(repo, number)
+        if row is None:  # opened before the bridge watched pull requests, or a missed event
+            pull = await self.github.pull_request(repo, number)
+            head = pull.get("head") or {}
+            row = await self._trace(repo, number, head.get("ref"), (head.get("repo") or {}).get("full_name"))
+        if row is None:
+            return None
+        reviewer = _login(review.get("user")) or "a reviewer"
+        await self.store.reviewed(repo, number, reviewer)
+        lines = [str(review.get("body") or "").strip()]
+        comments = await self.github.review_comments(repo, number, int(review["id"])) if review.get("id") else []
+        if comments:
+            lines.append("Comments on the code:")
+            for c in comments:
+                line = c.get("line") or c.get("original_line")
+                where = f"`{c.get('path')}`" + (f" line {line}" if line else "")
+                lines.append(f"- {where}: {str(c.get('body') or '').strip()}")
+        body = "\n\n".join(part for part in lines if part) or "(no text)"
+        request = Reply(author=Person(reviewer, reviewer), created=_time(review.get("submitted_at")), body=body)
+        intro = (f"{reviewer} requested changes on pull request #{number} (branch `{row.head_branch}`), "
+                 f"which task {row.task_id} opened for {row.item_key}. Continue on branch `{row.head_branch}`: "
+                 "commit there and push it, so the pull request updates; do not open another pull request")
+        return ref_for_pull_request(repo, number), request, intro

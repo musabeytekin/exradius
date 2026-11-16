@@ -19,8 +19,11 @@ The kit owns the flow (kit §6). This bridge is the GitHub half: the tracker int
 After a run, a comment that mentions the bot starts a follow-up run (kit §6.4), as asking
 the colleague again would; the issue stays with whoever has it.
 
-Not in v1, as in Jira: cancel, pull requests (assigning a pull request to the bot does
-nothing), GitHub Apps.
+A review that **requests changes** on a pull request the agent opened starts a run on that
+pull request, and everything about it is written there, not on the issue (§11).
+
+Not in v1, as in Jira: cancel, assigning a pull request to the bot (it does nothing),
+GitHub Apps.
 
 ## 2. What it needs on GitHub
 
@@ -33,7 +36,7 @@ nothing), GitHub Apps.
   where the bot is only a collaborator. The token never leaves the bridge.
 - **A webhook** on each repository, or one on the organization: URL
   `<bridge public URL>/webhooks/github`, content type `application/json`, a secret, events
-  *Issues* and *Issue comments*. GitHub signs each delivery
+  *Issues*, *Issue comments*, *Pull requests* and *Pull request reviews*. GitHub signs each delivery
   (`X-Hub-Signature-256: sha256=<HMAC of the body>`).
 
 Why not a GitHub App: an App can be neither assigned nor @mentioned, and people hand work
@@ -148,6 +151,8 @@ own comments as an HTML comment that never renders:
 | `GITHUB_WEBHOOK_SECRET` | The webhooks' secret |
 | `GITHUB_API_URL` | Default `https://api.github.com`; `https://<host>/api/v3` for Enterprise Server |
 | `GITHUB_ARTIFACTS_BRANCH` | Default `exradius-artifacts` (§4.1) |
+| `GITHUB_DB_PATH` | The database file, default `/data/exradius-github.db` (§10) |
+| `GITHUB_DB_TTL_DAYS` | How long a row lives without being used, default 30 (§10) |
 | `EXRADIUS_BROKER_URL`, `EXRADIUS_API_URL`, `EXRADIUS_INTEGRATION_TOKEN`, `MAX_ATTACHMENT_MB` | The kit's (kit §10) |
 | `EXRADIUS_BROKER_USERNAME`, `EXRADIUS_BROKER_PASSWORD` | Optional: the broker's user, quoted into the URL (how the Helm chart passes it) |
 | `PORT` | Default `8080` |
@@ -164,6 +169,52 @@ named build context, like the Jira bridge's. The Helm chart runs it as the optio
 Tests run against an in-memory GitHub (`tests/fakes.py`: tokens, collaborators, issues,
 comments, pagination) and the kit's fake broker and Exradius: the tracker's calls, the
 state markers, replies and mentions, webhooks, and the flow from assignment to result.
+
+## 10. The database
+
+Added 2026-11-16. The kit keeps no database (kit §8), and the item's state still rides in
+the bot's comments (§5). But a pull request does not say which task opened it once GitHub
+has forgotten the webhook, and more of this kind is coming, so the bridge has a small
+database of its own.
+
+- **SQLite**, one file (`GITHUB_DB_PATH`) on the pod's volume: the Helm chart makes a
+  `PersistentVolumeClaim` (`exradius-github-data`, 1 Gi, kept on uninstall). The bridge runs
+  as one replica, so one connection serves it; calls run in a worker thread
+  (`store.py`, standard library only). No server, nothing to back up beyond the file, and
+  losing it costs only the links below.
+- **Schema** versioned with `PRAGMA user_version`; `MIGRATIONS` holds one script per
+  version, applied at startup. A file newer than the bridge stops it with a clear message.
+- **TTL**: every row has `expires_at`, `GITHUB_DB_TTL_DAYS` (30) after it was written or
+  last used (a new review renews its pull request). Reads ignore expired rows; they are
+  deleted at startup and every hour.
+- **Tables (v1)**: `tasks` (task id, repository, the issue it came from), written when the
+  kit saves a `starting` state; `pull_requests` (repository and number, the task and issue,
+  the head branch, the last reviewer who requested changes).
+
+## 11. Pull request reviews
+
+People review the agent's pull request as they would a colleague's, and requesting changes
+is how they hand it back.
+
+- **Tracing.** On `pull_request` `opened` or `reopened`, a pull request whose head branch
+  (in the same repository, not a fork) starts with a task id in `tasks` is recorded in
+  `pull_requests`: the longest such id, at a boundary (`plane-1` owns `plane-1-fix`, not
+  `plane-10`). Branch names start with the task id by the operating rules (architecture
+  §13). A review on a pull request the bridge missed traces it then.
+- **Trigger.** Only `pull_request_review` `submitted` with state `changes_requested`.
+  Approvals and comment-only reviews do nothing; neither does a mention on the pull request
+  once its run ended (`commented(..., follow_up=False)`, kit §6.5).
+- **The run.** The pull request is an item of its own (`ref_for_pull_request`: id
+  `owner/name#31`, key `name-pr-31`, task ids `plane-pr-31`, `-2`, ...), started with the
+  kit's `requested` (kit §6.5). Its instructions are the pull request's title and body, then
+  who requested changes, the branch, the task and issue it came from, the order to continue
+  on that branch (commit there, push it, open no other pull request; the operating rules
+  allow it), and the review's text with its comments on the code (`path` line N: text).
+  `context.item.pull_request` has the branch, base, state, task and issue.
+- **Where it speaks.** Every comment of that run goes to the pull request: the start, the
+  questions (to the reviewer who requested changes), the result. The issue hears nothing.
+  A comment on the pull request that mentions the bot answers a waiting question.
+- Without the database, as with a bridge built for tests, reviews are not followed.
 
 ## 9. Later
 

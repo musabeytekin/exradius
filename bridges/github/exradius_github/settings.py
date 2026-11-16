@@ -41,6 +41,8 @@ class Settings:
     github_token: str
     github_webhook_secret: str
     artifacts_branch: str
+    db_path: str
+    db_ttl_days: int
     port: int
     kit: KitSettings
 
@@ -66,6 +68,11 @@ class Settings:
         branch = env.get("GITHUB_ARTIFACTS_BRANCH", "").strip() or "exradius-artifacts"
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch) or ".." in branch or branch.endswith((".lock", "/")):
             problems.append(f"GITHUB_ARTIFACTS_BRANCH is not a branch name: {branch!r}")
+        db_path = env.get("GITHUB_DB_PATH", "").strip() or "/data/exradius-github.db"
+        raw_ttl = env.get("GITHUB_DB_TTL_DAYS", "").strip() or "30"
+        ttl = int(raw_ttl) if raw_ttl.isdigit() and int(raw_ttl) > 0 else 0
+        if not ttl:
+            problems.append(f"GITHUB_DB_TTL_DAYS must be a positive number of days, not {raw_ttl!r}")
         raw_port = env.get("PORT", "8080").strip() or "8080"
         port = int(raw_port) if raw_port.isdigit() and 0 < int(raw_port) < 65536 else 0
         if not port:
@@ -75,6 +82,8 @@ class Settings:
             github_token=text("GITHUB_TOKEN"),
             github_webhook_secret=text("GITHUB_WEBHOOK_SECRET"),
             artifacts_branch=branch,
+            db_path=db_path,
+            db_ttl_days=ttl,
             port=port,
         )
         try:

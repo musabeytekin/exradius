@@ -229,8 +229,8 @@ the fixed Exradius operating rules, then a generated `# Your environment` sectio
 snapshot (`environment.py`: image, repositories with branch and push, services with non-secret
 settings, notes), then the agent's optional `role`. The user message is `# Task <task id>`,
 context and attachments only. Tickets never mention Exradius; agents learn how they run from
-the rules alone (folders are git clones, branch name starts with the task id, push to origin
-or attach a patch).
+the rules alone (folders are git clones, branch name starts with the task id unless the task
+names a pull request's branch to continue, push to origin or attach a patch).
 
 **Run isolation (kubernetes.md §7, runtime-bundles.md).** Images: `exradius-backend` (api
 and worker; no Agent SDK, no Docker SDK; uid 1000), `exradius-operator`, `exradius-frontend`,
@@ -285,7 +285,8 @@ information exists nowhere else.
 leaves outside its core: `kit/` (the bridge kit library: directory fetch, routing hand-off,
 task publishing, events, bridge status, over the integration API and the broker),
 `jira/` (Jira Cloud on the kit), `github/` (GitHub issues on the kit: issues assigned to a
-bot account, a repository webhook, the chart's optional `github` component) and `desk/` (Exradius Desk, the first-party
+bot account, a repository webhook, requested changes on its pull requests, its own SQLite
+on a volume, the chart's optional `github` component) and `desk/` (Exradius Desk, the first-party
 task system: OIDC sign-in, projects from `bridges/desk.yaml` groups, tasks assigned to people
 or to Exradius, @mentions, its own Postgres and React frontend, the chart's optional `desk`
 component). Bridges stop a run with the public cancel on `exradius.cancels`

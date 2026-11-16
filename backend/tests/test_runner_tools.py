@@ -165,6 +165,7 @@ def test_system_prompt_is_rules_then_role():
     # The run directory is thrown away: work must leave as a pushed branch or attached files.
     assert "discarded afterwards" in OPERATING_RULES
     assert "whose name starts with the task id" in OPERATING_RULES
+    assert "continue on an existing branch (a pull request under review)" in OPERATING_RULES
     assert "attach a patch of your commits" in OPERATING_RULES
     assert "Refer to files by their path inside the repository" in OPERATING_RULES
     assert OPERATING_RULES.endswith("never by the directory you run in.")

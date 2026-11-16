@@ -771,8 +771,10 @@ deliver.
 - The project directory exists only for this task and is discarded afterwards, so
   changes left uncommitted are lost. If your work changes a repository, commit it there
   on a new branch whose name starts with the task id shown in the task heading, and push
-  that branch to origin; say in the result what you pushed and where. If the push is
-  refused, attach a patch of your commits (git format-patch) to the result and say so.
+  that branch to origin; say in the result what you pushed and where. When the task says
+  to continue on an existing branch (a pull request under review), fetch and check out
+  that branch instead, commit on it and push it, so the pull request updates. If the push
+  is refused, attach a patch of your commits (git format-patch) to the result and say so.
 - Refer to files by their path inside the repository, never by the directory you run in.
 ```
 
