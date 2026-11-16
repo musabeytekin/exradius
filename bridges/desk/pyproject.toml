@@ -1,0 +1,45 @@
+[project]
+name = "exradius-desk"
+version = "0.1.0"
+description = "Exradius Desk: a small task system whose tasks can be assigned to Exradius, on the Exradius bridge kit"
+license = "Apache-2.0"
+requires-python = ">=3.14"
+dependencies = [
+    "exradius-bridge-kit",
+    "aiosqlite>=0.20",
+    "alembic>=1.14",
+    "asyncpg>=0.30",
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "pyjwt[crypto]>=2.9",
+    "python-multipart>=0.0.12",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.scripts]
+exradius-desk = "exradius_desk.main:run"
+
+[tool.uv.sources]
+# The kit lives next to this bridge in bridges/kit; the image builds with it as a named build context (design §13).
+exradius-bridge-kit = { path = "../kit" }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "exradius_desk"
+module-root = ""
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

@@ -15,6 +15,8 @@ log = logging.getLogger(__name__)
 
 TASKS_QUEUE = "exradius.tasks"
 ANSWERS_QUEUE = "exradius.answers"
+CANCELS_QUEUE = "exradius.cancels"
+"""Public: integrations stop a task (architecture §4.5, docs/integration-api.md §10)."""
 EVENTS_EXCHANGE = "exradius.events"
 # Internal: admin actions (cancel) from the API server to the workers. Not part of the
 # public contract in §4.
@@ -27,7 +29,7 @@ async def connect(url: str) -> AbstractRobustConnection:
 
 async def declare_topology(channel: AbstractChannel) -> AbstractExchange:
     """Declare every queue and exchange Exradius uses. Idempotent."""
-    for name in (TASKS_QUEUE, ANSWERS_QUEUE, CONTROL_QUEUE):
+    for name in (TASKS_QUEUE, ANSWERS_QUEUE, CANCELS_QUEUE, CONTROL_QUEUE):
         await channel.declare_queue(name, durable=True)
     return await channel.declare_exchange(
         EVENTS_EXCHANGE, aio_pika.ExchangeType.TOPIC, durable=True

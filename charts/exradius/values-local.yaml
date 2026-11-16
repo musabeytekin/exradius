@@ -67,3 +67,18 @@ builds:
   seccompProfile: exradius/buildkit.json
   resources:
     requests: {cpu: 250m, memory: 512Mi}
+
+# Exradius Desk with the dev identity provider of `make -C deploy/kind dev-desk` (Keycloak,
+# realm exradius). Tilt forwards Desk to localhost:3200 and Keycloak to localhost:8180; Desk
+# reads Keycloak's discovery document at its cluster address. The integration token comes from
+# `make -C deploy/kind desk-token` once the api is up (bridges/desk/docs/design.md §14).
+desk:
+  enabled: true
+  publicUrl: http://localhost:3200
+  oidc:
+    issuer: http://localhost:8180/realms/exradius
+    discoveryUrl: http://keycloak.keycloak.svc.cluster.local:8080/realms/exradius/.well-known/openid-configuration
+    clientId: exradius-desk
+    existingSecret: exradius-desk-oidc
+  database:
+    inCluster: {storage: 1Gi}

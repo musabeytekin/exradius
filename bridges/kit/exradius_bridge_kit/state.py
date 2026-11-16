@@ -30,6 +30,9 @@ class ItemState(BaseModel):
     """Republished after a duplicate task id rejection, for the current start."""
     told_still_working: bool = False
     """"Still working on this" was posted for the current run."""
+    ended_at: datetime | None = None
+    """When the last run's outcome was posted, by the tracker's clock: a mention of the bot
+    after it starts a follow-up run (design §6.4)."""
 
     @property
     def running(self) -> bool:

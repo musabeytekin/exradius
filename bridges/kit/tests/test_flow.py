@@ -253,6 +253,132 @@ async def test_a_question_without_a_reporter(kit, tracker, broker):
     assert tracker.texts(ref)[-1].startswith("**Scout** asks:\n\nWhich one?")
 
 
+async def test_an_attachment_that_will_not_download_is_skipped(kit, tracker, broker):
+    ref = tracker.add("PLANE-30")
+    tracker.attach_file(ref, "ok.txt", b"fine")
+    tracker.attach_file(ref, "gone.png", b"x", "image/png")
+    real = tracker.download
+
+    async def flaky(info):
+        if info.name == "gone.png":
+            raise RuntimeError("410 Gone")
+        return await real(info)
+
+    tracker.download = flaky
+    await hand_over(kit, ref)
+    [task] = broker.tasks
+    assert [a["name"] for a in task["attachments"]] == ["ok.txt"]
+    assert task["context"]["skipped_attachments"] == [{"name": "gone.png", "size": 1, "error": "could not be downloaded"}]
+
+
+# Follow-ups (§6.4) ----------------------------------------------------------------------------------------
+
+
+async def finish(kit, broker, ref, task_id):
+    await broker.deliver(queued(ref, task_id))
+    await broker.deliver(event("result", ref, task_id, {"state": "completed", "summary": "Done."}, agent="scout"))
+    await kit.idle()
+
+
+async def test_a_mention_after_the_run_starts_a_follow_up(kit, tracker, broker):
+    ref = tracker.add("PLANE-20", title="Summarise the project")
+    tracker.comment(ref, "@bot before the run, long ago")
+    await hand_over(kit, ref)
+    await finish(kit, broker, ref, "PLANE-20")
+    state = tracker.items[ref.id].state
+    assert state["state"] == "ended" and state["ended_at"]
+    assert tracker.items[ref.id].assignee == REPORTER
+
+    tracker.comment(ref, "thanks", to_bot=False)  # no mention: nothing starts
+    await kit.commented(ref)
+    await kit.idle()
+    assert len(broker.tasks) == 1
+
+    tracker.comment(ref, "Now show the admin screens, please.")
+    await kit.commented(ref)
+    await kit.idle()
+    first, follow_up = broker.tasks
+    assert follow_up["task_id"] == "PLANE-20-2" and follow_up["project"] == "plane"
+    assert follow_up["instructions"].startswith("Summarise the project")
+    assert follow_up["instructions"].endswith(
+        "Follow-up from Ayşe Yılmaz, after the earlier run on this item:\n\nNow show the admin screens, please.")
+    assert follow_up["context"]["follow_up"]["author"] == "Ayşe Yılmaz"
+    assert [c["body"] for c in follow_up["context"]["comments"]][-2:] == ["thanks", "Now show the admin screens, please."]
+    assert tracker.items[ref.id].state["state"] == "starting"
+
+    # While it runs, mentions are not answers and start nothing more.
+    tracker.comment(ref, "and the storefront?")
+    await kit.commented(ref)
+    await kit.idle()
+    assert len(broker.tasks) == 2
+    # It ends; it was not assigned to the bot, so there is nothing to hand back.
+    await finish(kit, broker, ref, "PLANE-20-2")
+    assert tracker.items[ref.id].state["state"] == "ended"
+    assert tracker.items[ref.id].handed_back == 1
+
+
+async def test_a_tracker_request_starts_a_run_and_answer_only_comments(kit, tracker, broker):
+    from exradius_bridge_kit import Person, Reply
+
+    ref = tracker.add("PLANE-24", assigned=False, title="Fix the estimate route")
+    request = Reply(author=Person("u1", "Mehmet"), created=None, body="Rename `foo`.")
+    await kit.requested(ref, request, "Changes requested on pull request #7 by Mehmet")
+    await kit.idle()
+    [task] = broker.tasks
+    assert task["task_id"] == "PLANE-24"
+    assert task["instructions"] == ("Fix the estimate route\n\nThe estimate endpoint returns 404.\n\n"
+                                    "Changes requested on pull request #7 by Mehmet:\n\nRename `foo`.")
+    await kit.requested(ref, request, "again")  # while it runs: said once, nothing more
+    await kit.idle()
+    assert len(broker.tasks) == 1 and tracker.texts(ref)[-1] == "This is still being worked on."
+    await finish(kit, broker, ref, "PLANE-24")
+    tracker.comment(ref, "@bot one more thing")
+    await kit.commented(ref, follow_up=False)  # answers only: no follow-up run
+    await kit.idle()
+    assert len(broker.tasks) == 1
+
+
+async def test_without_a_run_a_mention_starts_nothing(kit, tracker, broker):
+    ref = tracker.add("PLANE-21", assigned=False)
+    tracker.comment(ref, "@bot have a look?")
+    await kit.commented(ref)
+    await kit.idle()
+    assert broker.tasks == []
+
+
+async def test_a_state_from_before_ended_at_takes_only_the_newest_mention(kit, tracker, broker):
+    ref = tracker.add("PLANE-22", assigned=False)
+    tracker.items[ref.id].state = {"runs": 1, "task_id": "PLANE-22", "project": "plane", "state": "ended"}
+    tracker.comment(ref, "an old mention")
+    tracker.comment(ref, "a newer comment that is not one", to_bot=False)
+    await kit.commented(ref)
+    await kit.idle()
+    assert broker.tasks == []
+    tracker.comment(ref, "a new mention")
+    await kit.commented(ref)
+    await kit.idle()
+    [task] = broker.tasks
+    assert task["task_id"] == "PLANE-22-2" and task["instructions"].endswith("a new mention")
+
+
+async def test_a_follow_up_in_an_unclaimed_scope_is_told_once(tracker, broker):
+    exradius = FakeExradius(projects=[project_entry("ops", bridge_config={"scopes": ["OPS"]})])
+    kit = make_kit(tracker, exradius, broker)
+    await kit.start()
+    ref = tracker.add("PLANE-23", assigned=False)
+    tracker.items[ref.id].state = {"runs": 1, "task_id": "PLANE-23", "project": "plane", "state": "ended",
+                                   "ended_at": "2026-11-08T09:00:00Z"}
+    tracker.comment(ref, "again?")
+    await kit.commented(ref)
+    await kit.idle()
+    assert broker.tasks == [] and tracker.texts(ref) == ["No Exradius project takes work from PLANE."]
+    tracker.comment(ref, "a comment", to_bot=False)
+    await kit.commented(ref)
+    await kit.idle()
+    assert len(tracker.texts(ref)) == 1
+    await kit.close()
+
+
 # Results (§6.3) -----------------------------------------------------------------------------------------
 
 

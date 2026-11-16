@@ -1,87 +1,68 @@
-"""Startup (design §6): check everything, sync the labels, reconcile, then serve."""
+"""Startup: the kit checks GitHub and Exradius and catches up, then webhooks are served."""
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sys
+from datetime import timedelta
+from importlib.metadata import version
 
-import jwt
 import uvicorn
+from exradius_bridge_kit import ExradiusError, Kit, SettingsError, TrackerProblem
 
-from exradius_github.exradius import Broker, DirectoryClient, ExradiusError
-from exradius_github.flow import Bridge
-from exradius_github.github import GitHubApp, GitHubError
-from exradius_github.labels import Labels
-from exradius_github.settings import Settings, SettingsError
+from exradius_github.github import GitHub
+from exradius_github.settings import Settings
+from exradius_github.store import Store
+from exradius_github.tracker import GitHubTracker
 from exradius_github.webhooks import Webhooks, make_app
 
 log = logging.getLogger("exradius_github")
 
 
-class StartupError(Exception):
-    def __init__(self, problems: list[str]):
-        self.problems = problems
-        super().__init__("; ".join(problems))
+PURGE_EVERY = 3600.0
 
 
-async def start(settings: Settings, *, app: GitHubApp, directory_client: DirectoryClient, broker: Broker, **bridge_options) -> Bridge:
-    """Check every dependency, then sync the labels, reconcile and start consuming."""
-    problems: list[str] = []
-    bot: str | None = None
-    try:
-        me = await app.app()
-        bot = f"{me['slug']}[bot]"
-    except GitHubError as exc:
-        problems.append(f"GITHUB_APP_ID and the private key: GitHub refused them ({exc.status} {exc.detail})")
-    except (jwt.PyJWTError, ValueError, TypeError) as exc:
-        problems.append(f"the GitHub App private key cannot sign: {exc}")
-    directory = None
-    try:
-        directory = await directory_client.fetch()
-    except ExradiusError as exc:
-        problems.append(f"EXRADIUS_API_URL and EXRADIUS_INTEGRATION_TOKEN: {exc}")
-    try:
-        await broker.connect()
-    except Exception as exc:
-        problems.append(f"EXRADIUS_BROKER_URL: cannot connect ({exc or type(exc).__name__})")
-    if problems or bot is None or directory is None:
-        raise StartupError(problems)
-
-    labels = Labels(app, settings.github_host)
-    bridge = Bridge(
-        settings=settings, app=app, labels=labels, directory_client=directory_client, publisher=broker, bot=bot,
-        **bridge_options,
-    )
-    bridge.directory = directory
-    await labels.sync(directory)
-    log.info("agent labels in sync for %d projects", len(directory.projects))
-    await bridge.reconcile()
-    await broker.consume(bridge.on_event)
-    log.info("acting as %s", bot)
-    return bridge
+async def purge_forever(store: Store) -> None:
+    """Expired rows go once an hour (design §10)."""
+    while True:
+        await asyncio.sleep(PURGE_EVERY)
+        try:
+            gone = await store.purge()
+            if gone:
+                log.info("forgot %d expired rows", gone)
+        except Exception:  # noqa: BLE001 - tried again in an hour
+            log.exception("purging the database failed")
 
 
 async def serve(settings: Settings) -> None:
-    app = GitHubApp(settings.github_api_url, settings.github_app_id, settings.github_private_key)
-    directory_client = DirectoryClient(settings.exradius_api_url, settings.exradius_integration_token)
-    broker = Broker(settings.exradius_broker_url)
+    store = Store(settings.db_path, timedelta(days=settings.db_ttl_days))
+    await store.open()
+    log.info("database %s: %s, %d expired rows forgotten", settings.db_path, await store.stats(), await store.purge())
+    github = GitHub(settings.github_api_url, settings.github_token)
+    tracker = GitHubTracker(github, settings.github_url, artifacts_branch=settings.artifacts_branch, store=store)
+    kit = Kit(tracker, settings.kit, software=f"exradius-github {version('exradius-github')}")
+    purging = asyncio.create_task(purge_forever(store))
     try:
-        bridge = await start(settings, app=app, directory_client=directory_client, broker=broker)
-        log.info("listening for GitHub on port %d", settings.port)
-        web = make_app(Webhooks(settings.github_webhook_secret, bridge))
-        server = uvicorn.Server(uvicorn.Config(web, host="0.0.0.0", port=settings.port, lifespan="off", log_level="info"))
+        await kit.start()
+        await kit.listen()
+        log.info("acting as %s; listening for GitHub on port %d", tracker.bot.id if tracker.bot else "?", settings.port)
+        app = make_app(Webhooks(settings.github_webhook_secret, kit, tracker))
+        server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=settings.port, lifespan="off",
+                                               log_level="info"))
         await server.serve()
     finally:
-        await broker.close()
-        await directory_client.aclose()
-        await app.aclose()
+        purging.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await purging
+        await kit.close()
+        await github.aclose()
+        await store.close()
 
 
-def _fail(problems: list[str]) -> None:
-    print("exradius-github cannot start:", file=sys.stderr)
-    for problem in problems:
-        print(f"  - {problem}", file=sys.stderr)
+def _fail(problem: str) -> None:
+    print(f"exradius-github cannot start: {problem}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -90,11 +71,13 @@ def run() -> None:
     try:
         settings = Settings.from_env()
     except SettingsError as exc:
-        _fail(exc.problems)
+        _fail(str(exc))
         return
     try:
         asyncio.run(serve(settings))
-    except StartupError as exc:
-        _fail(exc.problems)
+    except (TrackerProblem, ExradiusError) as exc:
+        _fail(str(exc))
+    except OSError as exc:  # the broker
+        _fail(f"EXRADIUS_BROKER_URL: cannot connect ({exc})")
     except KeyboardInterrupt:
         pass

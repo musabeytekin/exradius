@@ -18,11 +18,12 @@ tracker's webhooks say (§5).
 
 It is **only a library**: no service, no image, no command line. Each bridge is its own
 repository and image and depends on the kit. The first is the Jira bridge
-(`exradius-jira`); the GitHub bridge moves onto the kit later.
+(`exradius-jira`); the GitHub bridge (`exradius-github`) followed on 2026-11-16.
 
 Like every bridge, the kit speaks only Exradius's public contract and imports nothing from
 Exradius:
-- the broker: `exradius.tasks` and `exradius.answers` in, `exradius.events` out;
+- the broker: `exradius.tasks`, `exradius.answers` and `exradius.cancels` in, `exradius.events`
+  out;
 - the integration API: the directory with the bridge's files, its `directory.changed`
   notice, and the bridge status report.
 
@@ -153,7 +154,8 @@ The state becomes `waiting` with the `request_id` and the time of the question, 
 tracker gave it to the comment (so replies are compared by the tracker's clock). On
 `commented` while waiting, the kit asks `replies(ref, since=asked_at)` and publishes the
 first reply on `exradius.answers`: its Markdown, and its attachments within the size cap
-(§7). The state becomes `active`. Comments while nothing waits are ignored in v1.
+(§7). The state becomes `active`. Comments while a run is active and nothing waits are
+ignored; after a run they can start the next one (§6.4).
 
 ### 6.3 Results
 
@@ -172,8 +174,44 @@ go on. The transcript link is not posted: it works for anyone who has it.
 On a `rejected` status: "This could not start:" and the reason. A duplicate task id is
 retried instead (§7).
 
-After any result or rejection the item is **handed back**, the state becomes `ended`, and
-handing it to the bot again starts a new run.
+After any result or rejection the item is **handed back**, the state becomes `ended` with
+`ended_at`, the time the tracker gave the outcome's comment, and handing it to the bot again
+starts a new run.
+
+### 6.4 Follow-ups
+
+Added 2026-11-16, after the first GitHub trial: people who got an answer mention the bot
+again, as they would a colleague, and expect it to go on.
+
+On `commented` while the state is `ended`, the kit asks `replies(ref, since=ended_at)`. The
+newest reply, if any, starts the next run (§6.1 from "Otherwise"), without the item being
+handed over again:
+
+- The task's `instructions` are the title and body, then "Follow-up from *name*, after the
+  earlier run on this item:" and the reply's Markdown. `context.follow_up` holds its author
+  and time; `context.comments` holds every comment, the earlier runs' questions and results
+  among them.
+- The item is not assigned to the bot, so the run's end hands nothing back.
+- A scope that no single project claims is said once, as in §6.1, and `ended_at` is
+  cleared, so only a newer mention brings it up again.
+- A state written before `ended_at` existed has none: only a reply that is the item's
+  newest comment counts, so an old mention is not taken up by an unrelated later comment.
+- The first run of an item still starts only by handing it over: a mention on an item that
+  never ran starts nothing.
+
+### 6.5 Requests from the tracker
+
+Added 2026-11-16 for the GitHub bridge's pull request reviews.
+
+- `await kit.requested(ref, request, intro)`: the tracker asks for a run on an item for a
+  reason of its own (a review that requested changes). No hand-over and no mention are
+  needed. As in §6.1, an active run is told "still working" once, and a scope no single
+  project claims is said so. Otherwise the run starts with `instructions` = title, body,
+  then `intro` and the request's Markdown; the request's attachments go with the item's,
+  each once.
+- `await kit.commented(ref, follow_up=False)`: the comment can answer a waiting question but
+  never starts a follow-up (§6.4), for items where only the tracker's own requests start
+  runs.
 
 ## 7. The task message
 
@@ -184,7 +222,7 @@ handing it to the bot again starts a new run.
 | `agent` | Left out: Exradius routes. |
 | `instructions` | The title, a blank line, then the body. |
 | `context` | `{"item": {"key", "url", "reporter", ...details}, "comments": [...], "skipped_attachments": [...]}`. All comments, the bot's included: on a rerun, earlier questions, answers and results are part of what the agent should know. |
-| `attachments` | The item's attachments, inlined as base64, oldest first, while the total stays within `MAX_ATTACHMENT_MB` (default 10, which fits RabbitMQ's default message size after base64). The rest are listed in `skipped_attachments`. Names are made plain file names and unique (`log (2).txt`). |
+| `attachments` | The item's attachments, inlined as base64, oldest first, while the total stays within `MAX_ATTACHMENT_MB` (default 10, which fits RabbitMQ's default message size after base64). The rest are listed in `skipped_attachments`, and so is one the tracker fails to download (with `"error": "could not be downloaded"`): it never stops the task. Names are made plain file names and unique (`log (2).txt`). |
 | `correlation` | `{"bridge": "jira", "instance": "https://acme.atlassian.net", "item": {"id": "10042", "key": "PLANE-101"}}` |
 
 **Duplicate ids.** Exradius rejects a task id it has seen, even one whose run failed. If the
@@ -208,7 +246,8 @@ on the item (a Jira issue property, ...):
   "request_id": "a7c1...",
   "asked_at": "2026-11-08T10:02:41Z",
   "retries": 0,
-  "told_still_working": false
+  "told_still_working": false,
+  "ended_at": null
 }
 ```
 
@@ -229,6 +268,10 @@ after every directory fetch, whenever its problems change, and every 5 minutes o
 The problems are those of §3, plus the tracker's own: `start()` raising `TrackerProblem`
 ("Jira answered 401 for the bot account"), and the tracker failing repeatedly afterwards.
 A report that fails is logged and retried with the next one; it never stops the bridge.
+
+`StatusReporter` holds this part (the report's shape, the `only_if_changed` check, the
+5-minute heartbeat), so a bridge that does not use `Kit`'s flow can still report the way
+`Kit` does. Exradius Desk is the first (`bridges/desk/docs/design.md` §11).
 
 ## 10. Exradius side
 
@@ -263,6 +306,7 @@ exradius_bridge_kit/
   texts.py        every sentence the kit posts
   projects.py     bridge files: validation, claims, problems (§3)
   exradius.py     broker, directory, status clients
+  status.py       StatusReporter (§9)
   settings.py
   testing.py      FakeTracker, FakeBroker, FakeExradius, for the kit's tests and the bridges'
 tests/
@@ -287,8 +331,7 @@ Against `FakeTracker`, `FakeBroker` and `FakeExradius` (httpx `MockTransport`):
 
 ## 13. Later
 
-- The GitHub bridge on the kit (an issue's repository is its scope; state in a hidden
-  comment or the issue's metadata).
-- A mention of the bot after a run ended starting a follow-up run.
-- Cancel, once Exradius has a public cancel.
+- Cancel in the flow (in Jira, unassigning the bot). Exradius has a public cancel since
+  2026-11-14 (integration-api.md §10), and `Broker.publish_cancel` sends it; the flow does
+  not use it yet.
 - Texts in other languages.

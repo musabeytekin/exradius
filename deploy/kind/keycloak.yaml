@@ -1,0 +1,115 @@
+# Keycloak for the local kind cluster ONLY: Exradius Desk's dev identity provider (make -C
+# deploy/kind dev-desk, bridges/desk/docs/design.md §14). Dev mode: an in-pod H2 database,
+# plain HTTP, the admin admin/admin, and fixed passwords. Never use this outside a local
+# cluster. Browsers reach it at http://localhost:8180 (Tilt's port-forward), Desk at
+# http://keycloak.keycloak.svc.cluster.local:8080; tokens always name the issuer
+# http://localhost:8180/realms/exradius, and back-channel endpoints follow the address asked.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keycloak
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm
+  namespace: keycloak
+data:
+  exradius.json: |
+    {
+      "realm": "exradius",
+      "enabled": true,
+      "registrationAllowed": false,
+      "groups": [{"name": "team-a"}, {"name": "team-b"}],
+      "users": [
+        {"username": "ada", "enabled": true, "email": "ada@example.test", "emailVerified": true,
+         "firstName": "Ada", "lastName": "Lovelace", "groups": ["/team-a"],
+         "credentials": [{"type": "password", "value": "ada", "temporary": false}]},
+        {"username": "ben", "enabled": true, "email": "ben@example.test", "emailVerified": true,
+         "firstName": "Ben", "lastName": "Okafor", "groups": ["/team-a"],
+         "credentials": [{"type": "password", "value": "ben", "temporary": false}]},
+        {"username": "cem", "enabled": true, "email": "cem@example.test", "emailVerified": true,
+         "firstName": "Cem", "lastName": "Yildiz", "groups": ["/team-b"],
+         "credentials": [{"type": "password", "value": "cem", "temporary": false}]}
+      ],
+      "clients": [
+        {
+          "clientId": "exradius-desk",
+          "name": "Exradius Desk",
+          "enabled": true,
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "desk-local-secret",
+          "standardFlowEnabled": true,
+          "directAccessGrantsEnabled": false,
+          "implicitFlowEnabled": false,
+          "redirectUris": ["http://localhost:3200/auth/callback"],
+          "webOrigins": ["http://localhost:3200"],
+          "attributes": {"pkce.code.challenge.method": "S256", "post.logout.redirect.uris": "http://localhost:3200/*"},
+          "protocolMappers": [
+            {
+              "name": "groups",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-group-membership-mapper",
+              "config": {"claim.name": "groups", "full.path": "false", "id.token.claim": "true",
+                         "access.token.claim": "true", "userinfo.token.claim": "true"}
+            }
+          ]
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: keycloak
+  labels: {app: keycloak}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: keycloak}
+  template:
+    metadata:
+      labels: {app: keycloak}
+    spec:
+      containers:
+        - name: keycloak
+          # Keycloak 26.4.2 (amd64 and arm64), pinned by digest.
+          image: quay.io/keycloak/keycloak:26.4.2@sha256:3617b09bb4b7510a8d8d9b9fc5707399e2d70688dbcc2f8fb013a144829be1b9
+          args: [start-dev, --import-realm]
+          env:
+            - {name: KC_BOOTSTRAP_ADMIN_USERNAME, value: admin}
+            - {name: KC_BOOTSTRAP_ADMIN_PASSWORD, value: admin}
+            - {name: KC_HTTP_ENABLED, value: "true"}
+            - {name: KC_HEALTH_ENABLED, value: "true"}
+            # The browser's address fixes the issuer; Desk's back-channel calls use the
+            # cluster address they were made to.
+            - {name: KC_HOSTNAME, value: "http://localhost:8180"}
+            - {name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC, value: "true"}
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: management, containerPort: 9000}
+          readinessProbe:
+            httpGet: {path: /health/ready, port: management}
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - {name: realm, mountPath: /opt/keycloak/data/import, readOnly: true}
+      volumes:
+        - name: realm
+          configMap: {name: keycloak-realm}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  selector: {app: keycloak}
+  ports:
+    - {name: http, port: 8080, targetPort: http}

@@ -603,11 +603,12 @@ class RunManager:
         await self.emit(events)
         await self.finalize(run_id)
 
-    async def cancel(self, run_id: uuid.UUID) -> None:
-        """Admin cancel (§8.4): the operator deletes the pod with its grace period, the
-        runner reports its delivery check, and the run is finalised once the pod is gone."""
+    async def cancel(self, run_id: uuid.UUID, reason: str = "cancelled by admin") -> None:
+        """Admin cancel (§8.4), or an integration's (§4.5, with its reason): the operator
+        deletes the pod with its grace period, the runner reports its delivery check, and the
+        run is finalised once the pod is gone."""
         try:
-            run = await self._move(run_id, State.CANCELLED, reason="cancelled by admin")
+            run = await self._move(run_id, State.CANCELLED, reason=reason)
         except RunCancelled:
             return  # already ended
         self._release(run_id)

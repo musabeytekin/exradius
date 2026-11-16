@@ -6,7 +6,9 @@
 #   tilt down                     # uninstall (the exradius namespace and its Secrets stay)
 #
 # Panel http://localhost:3100, API http://localhost:8100, RabbitMQ localhost:5673 and its
-# UI http://localhost:15673: ports beside the v0.1.0 compose stack's.
+# UI http://localhost:15673: ports beside the v0.1.0 compose stack's. Exradius Desk
+# http://localhost:3200 with its dev identity provider (make -C deploy/kind dev-desk) at
+# http://localhost:8180; Desk starts once `make -C deploy/kind desk-token` has run.
 
 CONTEXT = 'kind-exradius'
 allow_k8s_contexts(CONTEXT)
@@ -79,6 +81,17 @@ docker_build(
     ignore=PYTHON_IGNORE,
     match_in_env_vars=True,
 )
+# Exradius Desk (bridges/desk): the kit comes in as a named build context, which
+# docker_build cannot pass.
+custom_build(
+    'exradius-desk',
+    'docker build --build-context kit=bridges/kit -t $EXPECTED_REF bridges/desk',
+    deps=['bridges/desk/pyproject.toml', 'bridges/desk/uv.lock', 'bridges/desk/Dockerfile',
+          'bridges/desk/exradius_desk', 'bridges/desk/web/src', 'bridges/desk/web/index.html',
+          'bridges/desk/web/package.json', 'bridges/desk/web/package-lock.json',
+          'bridges/kit/pyproject.toml', 'bridges/kit/exradius_bridge_kit'],
+    ignore=PYTHON_IGNORE + ['bridges/desk/exradius_desk/static'],
+)
 docker_build(
     'exradius-project-default', 'deploy',
     dockerfile='deploy/project-default.Dockerfile',
@@ -147,6 +160,7 @@ k8s_resource(
         'exradius-build:networkpolicy:exradius-builds',
         'exradius-api:networkpolicy',
         'exradius-egress:networkpolicy',
+        'exradius-desk:serviceaccount',
     ],
     labels=['stack'],
 )
@@ -163,3 +177,15 @@ k8s_resource('exradius-operator', resource_deps=['setup'], labels=['exradius'])
 k8s_resource('exradius-egress', resource_deps=['setup'], labels=['exradius'])
 k8s_resource('exradius-frontend', resource_deps=['exradius-api'], labels=['exradius'],
              port_forwards=['3100:8080'])
+
+# Exradius Desk (bridges/desk/docs/design.md §14): its database, the service, and Keycloak's
+# port-forward once make -C deploy/kind dev-desk has installed it.
+k8s_resource('exradius-desk-postgres', resource_deps=['setup'], labels=['desk'])
+k8s_resource('exradius-desk', resource_deps=['exradius-desk-postgres', 'exradius-rabbitmq', 'exradius-api'],
+             labels=['desk'], port_forwards=['3200:8080'])
+local_resource(
+    'keycloak',
+    serve_cmd=('until kubectl --context %s -n keycloak get svc keycloak >/dev/null 2>&1; do sleep 5; done; ' +
+               'exec kubectl --context %s -n keycloak port-forward svc/keycloak 8180:8080') % (CONTEXT, CONTEXT),
+    labels=['desk'],
+)

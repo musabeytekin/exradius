@@ -1,0 +1,231 @@
+{{- /* Exradius Desk (bridges/desk/docs/design.md §13): one replica (its live stream is in
+memory), its own database, Secrets by reference only. It reaches the api's port 8000 for the
+integration API and result files (networkpolicies.yaml). */ -}}
+{{- if .Values.desk.enabled }}
+{{- $desk := .Values.desk -}}
+{{- if not $desk.publicUrl }}{{ fail "desk.publicUrl is required with desk.enabled" }}{{ end -}}
+{{- if not $desk.oidc.issuer }}{{ fail "desk.oidc.issuer is required with desk.enabled" }}{{ end -}}
+{{- if not $desk.oidc.clientId }}{{ fail "desk.oidc.clientId is required with desk.enabled" }}{{ end -}}
+{{- $dbSecret := $desk.database.existingSecret -}}
+{{- if and (not $dbSecret) $desk.database.inCluster.cloudnativepg }}{{ $dbSecret = printf "%s-app" $desk.database.inCluster.name }}{{ end -}}
+{{- if not $dbSecret }}{{ fail "set desk.database.existingSecret, or desk.database.inCluster.cloudnativepg" }}{{ end -}}
+{{- with $desk.database.inCluster }}
+{{- if and .cloudnativepg (not $desk.database.existingSecret) }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ .name }}
+  labels:
+    {{- include "exradius.componentLabels" (list $ "desk-postgres") | nindent 4 }}
+spec:
+  instances: {{ .instances }}
+  bootstrap:
+    initdb:
+      database: desk
+      owner: desk
+  storage:
+    size: {{ .storage }}
+    {{- with .storageClass }}
+    storageClass: {{ . }}
+    {{- end }}
+  {{- with .resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if or $.Values.stack.nodeSelector $.Values.stack.tolerations }}
+  affinity:
+    {{- with $.Values.stack.nodeSelector }}
+    nodeSelector:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with $.Values.stack.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
+---
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exradius-desk
+  labels:
+    {{- include "exradius.componentLabels" (list . "desk") | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exradius-desk
+  labels:
+    {{- include "exradius.componentLabels" (list . "desk") | nindent 4 }}
+spec:
+  # One replica: the live stream's hub is in memory (design §9).
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      {{- include "exradius.selector" (list . "desk") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "exradius.componentLabels" (list . "desk") | nindent 8 }}
+    spec:
+      serviceAccountName: exradius-desk
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- include "exradius.stackPlacement" . | nindent 6 }}
+      securityContext:
+        {{- include "exradius.podSecurity" (list 10001 10001) | nindent 8 }}
+      initContainers:
+        - name: migrate
+          image: {{ include "exradius.image" (list . .Values.images.desk) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command: [exradius-desk, migrate]
+          env:
+            - name: DESK_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: {{ $dbSecret }}, key: {{ $desk.database.uriKey }}}
+          securityContext:
+            {{- include "exradius.containerSecurity" true | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      containers:
+        - name: desk
+          image: {{ include "exradius.image" (list . .Values.images.desk) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          env:
+            - name: DESK_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: {{ $dbSecret }}, key: {{ $desk.database.uriKey }}}
+            - name: DESK_PUBLIC_URL
+              value: {{ $desk.publicUrl | quote }}
+            - name: DESK_OIDC_ISSUER
+              value: {{ $desk.oidc.issuer | quote }}
+            {{- with $desk.oidc.discoveryUrl }}
+            - name: DESK_OIDC_DISCOVERY_URL
+              value: {{ . | quote }}
+            {{- end }}
+            - name: DESK_OIDC_CLIENT_ID
+              value: {{ $desk.oidc.clientId | quote }}
+            {{- with $desk.oidc.existingSecret }}
+            - name: DESK_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: {name: {{ . }}, key: {{ $desk.oidc.secretKey }}}
+            {{- end }}
+            - name: DESK_OIDC_SCOPES
+              value: {{ $desk.oidc.scopes | quote }}
+            - name: DESK_OIDC_GROUPS_CLAIM
+              value: {{ $desk.oidc.groupsClaim | quote }}
+            - name: DESK_SESSION_HOURS
+              value: {{ $desk.sessionHours | quote }}
+            {{- with $desk.smtp.host }}
+            - name: DESK_SMTP_HOST
+              value: {{ . | quote }}
+            - name: DESK_SMTP_PORT
+              value: {{ $desk.smtp.port | quote }}
+            - name: DESK_SMTP_TLS
+              value: {{ $desk.smtp.tls | quote }}
+            - name: DESK_SMTP_FROM
+              value: {{ $desk.smtp.from | quote }}
+            {{- with $desk.smtp.existingSecret }}
+            - name: DESK_SMTP_USERNAME
+              valueFrom:
+                secretKeyRef: {name: {{ . }}, key: {{ $desk.smtp.usernameKey }}}
+            - name: DESK_SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ . }}, key: {{ $desk.smtp.passwordKey }}}
+            {{- end }}
+            {{- end }}
+            - name: EXRADIUS_BROKER_URL
+              value: {{ include "exradius.brokerUrl" . | quote }}
+            {{- with include "exradius.brokerSecret" . }}
+            - name: EXRADIUS_BROKER_USERNAME
+              valueFrom:
+                secretKeyRef: {name: {{ . }}, key: {{ $.Values.broker.usernameKey }}}
+            - name: EXRADIUS_BROKER_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ . }}, key: {{ $.Values.broker.passwordKey }}}
+            {{- end }}
+            - name: EXRADIUS_API_URL
+              value: http://{{ include "exradius.serviceHost" (list . "exradius-api") }}:8000
+            - name: EXRADIUS_INTEGRATION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $desk.integrationToken.existingSecret }}
+                  key: {{ $desk.integrationToken.key }}
+                  # Created in the panel after the install: Desk stops with a clear message
+                  # until it exists, and starts on its own once it does.
+                  optional: true
+            - name: MAX_ATTACHMENT_MB
+              value: {{ $desk.maxAttachmentMb | quote }}
+            - name: PORT
+              value: "8080"
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          {{- with $desk.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "exradius.containerSecurity" true | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exradius-desk
+  labels:
+    {{- include "exradius.componentLabels" (list . "desk") | nindent 4 }}
+spec:
+  selector:
+    {{- include "exradius.selector" (list . "desk") | nindent 4 }}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+{{- with $desk.ingress }}
+{{- if .enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: exradius-desk
+  labels:
+    {{- include "exradius.componentLabels" (list $ "desk") | nindent 4 }}
+  {{- with .annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - {{- with .host }}
+      host: {{ . | quote }}
+      {{- end }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: exradius-desk
+                port: {name: http}
+{{- end }}
+{{- end }}
+{{- end }}

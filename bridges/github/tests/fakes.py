@@ -1,32 +1,22 @@
-"""In-memory stand-ins for GitHub (as a GitHub App sees it), the directory and the broker.
-
-FakeGitHub checks the App's JWT against the test key, ties installation tokens to the
-repositories of their installation, and pages lists two at a time to exercise ``Link``.
-"""
+"""An in-memory GitHub: the REST calls the bridge makes, as an httpx transport."""
 
 from __future__ import annotations
 
 import itertools
 import json
+import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs
 
 import httpx
-import jwt
 
 API = "https://api.github.com"
-EXRADIUS = "https://exradius.acme.test"
-APP_ID = "1234"
-SLUG = "exradius-agent"
-BOT = f"{SLUG}[bot]"
 
 
-def _json(status: int, body: Any = None, headers: dict | None = None) -> httpx.Response:
-    if body is None:
-        return httpx.Response(status, headers=headers)
-    return httpx.Response(status, json=body, headers=headers)
+def _json(status: int, body: Any = None) -> httpx.Response:
+    return httpx.Response(status) if body is None else httpx.Response(status, json=body)
 
 
 def _error(status: int, message: str) -> httpx.Response:
@@ -34,16 +24,27 @@ def _error(status: int, message: str) -> httpx.Response:
 
 
 class FakeGitHub:
-    page_size = 2
-
-    def __init__(self, public_key: str):
-        self.public_key = public_key
-        self.installations: dict[int, set[str]] = {}
-        self.repos: dict[str, dict] = {}
-        self.tokens: dict[str, int] = {}
-        self.token_requests = 0
+    def __init__(self, page_size: int = 2) -> None:
+        self.tokens: dict[str, str] = {}
+        """Token to login."""
+        self.collaborators: dict[str, set[str]] = defaultdict(set)
+        """Repository to the logins that can be assigned there."""
+        self.issues: dict[tuple[str, int], dict] = {}
+        self.comments: dict[tuple[str, int], list[dict]] = defaultdict(list)
+        self.page_size = page_size
+        """Small, so pagination is exercised."""
+        self.blobs: dict[str, bytes] = {}
+        self.trees: dict[str, dict[str, str]] = {}
+        """Tree sha to its files (path to blob sha), flattened."""
+        self.commits: dict[str, dict] = {}
+        self.refs: dict[tuple[str, str], str] = {}
+        """(repo, branch) to commit sha."""
+        self.uploaded: dict[str, bytes] = {}
+        """Images people dropped into the editor, by uuid (``private-user-images`` serves them)."""
+        self.race = 0
+        """Moves the branch behind the bridge's back this many times (a concurrent writer)."""
         self._ids = itertools.count(1000)
-        self._clock = datetime(2026, 11, 8, 9, 0, tzinfo=UTC)
+        self._clock = datetime(2026, 11, 16, 9, 0, tzinfo=UTC)
 
     # -- setting up --------------------------------------------------------------------
 
@@ -51,208 +52,213 @@ class FakeGitHub:
         self._clock += timedelta(seconds=1)
         return self._clock.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def add_repo(self, full_name: str, installation: int | None) -> None:
-        self.repos[full_name.lower()] = {
-            "full_name": full_name, "labels": [], "issues": {}, "comments": defaultdict(list), "events": defaultdict(list),
-        }
-        if installation is not None:
-            self.installations.setdefault(installation, set()).add(full_name.lower())
+    def add_user(self, login: str, *, token: str | None = None, repos: tuple[str, ...] = ()) -> str:
+        if token:
+            self.tokens[token] = login
+        for repo in repos:
+            self.collaborators[repo].add(login)
+        return login
 
-    def add_label(self, repo: str, name: str, description: str = "", color: str = "ededed") -> None:
-        self.repos[repo.lower()]["labels"].append({"id": next(self._ids), "name": name, "description": description, "color": color})
-
-    def add_issue(self, repo: str, number: int, title: str, *, author: str = "ayse", body: str | None = None, pull: bool = False) -> dict:
+    def add_issue(self, repo: str, number: int, title: str, *, author: str, assignees: tuple[str, ...] = (),
+                  body: str = "", pull_request: bool = False) -> tuple[str, int]:
         issue = {
-            "number": number, "title": title, "body": body, "state": "open", "user": {"login": author},
-            "labels": [], "created_at": self.now(), "html_url": f"https://github.com/{repo}/issues/{number}",
+            "id": next(self._ids), "number": number, "title": title, "body": body, "state": "open",
+            "user": {"login": author}, "assignees": [{"login": a} for a in assignees],
+            "labels": [{"name": "bug"}], "milestone": None, "created_at": self.now(),
+            "html_url": f"https://github.com/{repo}/issues/{number}",
+            "repository_url": f"{API}/repos/{repo}",
         }
-        if pull:
-            issue["pull_request"] = {"url": "..."}
-        self.repos[repo.lower()]["issues"][number] = issue
-        return issue
+        if pull_request:
+            issue["pull_request"] = {"url": f"{API}/repos/{repo}/pulls/{number}"}
+        self.issues[(repo, number)] = issue
+        return repo, number
 
-    def label_issue(self, repo: str, number: int, name: str, actor: str = "octocat") -> dict:
-        """Put an existing repo label on an issue, as a person would; returns the label."""
-        data = self.repos[repo.lower()]
-        label = next(l for l in data["labels"] if l["name"] == name)
-        data["issues"][number]["labels"].append(dict(label))
-        data["events"][number].append({"event": "labeled", "label": {"name": name}, "actor": {"login": actor}})
-        return dict(label)
+    def add_pull_request(self, repo: str, number: int, title: str, *, author: str, branch: str,
+                         body: str = "", head_repo: str | None = None) -> tuple[str, int]:
+        key = self.add_issue(repo, number, title, author=author, body=body, pull_request=True)
+        self.issues[key]["_pull"] = {"number": number, "state": "open", "merged": False,
+                                     "head": {"ref": branch, "repo": {"full_name": head_repo or repo}},
+                                     "base": {"ref": "main"}}
+        self.review_comments: dict = getattr(self, "review_comments", {})
+        return key
 
-    def add_comment(self, repo: str, number: int, login: str, body: str) -> dict:
-        comment = {"id": next(self._ids), "user": {"login": login, "type": "Bot" if login.endswith("[bot]") else "User"},
-                   "body": body, "created_at": self.now()}
-        self.repos[repo.lower()]["comments"][number].append(comment)
-        return comment
+    def pull_payload(self, key: tuple[str, int]) -> dict:
+        return dict(self.issues[key]["_pull"])
+
+    def assign(self, key: tuple[str, int], *logins: str) -> None:
+        self.issues[key]["assignees"] = [{"login": a} for a in logins]
+
+    def add_comment(self, key: tuple[str, int], author: str, body: str) -> int:
+        comment = {"id": next(self._ids), "user": {"login": author}, "body": body, "created_at": self.now()}
+        self.comments[key].append(comment)
+        return comment["id"]
 
     # -- reading back -------------------------------------------------------------------
 
-    def label_names(self, repo: str) -> dict[str, str]:
-        return {l["name"]: l["description"] for l in self.repos[repo.lower()]["labels"]}
+    def bodies(self, key: tuple[str, int]) -> list[str]:
+        return [c["body"] for c in self.comments[key]]
 
-    def issue_labels(self, repo: str, number: int) -> list[str]:
-        return [l["name"] for l in self.repos[repo.lower()]["issues"][number]["labels"]]
+    def assignees(self, key: tuple[str, int]) -> list[str]:
+        return [a["login"] for a in self.issues[key]["assignees"]]
 
-    def comments(self, repo: str, number: int) -> list[dict]:
-        return self.repos[repo.lower()]["comments"][number]
+    def files(self, repo: str, branch: str) -> dict[str, bytes]:
+        """The files on a branch's head."""
+        tree = self.trees[self.commits[self.refs[(repo, branch)]]["tree"]]
+        return {path: self.blobs[sha] for path, sha in tree.items()}
 
-    def bodies(self, repo: str, number: int) -> list[str]:
-        from exradius_github.state import strip
+    def upload_image(self, data: bytes) -> str:
+        """An image as the editor uploads it: its Markdown link, and the bytes behind it."""
+        uuid = f"{next(self._ids):08x}-1111-4222-8333-{next(self._ids):012x}"
+        self.uploaded[uuid] = data
+        return f"https://github.com/user-attachments/assets/{uuid}"
 
-        return [strip(c["body"]).strip() for c in self.comments(repo, number)]
+    @staticmethod
+    def _html(body: str) -> str:
+        """``body_html``: each uploaded image gets a signed private-user-images address."""
+        html = re.sub(r"https://github\.com/user-attachments/assets/([0-9a-f-]{36})",
+                      lambda m: f"https://private-user-images.githubusercontent.com/1/9-{m[1]}.png?jwt=signed&amp;x=1",
+                      body)
+        # As GitHub renders it: an image becomes a link around an <img>, both signed.
+        html = re.sub(r"!\[([^\]]*)\]\((\S+?)\)", r'<a href="\2"><img src="\2" alt="\1"></a>', html)
+        return f"<p>{html}</p>"
+
+    def _full(self, request: httpx.Request, item: dict) -> dict:
+        item = {k: v for k, v in item.items() if not k.startswith("_")}
+        if "full+json" in request.headers.get("Accept", ""):
+            return dict(item, body_html=self._html(item.get("body") or ""))
+        return item
+
+    def _sha(self, kind: str) -> str:
+        return f"{kind}{next(self._ids):037d}"
 
     # -- the transport ------------------------------------------------------------------
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
 
-    def _page(self, request: httpx.Request, items: list) -> httpx.Response:
-        query = {k: v[0] for k, v in parse_qs(request.url.query.decode()).items()}
-        page = int(query.get("page", 1))
-        start = (page - 1) * self.page_size
-        chunk = items[start : start + self.page_size]
-        headers = {}
-        if start + self.page_size < len(items):
-            query["page"] = str(page + 1)
-            link = f"{API}{request.url.path}?" + "&".join(f"{k}={v}" for k, v in query.items())
-            headers["Link"] = f'<{link}>; rel="next"'
-        return _json(200, chunk, headers)
-
     def handle(self, request: httpx.Request) -> httpx.Response:
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
-            return _error(401, "Requires authentication")
-        credential = auth[7:]
-        segments = [unquote(s) for s in request.url.raw_path.decode().split("?")[0].split("/") if s]
+        host = request.url.host
+        if host == "private-user-images.githubusercontent.com":
+            # Signed: the address is the credential, and it must not carry the bot's token.
+            uuid = re.search(r"([0-9a-f]{8}-[0-9a-f-]{27})\.png$", request.url.path)
+            if request.url.params.get("jwt") != "signed" or "Authorization" in request.headers or not uuid:
+                return _error(403, "denied")
+            return httpx.Response(200, content=self.uploaded[uuid[1]], headers={"Content-Type": "image/png"})
+        if host == "github.com":
+            # A private repository's upload wants a browser session: GitHub shows a sign-in page.
+            return httpx.Response(200, text="<html>Sign in to GitHub</html>", headers={"Content-Type": "text/html"})
+        header = request.headers.get("Authorization", "")
+        login = self.tokens.get(header.removeprefix("Bearer ")) if header.startswith("Bearer ") else None
+        if login is None:
+            return _error(401, "Bad credentials")
+        path = request.url.path
+        query = {k: v[0] for k, v in parse_qs(request.url.query.decode()).items()}
         method = request.method
         body = json.loads(request.content) if request.content else None
 
-        if segments[:1] == ["app"] or segments[-1:] == ["installation"]:
-            try:
-                claims = jwt.decode(credential, self.public_key, algorithms=["RS256"])
-            except jwt.PyJWTError as exc:
-                return _error(401, f"A JSON web token could not be decoded: {exc}")
-            if claims.get("iss") != APP_ID or claims["exp"] - claims["iat"] > 600:
-                return _error(401, "bad JWT claims")
-            if segments == ["app"]:
-                return _json(200, {"id": int(APP_ID), "slug": SLUG, "name": "Exradius Agent"})
-            if segments[:2] == ["app", "installations"] and segments[3:] == ["access_tokens"] and method == "POST":
-                installation = int(segments[2])
-                self.token_requests += 1
-                token = f"ghs_{installation}_{self.token_requests}"
-                self.tokens[token] = installation
-                expires = (datetime.now(UTC) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-                return _json(201, {"token": token, "expires_at": expires})
-            if segments[0] == "repos" and len(segments) == 4:
-                repo = f"{segments[1]}/{segments[2]}".lower()
-                for installation, repos in self.installations.items():
-                    if repo in repos:
-                        return _json(200, {"id": installation})
-                return _error(404, "Not Found")
-            return _error(404, "no route")
-
-        installation = self.tokens.get(credential)
-        if installation is None:
-            return _error(401, "Bad credentials")
-        if segments[0] != "repos" or len(segments) < 4:
-            return _error(404, "no route")
-        repo = f"{segments[1]}/{segments[2]}".lower()
-        if repo not in self.installations.get(installation, set()):
-            return _error(404, "Not Found")
-        data = self.repos[repo]
-        rest = segments[3:]
-
-        if rest == ["labels"]:
-            if method == "GET":
-                return self._page(request, data["labels"])
-            if any(l["name"].casefold() == body["name"].casefold() for l in data["labels"]):
-                return _error(422, "Validation Failed: already_exists")
-            if len(body["name"]) > 50:
-                return _error(422, "Validation Failed: name is too long")
-            label = {"id": next(self._ids), **body}
-            data["labels"].append(label)
-            return _json(201, label)
-        if rest[0] == "labels" and len(rest) == 2:
-            label = next((l for l in data["labels"] if l["name"] == rest[1]), None)
-            if label is None:
-                return _error(404, "Not Found")
+        if path == "/user":
+            return _json(200, {"login": login, "id": 1, "type": "User"})
+        if path == "/issues" and method == "GET":
+            found = [dict(i, repository={"full_name": repo}) for (repo, _), i in self.issues.items()
+                     if login in [a["login"] for a in i["assignees"]] and i["state"] == "open"]
+            return self._page(request, found, query)
+        if m := re.fullmatch(r"/repos/([^/]+/[^/]+)/issues/comments/(\d+)", path):
             if method == "PATCH":
-                label.update({"name": body.get("new_name", label["name"]), "color": body.get("color", label["color"]),
-                              "description": body.get("description", label["description"])})
-                return _json(200, label)
-            if method == "DELETE":
-                data["labels"].remove(label)
-                for issue in data["issues"].values():
-                    issue["labels"] = [l for l in issue["labels"] if l["name"] != rest[1]]
-                return _json(204)
-        if rest == ["issues"] and method == "GET":
-            query = {k: v[0] for k, v in parse_qs(request.url.query.decode()).items()}
-            found = [i for i in data["issues"].values()
-                     if i["state"] == query.get("state", "open") and query.get("labels") in [l["name"] for l in i["labels"]]]
-            return self._page(request, found)
-        if rest[:2] == ["issues", "comments"] and len(rest) == 3 and method == "PATCH":
-            for comments in data["comments"].values():
-                for comment in comments:
-                    if comment["id"] == int(rest[2]):
-                        comment["body"] = body["body"]
-                        return _json(200, comment)
-            return _error(404, "Not Found")
-        if rest[0] == "issues" and len(rest) >= 2 and rest[1].isdigit():
-            number = int(rest[1])
-            issue = data["issues"].get(number)
-            if issue is None:
+                for comments in self.comments.values():
+                    for comment in comments:
+                        if comment["id"] == int(m[2]):
+                            if comment["user"]["login"] != login:
+                                return _error(403, "not your comment")
+                            comment["body"] = body["body"]
+                            return _json(200, comment)
                 return _error(404, "Not Found")
-            tail = rest[2:]
-            if tail == [] and method == "GET":
-                return _json(200, issue)
-            if tail == ["comments"] and method == "GET":
-                return self._page(request, data["comments"][number])
-            if tail == ["comments"] and method == "POST":
-                return _json(201, self.add_comment(repo, number, BOT, body["body"]))
-            if tail == ["events"] and method == "GET":
-                return self._page(request, data["events"][number])
-            if tail[:1] == ["labels"] and len(tail) == 2 and method == "DELETE":
-                if tail[1] not in [l["name"] for l in issue["labels"]]:
-                    return _error(404, "Label does not exist")
-                issue["labels"] = [l for l in issue["labels"] if l["name"] != tail[1]]
-                return _json(200, issue["labels"])
-        return _error(404, f"no route {method} {'/'.join(segments)}")
+        if m := re.fullmatch(r"/repos/([^/]+/[^/]+)/pulls/(\d+)(/reviews/(\d+)/comments)?", path):
+            key = (m[1], int(m[2]))
+            if key not in self.issues or "_pull" not in self.issues[key]:
+                return _error(404, "Not Found")
+            if m[3]:
+                return self._page(request, getattr(self, "review_comments", {}).get(int(m[4]), []), query)
+            return _json(200, self.issues[key]["_pull"])
+        if m := re.fullmatch(r"/repos/([^/]+/[^/]+)/git/(.+)", path):
+            if login not in self.collaborators[m[1]]:
+                return _error(404, "Not Found")
+            return self._git(m[1], method, m[2], body)
+        if m := re.fullmatch(r"/repos/([^/]+/[^/]+)/issues/(\d+)(/.*)?", path):
+            key = (m[1], int(m[2]))
+            if key not in self.issues:
+                return _error(404, "Not Found")
+            return self._issue_routes(login, method, key, m[3] or "", query, body, request)
+        return _error(404, f"no route {method} {path}")
 
+    def _page(self, request: httpx.Request, items: list, query: dict) -> httpx.Response:
+        page = int(query.get("page", 1))
+        size = self.page_size
+        chunk = items[(page - 1) * size: page * size]
+        headers = {}
+        if page * size < len(items):
+            nxt = request.url.copy_merge_params({"page": page + 1})
+            headers["Link"] = f'<{nxt}>; rel="next"'
+        return httpx.Response(200, json=chunk, headers=headers)
 
-class FakeDirectory:
-    def __init__(self, directory: dict, token: str = "exr_test"):
-        self.directory = directory
-        self.token = token
+    def _git(self, repo: str, method: str, rest: str, body: Any) -> httpx.Response:
+        import base64
 
-    def transport(self) -> httpx.MockTransport:
-        def handle(request: httpx.Request) -> httpx.Response:
-            if request.headers.get("Authorization") != f"Bearer {self.token}":
-                return httpx.Response(401, json={"detail": "invalid token"})
-            return httpx.Response(200, json=self.directory)
+        if (m := re.fullmatch(r"ref/heads/(.+)", rest)) and method == "GET":
+            sha = self.refs.get((repo, m[1]))
+            return _json(200, {"object": {"sha": sha}}) if sha else _error(404, "Not Found")
+        if rest == "blobs" and method == "POST":
+            sha = self._sha("b")
+            self.blobs[sha] = base64.b64decode(body["content"])
+            return _json(201, {"sha": sha})
+        if rest == "trees" and method == "POST":
+            files = dict(self.trees[body["base_tree"]]) if body.get("base_tree") else {}
+            files.update({e["path"]: e["sha"] for e in body["tree"]})
+            sha = self._sha("t")
+            self.trees[sha] = files
+            return _json(201, {"sha": sha})
+        if rest == "commits" and method == "POST":
+            sha = self._sha("c")
+            self.commits[sha] = {"tree": body["tree"], "parents": body["parents"], "message": body["message"]}
+            return _json(201, {"sha": sha})
+        if (m := re.fullmatch(r"commits/(\w+)", rest)) and method == "GET":
+            return _json(200, {"sha": m[1], "tree": {"sha": self.commits[m[1]]["tree"]}})
+        if rest == "refs" and method == "POST":
+            branch = body["ref"].removeprefix("refs/heads/")
+            if (repo, branch) in self.refs:
+                return _error(422, "Reference already exists")
+            self.refs[(repo, branch)] = body["sha"]
+            return _json(201, {"ref": body["ref"]})
+        if (m := re.fullmatch(r"refs/heads/(.+)", rest)) and method == "PATCH":
+            key = (repo, m[1])
+            if self.race:
+                self.race -= 1
+                other = self._sha("c")
+                self.commits[other] = {"tree": self.commits[self.refs[key]]["tree"], "parents": [self.refs[key]],
+                                       "message": "someone else"}
+                self.refs[key] = other
+            if self.refs[key] not in self.commits[body["sha"]]["parents"]:
+                return _error(422, "Update is not a fast forward")
+            self.refs[key] = body["sha"]
+            return _json(200, {"object": {"sha": body["sha"]}})
+        return _error(404, f"no route {method} git/{rest}")
 
-        return httpx.MockTransport(handle)
-
-
-class FakePublisher:
-    def __init__(self) -> None:
-        self.tasks: list[dict] = []
-        self.answers: list[dict] = []
-        self.fail = False
-
-    async def publish_task(self, message: dict) -> None:
-        if self.fail:
-            raise ConnectionError("broker is down")
-        self.tasks.append(message)
-
-    async def publish_answer(self, message: dict) -> None:
-        if self.fail:
-            raise ConnectionError("broker is down")
-        self.answers.append(message)
-
-
-def artifacts_transport(files: dict[str, bytes]) -> httpx.MockTransport:
-    def handle(request: httpx.Request) -> httpx.Response:
-        data = files.get(str(request.url))
-        return httpx.Response(200, content=data) if data is not None else httpx.Response(404)
-
-    return httpx.MockTransport(handle)
+    def _issue_routes(self, login, method, key, rest, query, body, request) -> httpx.Response:
+        issue = self.issues[key]
+        if rest == "" and method == "GET":
+            return _json(200, self._full(request, issue))
+        if rest == "/comments" and method == "GET":
+            return self._page(request, [self._full(request, c) for c in self.comments[key]], query)
+        if rest == "/comments" and method == "POST":
+            self.add_comment(key, login, body["body"])
+            return _json(201, self.comments[key][-1])
+        if rest == "/assignees" and method == "POST":
+            current = [a["login"] for a in issue["assignees"]]
+            for who in body["assignees"]:
+                if who in self.collaborators[key[0]] and who not in current:
+                    current.append(who)
+            self.assign(key, *current)
+            return _json(201, issue)
+        if rest == "/assignees" and method == "DELETE":
+            self.assign(key, *[a["login"] for a in issue["assignees"] if a["login"] not in body["assignees"]])
+            return _json(200, issue)
+        return _error(404, f"no route {method} issue{rest}")
