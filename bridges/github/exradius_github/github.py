@@ -6,11 +6,15 @@ import re
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 PAGE = 100
 _NEXT = re.compile(r'<([^>]+)>;\s*rel="next"')
+FULL = {"Accept": "application/vnd.github.full+json"}
+"""Bodies with ``body_html`` too, where uploaded images have signed addresses."""
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 
 
 class GitHubError(Exception):
@@ -47,6 +51,12 @@ class GitHub:
         timeout: float = 30.0,
     ):
         self.api_url = api_url.rstrip("/")
+        api_host = (urlsplit(self.api_url).hostname or "").lower()
+        self.web_host = "github.com" if api_host == "api.github.com" else api_host
+        self._token = token
+        # Uploads: no token by default, and httpx drops it on a redirect to another host.
+        self._files = httpx.AsyncClient(timeout=timeout, transport=transport, follow_redirects=True,
+                                        headers={"User-Agent": "exradius-github"})
         self._http = httpx.AsyncClient(
             base_url=self.api_url,
             timeout=timeout,
@@ -63,6 +73,26 @@ class GitHub:
 
     async def aclose(self) -> None:
         await self._http.aclose()
+        await self._files.aclose()
+
+    async def download_upload(self, url: str) -> bytes:
+        """A file people uploaded to an issue (``uploads.py``): the bot's token goes only to
+        GitHub's own web host; a signed address needs none. A sign-in page is not the file."""
+        headers = {"Authorization": f"Bearer {self._token}"} if urlsplit(url).hostname == self.web_host else {}
+        try:
+            async with self._files.stream("GET", url, headers=headers) as response:
+                if response.status_code != 200:
+                    raise GitHubError("GET", url.split("?", 1)[0], response.status_code, "upload not available")
+                if response.headers.get("content-type", "").startswith("text/html"):
+                    raise GitHubError("GET", url.split("?", 1)[0], 403, "GitHub answered with a page, not the file")
+                data = bytearray()
+                async for chunk in response.aiter_bytes():
+                    data += chunk
+                    if len(data) > MAX_UPLOAD_BYTES:
+                        raise GitHubError("GET", url.split("?", 1)[0], 413, "upload too large")
+                return bytes(data)
+        except httpx.HTTPError as exc:
+            raise GitHubError("GET", url.split("?", 1)[0], 0, str(exc) or type(exc).__name__) from exc
 
     async def _request(self, method: str, path: str, *, ok: Iterable[int] = (200, 201, 204), **kwargs) -> httpx.Response:
         try:
@@ -77,13 +107,14 @@ class GitHub:
         response = await self._request(method, path, **kwargs)
         return response.json() if response.content else None
 
-    async def _pages(self, path: str, params: dict[str, Any] | None = None) -> list[dict]:
+    async def _pages(self, path: str, params: dict[str, Any] | None = None,
+                     headers: dict[str, str] | None = None) -> list[dict]:
         """Every item of a list, following ``Link: <...>; rel="next"``."""
         items: list[dict] = []
         url: str | None = path
         query: dict[str, Any] | None = {**(params or {}), "per_page": PAGE}
         while url:
-            response = await self._request("GET", url, params=query)
+            response = await self._request("GET", url, params=query, headers=headers)
             items.extend(response.json() or [])
             found = _NEXT.search(response.headers.get("link", ""))
             url, query = (found[1], None) if found else (None, None)
@@ -96,16 +127,16 @@ class GitHub:
 
     # -- issues ---------------------------------------------------------------------------
 
-    async def issue(self, repo: str, number: int) -> dict:
-        return await self._json("GET", f"/repos/{repo}/issues/{number}")
+    async def issue(self, repo: str, number: int, *, full: bool = False) -> dict:
+        return await self._json("GET", f"/repos/{repo}/issues/{number}", headers=FULL if full else None)
 
     async def assigned(self) -> list[dict]:
         """Open issues and pull requests assigned to the authenticated user, in every
         repository it can see."""
         return await self._pages("/issues", {"filter": "assigned", "state": "open"})
 
-    async def comments(self, repo: str, number: int) -> list[dict]:
-        return await self._pages(f"/repos/{repo}/issues/{number}/comments")
+    async def comments(self, repo: str, number: int, *, full: bool = False) -> list[dict]:
+        return await self._pages(f"/repos/{repo}/issues/{number}/comments", headers=FULL if full else None)
 
     async def add_comment(self, repo: str, number: int, body: str) -> dict:
         return await self._json("POST", f"/repos/{repo}/issues/{number}/comments", json={"body": body})

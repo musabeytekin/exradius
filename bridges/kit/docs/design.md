@@ -208,7 +208,7 @@ handed over again:
 | `agent` | Left out: Exradius routes. |
 | `instructions` | The title, a blank line, then the body. |
 | `context` | `{"item": {"key", "url", "reporter", ...details}, "comments": [...], "skipped_attachments": [...]}`. All comments, the bot's included: on a rerun, earlier questions, answers and results are part of what the agent should know. |
-| `attachments` | The item's attachments, inlined as base64, oldest first, while the total stays within `MAX_ATTACHMENT_MB` (default 10, which fits RabbitMQ's default message size after base64). The rest are listed in `skipped_attachments`. Names are made plain file names and unique (`log (2).txt`). |
+| `attachments` | The item's attachments, inlined as base64, oldest first, while the total stays within `MAX_ATTACHMENT_MB` (default 10, which fits RabbitMQ's default message size after base64). The rest are listed in `skipped_attachments`, and so is one the tracker fails to download (with `"error": "could not be downloaded"`): it never stops the task. Names are made plain file names and unique (`log (2).txt`). |
 | `correlation` | `{"bridge": "jira", "instance": "https://acme.atlassian.net", "item": {"id": "10042", "key": "PLANE-101"}}` |
 
 **Duplicate ids.** Exradius rejects a task id it has seen, even one whose run failed. If the

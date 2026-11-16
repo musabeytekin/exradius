@@ -25,6 +25,7 @@ from exradius_bridge_kit import (
 )
 
 from exradius_github.config import GitHubConfig
+from exradius_github import uploads
 from exradius_github.github import GitHub, GitHubError, parse_time
 
 _MARKER = re.compile(r"\n*<!-- exradius:([A-Za-z0-9_=-]+) -->\s*$")
@@ -147,17 +148,17 @@ class GitHubTracker:
             return None
         return Person(login, login)
 
-    async def _issue(self, ref: ItemRef) -> dict:
+    async def _issue(self, ref: ItemRef, *, full: bool = False) -> dict:
         repo, number = parse_ref(ref)
         try:
-            return await self.github.issue(repo, number)
+            return await self.github.issue(repo, number, full=full)
         except GitHubError as exc:
             if exc.status in (404, 410):
                 raise ItemGone(ref.key) from exc
             raise
 
     async def item(self, ref: ItemRef) -> Item:
-        issue = await self._issue(ref)
+        issue = await self._issue(ref, full=True)
         repo = str(issue.get("repository_url") or "").split("/repos/", 1)[-1] or parse_ref(ref)[0]
         number = int(issue.get("number") or parse_ref(ref)[1])
         current = ref_for(repo, number)
@@ -172,26 +173,36 @@ class GitHubTracker:
         }
         if isinstance(issue.get("milestone"), dict):
             details["milestone"] = issue["milestone"].get("title")
-        comments = [
-            Comment(author=_login(c.get("user")), created=_time(c.get("created_at")), body=strip_state(c.get("body")))
-            for c in await self.github.comments(repo_name, number)
-        ]
+        # Files people dropped into the issue or its comments become the task's attachments,
+        # and their links name them (design §4.2).
+        used: set[str] = set()
+        counter = [0]
+        body, files = uploads.find(str(issue.get("body") or ""), issue.get("body_html"),
+                                   _time(issue.get("created_at")), self.github.web_host, used, counter)
+        comments = []
+        for c in await self.github.comments(repo_name, number, full=True):
+            created = _time(c.get("created_at"))
+            text = strip_state(c.get("body"))
+            if not self.is_bot(_login(c.get("user"))):
+                text, found = uploads.find(text, c.get("body_html"), created, self.github.web_host, used, counter)
+                files += found
+            comments.append(Comment(author=_login(c.get("user")), created=created, body=text))
         return Item(
             ref=current,
             scope=repo_name,
             title=str(issue.get("title") or ""),
-            body=str(issue.get("body") or ""),
+            body=body,
             url=str(issue.get("html_url") or ""),
             reporter=self._person(issue.get("user")),
             assigned_to_bot=any(self.is_bot(_login(a)) for a in issue.get("assignees") or []),
-            # GitHub has no issue attachments: files people add are links in the Markdown.
-            attachments=[],
+            attachments=[f.info for f in files],
             comments=comments,
             details=details,
         )
 
     async def download(self, attachment: AttachmentInfo) -> bytes:
-        raise ValueError(f"GitHub issues have no attachments to download ({attachment.name})")
+        """``id`` is the address ``uploads.find`` chose: a signed one, or the link itself."""
+        return await self.github.download_upload(attachment.id)
 
     async def post(self, ref: ItemRef, message: Message) -> datetime | None:
         body = message.plain()
@@ -313,7 +324,7 @@ class GitHubTracker:
         repo, number = parse_ref(ref)
         mention = self._mention()
         replies = []
-        for comment in await self.github.comments(repo, number):
+        for comment in await self.github.comments(repo, number, full=True):
             author = comment.get("user")
             created = _time(comment.get("created_at"))
             if self.is_bot(_login(author)) or (since is not None and (created is None or created <= since)):
@@ -321,9 +332,11 @@ class GitHubTracker:
             body = strip_state(comment.get("body"))
             if not mention.search(body):
                 continue
+            body, files = uploads.find(body, comment.get("body_html"), created, self.github.web_host, set(), [0])
             text = mention.sub("", body)
             # A Quote reply starts with the quoted question; the answer is what follows.
             unquoted = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(">"))
             text = re.sub(r"[ \t]{2,}", " ", unquoted if unquoted.strip() else text).strip()
-            replies.append(Reply(author=self._person(author), created=created, body=text))
+            replies.append(Reply(author=self._person(author), created=created, body=text,
+                                 attachments=tuple(f.info for f in files)))
         return replies

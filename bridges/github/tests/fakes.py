@@ -39,6 +39,8 @@ class FakeGitHub:
         self.commits: dict[str, dict] = {}
         self.refs: dict[tuple[str, str], str] = {}
         """(repo, branch) to commit sha."""
+        self.uploaded: dict[str, bytes] = {}
+        """Images people dropped into the editor, by uuid (``private-user-images`` serves them)."""
         self.race = 0
         """Moves the branch behind the bridge's back this many times (a concurrent writer)."""
         self._ids = itertools.count(1000)
@@ -92,6 +94,27 @@ class FakeGitHub:
         tree = self.trees[self.commits[self.refs[(repo, branch)]]["tree"]]
         return {path: self.blobs[sha] for path, sha in tree.items()}
 
+    def upload_image(self, data: bytes) -> str:
+        """An image as the editor uploads it: its Markdown link, and the bytes behind it."""
+        uuid = f"{next(self._ids):08x}-1111-4222-8333-{next(self._ids):012x}"
+        self.uploaded[uuid] = data
+        return f"https://github.com/user-attachments/assets/{uuid}"
+
+    @staticmethod
+    def _html(body: str) -> str:
+        """``body_html``: each uploaded image gets a signed private-user-images address."""
+        html = re.sub(r"https://github\.com/user-attachments/assets/([0-9a-f-]{36})",
+                      lambda m: f"https://private-user-images.githubusercontent.com/1/9-{m[1]}.png?jwt=signed&amp;x=1",
+                      body)
+        # As GitHub renders it: an image becomes a link around an <img>, both signed.
+        html = re.sub(r"!\[([^\]]*)\]\((\S+?)\)", r'<a href="\2"><img src="\2" alt="\1"></a>', html)
+        return f"<p>{html}</p>"
+
+    def _full(self, request: httpx.Request, item: dict) -> dict:
+        if "full+json" in request.headers.get("Accept", ""):
+            return dict(item, body_html=self._html(item.get("body") or ""))
+        return item
+
     def _sha(self, kind: str) -> str:
         return f"{kind}{next(self._ids):037d}"
 
@@ -101,6 +124,16 @@ class FakeGitHub:
         return httpx.MockTransport(self.handle)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if host == "private-user-images.githubusercontent.com":
+            # Signed: the address is the credential, and it must not carry the bot's token.
+            uuid = re.search(r"([0-9a-f]{8}-[0-9a-f-]{27})\.png$", request.url.path)
+            if request.url.params.get("jwt") != "signed" or "Authorization" in request.headers or not uuid:
+                return _error(403, "denied")
+            return httpx.Response(200, content=self.uploaded[uuid[1]], headers={"Content-Type": "image/png"})
+        if host == "github.com":
+            # A private repository's upload wants a browser session: GitHub shows a sign-in page.
+            return httpx.Response(200, text="<html>Sign in to GitHub</html>", headers={"Content-Type": "text/html"})
         header = request.headers.get("Authorization", "")
         login = self.tokens.get(header.removeprefix("Bearer ")) if header.startswith("Bearer ") else None
         if login is None:
@@ -192,9 +225,9 @@ class FakeGitHub:
     def _issue_routes(self, login, method, key, rest, query, body, request) -> httpx.Response:
         issue = self.issues[key]
         if rest == "" and method == "GET":
-            return _json(200, issue)
+            return _json(200, self._full(request, issue))
         if rest == "/comments" and method == "GET":
-            return self._page(request, self.comments[key], query)
+            return self._page(request, [self._full(request, c) for c in self.comments[key]], query)
         if rest == "/comments" and method == "POST":
             self.add_comment(key, login, body["body"])
             return _json(201, self.comments[key][-1])

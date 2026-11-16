@@ -100,15 +100,23 @@ async def test_only_issue_assignments_to_the_bot_start_work(post, fake, broker):
 
 
 async def test_assign_ask_answer_finish(post, fake, broker, exradius):
+    shot = fake.upload_image(b"\x89PNG broken page")
     key = fake.add_issue(REPO, 10, "Estimates return 404", author=fake.ayse, assignees=(fake.ayse,),
-                         body="Since the last deploy.")
+                         body=f"Since the last deploy.\n\n![Image]({shot})\n\n"
+                              "[har.zip](https://github.com/user-attachments/files/3/har.zip)")
     fake.add_comment(key, fake.mehmet, "Seen on staging too.")
     fake.assign(key, fake.bot)
     assert await post("issues", assigned(REPO, 10, fake.bot)) == 200
     [task] = broker.tasks
     assert task["project"] == "plane" and "agent" not in task
     assert task["task_id"] == "plane-10"
-    assert task["instructions"] == "Estimates return 404\n\nSince the last deploy."
+    assert task["instructions"] == ("Estimates return 404\n\nSince the last deploy.\n\n[attachment: image-1.png]\n\n"
+                                    "[attachment: har.zip]")
+    [image] = task["attachments"]
+    assert (image["name"], image["content_type"]) == ("image-1.png", "image/png")
+    import base64
+    assert base64.b64decode(image["content_base64"]) == b"\x89PNG broken page"
+    assert task["context"]["skipped_attachments"] == [{"name": "har.zip", "size": 0, "error": "could not be downloaded"}]
     assert task["correlation"] == {"bridge": "github", "instance": INSTANCE,
                                    "item": {"id": "acme/plane#10", "key": "plane-10"}}
     assert [c["body"] for c in task["context"]["comments"]] == ["Seen on staging too."]

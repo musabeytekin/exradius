@@ -146,3 +146,58 @@ async def test_a_long_text_file_goes_to_the_branch_and_a_refusal_is_raised(fake,
     fake.collaborators[REPO].discard(fake.bot)  # the bot lost write access
     with pytest.raises(Exception, match="404"):
         await tracker.attach(ref, "shot.png", "image/png", b"\x89PNG\x00")
+
+
+def test_uploads_are_found_named_and_signed():
+    from exradius_github import uploads
+
+    u1 = "https://github.com/user-attachments/assets/0000000a-1111-4222-8333-00000000000b"
+    u2 = "https://github.com/user-attachments/assets/0000000c-1111-4222-8333-00000000000d"
+    body = (f"Broken:\n\n![Image]({u1})\n\n<img width=\"300\" alt=\"orders page\" src=\"{u2}\" />\n\n"
+            "[server.log](https://github.com/user-attachments/files/123/server.log) and "
+            f"again ![Image]({u1}), [docs](https://example.com/x.png), "
+            "![old](https://user-images.githubusercontent.com/1/abc.jpg)")
+    html = ("<p><img src=\"https://private-user-images.githubusercontent.com/1/9-0000000a-1111-4222-8333-00000000000b.png"
+            "?jwt=abc&amp;s=1\"></p>")
+    used, counter = {"image-1.png"}, [0]
+    text, found = uploads.find(body, html, None, "github.com", used, counter)
+    assert text == ("Broken:\n\n[attachment: image-2.png]\n\n[attachment: orders page.png]\n\n"
+                    "[attachment: server.log] and again [attachment: image-2.png], [docs](https://example.com/x.png), "
+                    "[attachment: old.jpg]")
+    assert [(f.info.name, f.info.content_type, f.info.id) for f in found] == [
+        ("image-2.png", "image/png",
+         "https://private-user-images.githubusercontent.com/1/9-0000000a-1111-4222-8333-00000000000b.png?jwt=abc&s=1"),
+        ("server.log", "text/plain", "https://github.com/user-attachments/files/123/server.log"),
+        ("old.jpg", "image/jpeg", "https://user-images.githubusercontent.com/1/abc.jpg"),
+        # Resized images are <img> tags, found after the Markdown links; with no signed
+        # address in the rendered body, the link itself is tried.
+        ("orders page.png", "image/png", u2),
+    ]
+
+
+async def test_item_passes_uploads_and_downloads_signed_ones(fake, tracker):
+    image = fake.upload_image(b"\x89PNG body")
+    key = fake.add_issue(REPO, 11, "Broken page", author=fake.ayse,
+                         body=f"See ![Image]({image}) and [crash.zip](https://github.com/user-attachments/files/7/crash.zip)")
+    shot = fake.upload_image(b"\x89PNG comment")
+    fake.add_comment(key, fake.mehmet, f"Same here: ![Image]({shot})")
+    item = await tracker.item(ref_for(REPO, 11))
+    assert item.body == "See [attachment: image-1.png] and [attachment: crash.zip]"
+    assert item.comments[0].body == "Same here: [attachment: image-2.png]"
+    names = [a.name for a in item.attachments]
+    assert names == ["image-1.png", "crash.zip", "image-2.png"]
+    assert await tracker.download(item.attachments[0]) == b"\x89PNG body"
+    assert await tracker.download(item.attachments[2]) == b"\x89PNG comment"
+    with pytest.raises(Exception, match="a page, not the file"):
+        await tracker.download(item.attachments[1])
+
+
+async def test_a_reply_brings_its_uploads(fake, tracker):
+    key = fake.add_issue(REPO, 12, "x", author=fake.ayse, assignees=(fake.bot,))
+    asked = await tracker.post(ref_for(REPO, 12), Message((Paragraph((Span("Which page?"),)),)))
+    shot = fake.upload_image(b"\x89PNG answer")
+    fake.add_comment(key, fake.ayse, f"@exradius-bot this one: ![Image]({shot})")
+    [reply] = await tracker.replies(ref_for(REPO, 12), since=asked)
+    assert reply.body == "this one: [attachment: image-1.png]"
+    [info] = reply.attachments
+    assert await tracker.download(info) == b"\x89PNG answer"

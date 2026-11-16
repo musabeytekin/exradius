@@ -226,7 +226,12 @@ class Flow:
             if total + info.size > self.max_attachment_bytes:
                 skipped.append({"name": info.name, "size": info.size})
                 continue
-            data = await self.tracker.download(info)
+            try:
+                data = await self.tracker.download(info)
+            except Exception as exc:  # noqa: BLE001 - one file the tracker will not give must not stop the task
+                log.warning("could not download %s: %s", info.name, exc or type(exc).__name__)
+                skipped.append({"name": info.name, "size": info.size, "error": "could not be downloaded"})
+                continue
             if total + len(data) > self.max_attachment_bytes:
                 skipped.append({"name": info.name, "size": len(data)})
                 continue

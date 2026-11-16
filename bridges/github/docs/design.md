@@ -60,13 +60,14 @@ repositories: [acme/plane]
 | `bridge`, `instance` | `"github"`, `https://github.com` (or the Enterprise Server's root) |
 | `ItemRef` | `id` = `owner/name#12` (lower case), `key` = `name-12`: task ids `plane-12`, `plane-12-2` |
 | `start()` | `GET /user` with the token gives the bot's login, which identifies assignments, mentions and the bot's own comments. A `401` or `403` is a `TrackerProblem`. |
-| `item()` | `GET /repos/{repo}/issues/{n}` and its comments. `details`: repository, number, state, labels, assignees, milestone, created. A `404` or `410` is `ItemGone`. |
+| `item()` | `GET /repos/{repo}/issues/{n}` and its comments, with `body_html` (`application/vnd.github.full+json`). Files people dropped into the body or a comment are its attachments (§4.2). `details`: repository, number, state, labels, assignees, milestone, created. A `404` or `410` is `ItemGone`. |
+| `download()` | §4.2. |
 | `post()` | `POST .../comments`, the kit's message as Markdown; a mention is `@login`. |
 | `attach()` | §4.1. |
 | `hand_back()` | Only if the bot is still an assignee: add the issue's author (GitHub leaves out, silently, an author who cannot be assigned), then remove the bot. |
 | `load_state()`, `save_state()` | §5. |
 | `assigned_to_bot()` | `GET /issues?filter=assigned&state=open`, pull requests left out: the startup reconcile. |
-| `replies()` | Comments after `since`, not by the bot, that mention `@<bot>` (read through the API, never trusted from the webhook). The mention and the lines a Quote reply copies (`> ...`) are taken out. |
+| `replies()` | Comments after `since`, not by the bot, that mention `@<bot>` (read through the API, never trusted from the webhook). The mention and the lines a Quote reply copies (`> ...`) are taken out; files dropped into the reply are its attachments (§4.2). |
 
 ### 4.1 Files a run produced
 
@@ -90,8 +91,31 @@ The files keep the repository's own access: in a private repository only people 
 read it see them. The bot needs write access, which assigning issues needs anyway; a branch
 rule that blocks it makes the file "could not attach", as before. This is a stopgap (§9).
 
-Files people put in an issue are links in its Markdown (GitHub uploads them for the
-editor); the agent sees the links. `Item.attachments` is always empty.
+### 4.2 Files people put in an issue
+
+GitHub's editor uploads a dropped file and writes a link into the Markdown:
+`![Image](https://github.com/user-attachments/assets/<uuid>)`, an `<img ... src=...>` tag
+once the image is resized, `[log.zip](https://github.com/user-attachments/files/<id>/log.zip)`
+for other files, and older forms (`user-images.githubusercontent.com`,
+`github.com/<owner>/<repo>/assets/...`). The agent cannot open these links: its network
+does not reach them, and in a private repository they need a browser session.
+
+So the bridge (`uploads.py`) turns them into the task's attachments (and a reply's into
+the answer's):
+
+- It reads the body and comments with `body_html`, where GitHub gives each image a signed
+  address on `private-user-images.githubusercontent.com`, valid for a few minutes, matched
+  to its link by the upload's uuid. The kit downloads right after reading, within that time.
+- `download()` fetches the signed address without the bot's token, or the link itself
+  (with the token only for GitHub's own web host; httpx drops it on a redirect elsewhere).
+  A sign-in page instead of the file is a failure, and so is a file over 100 MB.
+- A failed download is listed in `skipped_attachments` with its name and does not stop the
+  task (kit §7). Non-image files (`user-attachments/files/...`) of a private repository
+  are expected to fail this way; images work.
+- Each link in the Markdown becomes `[attachment: <name>]`, the name the agent finds the
+  file under: the file's own name for files, the alt text when it is not a plain "Image",
+  else `image-1.png`, `image-2.png`, unique within the item.
+- The bot's own comments are left as they are.
 
 ## 5. State
 

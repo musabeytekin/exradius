@@ -253,6 +253,24 @@ async def test_a_question_without_a_reporter(kit, tracker, broker):
     assert tracker.texts(ref)[-1].startswith("**Scout** asks:\n\nWhich one?")
 
 
+async def test_an_attachment_that_will_not_download_is_skipped(kit, tracker, broker):
+    ref = tracker.add("PLANE-30")
+    tracker.attach_file(ref, "ok.txt", b"fine")
+    tracker.attach_file(ref, "gone.png", b"x", "image/png")
+    real = tracker.download
+
+    async def flaky(info):
+        if info.name == "gone.png":
+            raise RuntimeError("410 Gone")
+        return await real(info)
+
+    tracker.download = flaky
+    await hand_over(kit, ref)
+    [task] = broker.tasks
+    assert [a["name"] for a in task["attachments"]] == ["ok.txt"]
+    assert task["context"]["skipped_attachments"] == [{"name": "gone.png", "size": 1, "error": "could not be downloaded"}]
+
+
 # Follow-ups (§6.4) ----------------------------------------------------------------------------------------
 
 
