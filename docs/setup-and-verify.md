@@ -330,3 +330,33 @@ without anyone, the agent included, having seen the button. What changed:
 
 Not changed: Exradius itself. Whether a result's artifacts reach the person is the
 bridge's business (integration-api.md).
+
+### 2.10 Skill 0.8.0: agents and questions
+
+Added 2026-11-17. Two things people do with a project that is set up had no place: asking
+what it is, and giving it another agent.
+
+- **`exradius-info`** answers from the file and changes nothing. `scripts/describe.sh`
+  (standard library, the check's YAML reader, validator and catalog) prints the config as
+  Exradius reads it: per agent the model, provider, git author, tools and the opening of
+  the role; connections with transport, keys, hosts and the agents that list them;
+  repositories, workstation, services, variable names, the agent phase's hosts
+  (`allowed_hosts`), every key with the places that reference it. It never prints a
+  value. The skill sorts each answer into one of three kinds: in the file, a default
+  Exradius applies, or decided by the install. For the last it names the page of the
+  panel and does not guess: a model the file leaves out is `None` in the run spec, the
+  runtime's default on the resolved provider, and the Providers page's test result names
+  the model that answered. The skill still never calls the Exradius API.
+- **`exradius-agent`** adds, changes or removes an agent. Its work is wording, because
+  nothing local proves a role: it first decides with the developer whether the request
+  is an agent at all (or a line in `notes`, a sentence in a role, a `model`), then writes
+  the role in the setup skill's order and makes the roles divide the tickets, since
+  routing reads each agent's name, role and tools (agent-routing.md §3). It states what a
+  role cannot hold: repositories, `push`, env and network belong to the project, so only
+  connections and their tokens separate agents. Publishing waits for the admin in two
+  cases: a new key (intake rejects tasks while a referenced key is missing), and a
+  project's second agent (agent-routing.md §6: without an OpenAI key a task that names no
+  agent is rejected once the project has two).
+
+`backend/tests/test_skill_describe.py` runs the description on sample configs and checks
+that every path a `SKILL.md` names under `${CLAUDE_SKILL_DIR}` exists.

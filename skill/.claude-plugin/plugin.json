@@ -1,7 +1,7 @@
 {
   "name": "exradius",
-  "version": "0.7.0",
-  "description": "Set up a project for Exradius and keep its config current: write exradius.yaml, the workstation Dockerfile and the admin README, prove locally with Docker that the setup and the project's own checks work under a run's conditions, and later find what changed in the code that the config must follow.",
+  "version": "0.8.0",
+  "description": "Set up a project for Exradius and look after its config: write exradius.yaml, the workstation Dockerfile and the admin README, prove locally with Docker that the setup and the project's own checks work under a run's conditions, later find what changed in the code that the config must follow, add or change agents, and answer what a project or an agent runs with.",
   "author": {
     "name": "musabeytekin"
   },
@@ -13,7 +13,8 @@
     "docker",
     "devcontainer",
     "setup",
-    "update"
+    "update",
+    "agents"
   ],
   "license": "Apache-2.0"
 }

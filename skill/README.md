@@ -1,10 +1,16 @@
-# The Exradius setup and update skills
+# The Exradius project skills
 
-A Claude Code plugin with two skills for [Exradius](#what-exradius-needs-from-a-project),
-the self-hosted harness that runs AI agents on a team's repositories: `exradius-project`
-puts a codebase on it, and `exradius-update` keeps the project's config current as the
-code moves on ([below](#keeping-a-config-current)). On the developer's machine
-`exradius-project`:
+A Claude Code plugin with four skills for [Exradius](#what-exradius-needs-from-a-project),
+the self-hosted harness that runs AI agents on a team's repositories:
+
+| skill | for |
+|---|---|
+| `exradius-project` | putting a codebase on Exradius: the config, proven locally (below) |
+| `exradius-update` | a config whose code has moved on ([Keeping a config current](#keeping-a-config-current)) |
+| `exradius-agent` | a new agent, or another model, tool or role for one ([Agents](#agents)) |
+| `exradius-info` | questions: what a project or an agent runs with ([Asking about a project](#asking-about-a-project)) |
+
+On the developer's machine `exradius-project`:
 
 1. reads the code (languages, tool versions the lockfiles demand, package registries,
    services from compose and CI, the checks as CI runs them, how the application is
@@ -136,6 +142,63 @@ config's own last commit, and `--since NAME=REV` or `--since NAME=YYYY-MM-DD` na
 another start. `--exit-code` makes the exit status 1 when something was found, for a
 scheduled job that only wants to know whether a config needs a look.
 
+## Agents
+
+```
+/exradius:exradius-agent a reviewer that comments on pull requests and never pushes
+```
+
+or a plain request such as "add an agent that triages new issues" or "have the scout use
+the smaller model". For a new agent the skill:
+
+1. reads the agents and connections the project has, their roles in full, and `notes`;
+2. says when the request is not an agent: a rule for everyone belongs in `notes`, a
+   refinement in an existing role, another model for the same work in `model`;
+3. asks in one round what only the developer knows (which tickets it takes, with
+   examples, and what it must never do; whether it changes code; the tools it needs) and
+   proposes the rest;
+4. writes the block: a slug that names the job, a role in the order routing and the
+   agent need (the tickets it takes, when its work is done, proof and delivery when it
+   changes code), and only the connections it uses, each secret as a key name;
+5. makes the roles divide the tickets: Exradius routes a task that names no agent by
+   reading every agent's name, role and tools, so the skill sorts real tickets by the
+   first sentences alone and narrows a sentence where two agents could take the same;
+6. says what a role cannot hold: every agent of a project has the same repositories,
+   `push` setting, environment and network, and only connections and their tokens differ;
+7. validates the file (the Docker check only when a connection's launcher, the image or
+   a command is new) and publishes with the go-ahead: after the admin added a new key,
+   and, when a project goes from one agent to two, after the admin confirmed that agent
+   routing is set up, because tasks that name no agent are rejected without it.
+
+Changing a model, a role or a connection, and removing or renaming an agent, are the same
+skill.
+
+## Asking about a project
+
+```
+/exradius:exradius-info which model does the scout use?
+```
+
+or the question alone, in a folder with the config. The skill changes nothing. It runs
+`describe.sh`, which prints the file as Exradius reads it with the defaults filled in,
+and answers with the key the answer rests on. Each answer is one of three kinds: in the
+file; a default Exradius applies (the git address `<agent>@<slug>.exradius.local`); or
+decided by the install, with the panel page that shows it (a model the file does not
+set is the runtime's default on the install's default provider, and the skill does not
+guess its name).
+
+`skills/exradius-info/scripts/describe.sh` runs without Claude:
+
+```bash
+skills/exradius-info/scripts/describe.sh --agent scout ../exradius-myapp
+```
+
+It lists the agents (model, provider, git author, tools, how the role opens), the
+connections (how each runs, its keys and hosts, the agents that list it), the
+repositories, the workstation and its setup, the services, the variable names, the hosts
+the agent may reach, and every secret key with the places that reference it. It never
+prints a value.
+
 ## The local check on its own
 
 `skills/exradius-project/scripts/check.sh` runs without Claude:
@@ -203,6 +266,7 @@ The skill's references are the developer documentation for Exradius projects:
 
 | skill (plugin) | writes `exradius.yaml` |
 |---|---|
+| 0.8.0 | version 1; `exradius-agent` and `exradius-info` |
 | 0.7.0 | version 1; roles that ask for proof from the running application, and a browser for projects with pages |
 | 0.6.0 | version 1; `exradius-update` and `check/reviewed.json`, the commits a config was checked against |
 | 0.5.0 | version 1; a setup in which the application starts, proven locally, with measured memory |
@@ -212,6 +276,18 @@ The skill's references are the developer documentation for Exradius projects:
 | 0.1.0 | version 1 |
 
 A change of the file's schema in Exradius is followed by a release of this plugin.
+
+### 0.8.0
+
+- **`exradius-agent`**: add, change or remove an agent of a project that is set up.
+  Until now a third agent was two sentences in the setup skill. The new skill decides
+  with the developer whether the work needs an agent, writes the role, checks that the
+  roles of all agents divide the tickets (routing reads their first sentences), keeps
+  the agent's connections to what it uses, and orders the publishing around a new key
+  and around the first time a project has more than one agent.
+- **`exradius-info`**: answers what a project or an agent runs with, read-only.
+  `scripts/describe.sh` prints the config with its defaults filled in and marks what the
+  install decides; the skill says which page of the panel shows that.
 
 ### 0.7.0
 
@@ -391,4 +467,13 @@ skills/exradius-update/
   scripts/exradius_changes.py     standard-library Python: git comparison, classification,
                                   the record; uses exradius_check.py's YAML reader and validator
   scripts/check.sh                the local check under this skill's path
+skills/exradius-agent/
+  SKILL.md                        the flow
+  scripts/describe.sh, check.sh   the info skill's description and the local check under this
+                                  skill's path
+skills/exradius-info/
+  SKILL.md                        where each answer is
+  scripts/describe.sh             the config as Exradius reads it (wraps exradius_describe.py)
+  scripts/exradius_describe.py    standard-library Python; uses exradius_check.py's YAML reader,
+                                  validator and catalog
 ```

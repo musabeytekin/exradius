@@ -348,7 +348,8 @@ alone can answer, and to submit a result. A role adds, in this order:
 
 Add a third agent only when the team has a kind of work with its own definition of done
 or its own connections (a reviewer that only comments, a triager with the tracker's
-tools). Adapt the wording in examples.md; do not invent personas.
+tools). Adapt the wording in examples.md; do not invent personas. An agent the team
+wants later is the `exradius-agent` skill's work.
 
 **Proof from the running application.** The person who gets the result did not watch the
 agent work, and passing tests do not show them that the button is on the page. So the
@@ -597,3 +598,7 @@ commit recorded in `check/reviewed.json`, lists what changed that the config dep
 config names), checks the config against what this release offers, and edits it as a
 small diff with the same local check. Use this skill's steps on an existing config only
 when the developer asks to write it again from scratch.
+
+Two more skills work on an existing config: `exradius-agent` adds, changes or removes an
+agent (a new role, another model, a connection), and `exradius-info` answers questions
+about the project and its agents without changing anything.

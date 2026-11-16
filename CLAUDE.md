@@ -283,9 +283,10 @@ task publishing, events, bridge status, over the integration API and the broker)
 `jira/` (Jira Cloud on the kit) and `github/` (GitHub issues; written before the kit and
 agent routing, so it still uses agent labels). They speak only the public contracts
 (`docs/integration-api.md`) and import nothing from `backend/`. Their design notes are in
-each one's `docs/`. `skill/` is a Claude Code plugin with two skills: `exradius-project`
-(setup) and `exradius-update` (bring an existing config up to date with code that moved
-on; setup-and-verify.md §2.8); the repository
+each one's `docs/`. `skill/` is a Claude Code plugin with four skills: `exradius-project`
+(setup), `exradius-update` (bring an existing config up to date with code that moved
+on; setup-and-verify.md §2.8), `exradius-agent` (add, change or remove an agent) and
+`exradius-info` (answer what a project or an agent runs with, read-only; §2.10); the repository
 root's `.claude-plugin/marketplace.json` publishes it, so it installs with
 `claude plugin marketplace add musabeytekin/exradius`. The setup skill's
 `scripts/exradius_check.py`
@@ -294,7 +295,10 @@ host list; `backend/tests/test_skill_check.py` fails when they drift, so a chang
 `schemas/project_config.py`, `catalog.py` or `network.py` is followed by one there
 (setup-and-verify.md §2.7). The update skill's `scripts/exradius_changes.py` lists what
 changed in a project's code since the commits in the config repository's
-`check/reviewed.json` (`backend/tests/test_skill_changes.py`).
+`check/reviewed.json` (`backend/tests/test_skill_changes.py`); the info skill's
+`scripts/exradius_describe.py` prints a config with its defaults filled in
+(`backend/tests/test_skill_describe.py`). Both import the check script, and the other
+skills reach the scripts through thin wrappers in their own `scripts/`.
 
 ## Conventions worth knowing
 
