@@ -16,8 +16,11 @@ posts the result and assigns the issue back to its author.
 The kit owns the flow (kit §6). This bridge is the GitHub half: the tracker interface
 (kit §4) over GitHub's REST API, GitHub's webhooks, and GitHub-flavoured Markdown.
 
-Not in v1, as in Jira: cancel, a mention after the run ended starting a follow-up run,
-pull requests (assigning a pull request to the bot does nothing), GitHub Apps.
+After a run, a comment that mentions the bot starts a follow-up run (kit §6.4), as asking
+the colleague again would; the issue stays with whoever has it.
+
+Not in v1, as in Jira: cancel, pull requests (assigning a pull request to the bot does
+nothing), GitHub Apps.
 
 ## 2. What it needs on GitHub
 

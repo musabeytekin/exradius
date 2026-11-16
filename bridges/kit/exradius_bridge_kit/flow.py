@@ -19,7 +19,7 @@ from exradius_bridge_kit import texts
 from exradius_bridge_kit.exradius import Publisher
 from exradius_bridge_kit.projects import Projects
 from exradius_bridge_kit.state import ItemState, task_id_for
-from exradius_bridge_kit.tracker import AttachmentInfo, Item, ItemGone, ItemRef, Tracker
+from exradius_bridge_kit.tracker import AttachmentInfo, Item, ItemGone, ItemRef, Reply, Tracker
 
 log = logging.getLogger(__name__)
 
@@ -107,11 +107,39 @@ class Flow:
 
     async def commented(self, ref: ItemRef) -> None:
         state = await self._load(ref)
-        if state.state != "waiting" or not state.request_id:
+        if state.state == "waiting" and state.request_id:
+            replies = await self.tracker.replies(ref, state.asked_at)
+            if replies:
+                await self._answer(ref, state, replies[0])
+        elif state.state == "ended":
+            await self._follow_up(ref, state)
+
+    async def _follow_up(self, ref: ItemRef, state: ItemState) -> None:
+        """A mention of the bot after a run ended starts the next run (§6.4); the first run
+        starts only by handing the item over."""
+        try:
+            item = await self.tracker.item(ref)
+        except ItemGone:
             return
-        replies = await self.tracker.replies(ref, state.asked_at)
-        if replies:
-            await self._answer(ref, state, replies[0])
+        replies = await self.tracker.replies(ref, state.ended_at)
+        if state.ended_at is None:
+            # A state from before ended_at: only a mention that is the item's newest comment
+            # counts, so an old one is not taken up by an unrelated later comment.
+            newest = max((c.created for c in item.comments if c.created is not None), default=None)
+            replies = [r for r in replies[-1:] if newest is not None and r.created == newest]
+        if not replies:
+            return
+        resolution = self.projects.resolve(item.scope)
+        if resolution.project is None:
+            if resolution.claimants:
+                await self.tracker.post(ref, texts.claimed_twice(item.scope, list(resolution.claimants),
+                                                                 self.tracker.bridge))
+            else:
+                await self.tracker.post(ref, texts.unclaimed(item.scope))
+            state.ended_at = None  # told once; a later mention needs a newer comment
+            await self._save(ref, state)
+            return
+        await self._start(item, state, resolution.project, follow_up=replies[-1])
 
     async def reconcile(self, ref: ItemRef) -> None:
         """Catch up on an item assigned to the bot while the bridge was down (§10)."""
@@ -121,7 +149,8 @@ class Flow:
         elif not state.running:
             await self.handed_over(ref)
 
-    async def _start(self, item: Item, state: ItemState, project: str, *, retry: bool = False) -> None:
+    async def _start(self, item: Item, state: ItemState, project: str, *, retry: bool = False,
+                     follow_up: Reply | None = None) -> None:
         previous = state.model_copy()
         state.runs += 1
         state.task_id = task_id_for(item.ref.key, state.runs)
@@ -131,9 +160,10 @@ class Flow:
         state.request_id = None
         state.asked_at = None
         state.told_still_working = False
+        state.ended_at = None
         if not retry:
             state.retries = 0
-        message = await self._task_message(item, state.task_id, project)
+        message = await self._task_message(item, state.task_id, project, follow_up)
         # The state goes on the item first: Exradius's events for this task id may come
         # back at once, and they are matched against it.
         await self._save(item.ref, state)
@@ -144,7 +174,8 @@ class Flow:
             raise
         log.info("published %s for project %s", state.task_id, project)
 
-    async def _task_message(self, item: Item, task_id: str, project: str) -> dict[str, Any]:
+    async def _task_message(self, item: Item, task_id: str, project: str,
+                            follow_up: Reply | None = None) -> dict[str, Any]:
         attachments, skipped = await self._attachments(item.attachments)
         context: dict[str, Any] = {"item": {
             "key": item.ref.key,
@@ -160,11 +191,21 @@ class Flow:
             context["skipped_attachments"] = skipped
         title = item.title.strip()
         body = item.body.strip()
+        instructions = title + (f"\n\n{body}" if body else "")
+        if follow_up is not None:
+            # The request is the newest mention; the item and the earlier runs' comments
+            # are what it follows up on.
+            who = f" from {follow_up.author.name}" if follow_up.author else ""
+            instructions += f"\n\nFollow-up{who}, after the earlier run on this item:\n\n{follow_up.body.strip()}"
+            context["follow_up"] = {
+                **({"author": follow_up.author.name} if follow_up.author else {}),
+                "created": _iso(follow_up.created),
+            }
         return {
             "version": 1,
             "task_id": task_id,
             "project": project,
-            "instructions": title + (f"\n\n{body}" if body else ""),
+            "instructions": instructions,
             "context": context,
             "attachments": attachments,
             "correlation": {
@@ -283,8 +324,8 @@ class Flow:
         if state.label is None:
             self._take_agent(state, event)
         attached, failed = await self._upload_artifacts(ref, payload.get("artifacts") or [])
-        await self.tracker.post(ref, texts.result(state.label, payload, attached, failed))
-        await self._end(ref, state)
+        posted = await self.tracker.post(ref, texts.result(state.label, payload, attached, failed))
+        await self._end(ref, state, posted)
         log.info("%s ended: %s", state.task_id, payload.get("state"))
 
     async def _rejected(self, ref: ItemRef, state: ItemState, reason: str) -> None:
@@ -297,8 +338,8 @@ class Flow:
                 return
             await self._start(item, state, state.project, retry=True)
             return
-        await self.tracker.post(ref, texts.rejected(reason))
-        await self._end(ref, state)
+        posted = await self.tracker.post(ref, texts.rejected(reason))
+        await self._end(ref, state, posted)
         log.info("%s was rejected: %s", state.task_id, reason)
 
     async def _upload_artifacts(self, ref: ItemRef, artifacts: list[dict]) -> tuple[list[str], list[str]]:
@@ -317,10 +358,11 @@ class Flow:
                 failed.append(name)
         return attached, failed
 
-    async def _end(self, ref: ItemRef, state: ItemState) -> None:
+    async def _end(self, ref: ItemRef, state: ItemState, posted: datetime | None) -> None:
         state.state = "ended"
         state.request_id = None
         state.asked_at = None
+        state.ended_at = posted or datetime.now(UTC)
         state.retries = 0
         await self._save(ref, state)
         await self._hand_back(ref)

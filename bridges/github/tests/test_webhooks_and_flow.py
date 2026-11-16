@@ -147,10 +147,24 @@ async def test_assign_ask_answer_finish(post, fake, broker, exradius):
     assert fake.assignees(key) == ["ayse"]
     assert decode_state(fake.bodies(key)[-1])["state"] == "ended"
 
-    # Handing it over again starts a second run.
+    # A comment without a mention after the run starts nothing; one that mentions the bot
+    # starts a follow-up run, as asking a colleague again would.
+    fake.add_comment(key, fake.mehmet, "Nice.")
+    assert await post("issue_comment", commented(REPO, 10, fake.mehmet)) == 200
+    assert len(broker.tasks) == 1
+    fake.add_comment(key, fake.ayse, "@exradius-bot could you share screenshots of the admin too?")
+    assert await post("issue_comment", commented(REPO, 10, fake.ayse)) == 200
+    assert [t["task_id"] for t in broker.tasks] == ["plane-10", "plane-10-2"]
+    assert broker.tasks[-1]["instructions"].endswith(
+        "Follow-up from ayse, after the earlier run on this item:\n\ncould you share screenshots of the admin too?")
+    assert fake.assignees(key) == ["ayse"]  # a follow-up does not take the issue
+
+    # Handing it over again also starts a run, once this one has ended.
+    await broker.deliver(event("result", item, "plane-10-2", {"state": "completed", "summary": "Here."},
+                               agent="scout", bridge="github", instance=INSTANCE))
     fake.assign(key, fake.bot)
     assert await post("issues", assigned(REPO, 10, fake.bot)) == 200
-    assert [t["task_id"] for t in broker.tasks] == ["plane-10", "plane-10-2"]
+    assert [t["task_id"] for t in broker.tasks] == ["plane-10", "plane-10-2", "plane-10-3"]
 
 
 async def test_an_unclaimed_repository_is_told_and_handed_back(post, fake, broker):

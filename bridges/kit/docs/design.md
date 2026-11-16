@@ -154,7 +154,8 @@ The state becomes `waiting` with the `request_id` and the time of the question, 
 tracker gave it to the comment (so replies are compared by the tracker's clock). On
 `commented` while waiting, the kit asks `replies(ref, since=asked_at)` and publishes the
 first reply on `exradius.answers`: its Markdown, and its attachments within the size cap
-(§7). The state becomes `active`. Comments while nothing waits are ignored in v1.
+(§7). The state becomes `active`. Comments while a run is active and nothing waits are
+ignored; after a run they can start the next one (§6.4).
 
 ### 6.3 Results
 
@@ -173,8 +174,30 @@ go on. The transcript link is not posted: it works for anyone who has it.
 On a `rejected` status: "This could not start:" and the reason. A duplicate task id is
 retried instead (§7).
 
-After any result or rejection the item is **handed back**, the state becomes `ended`, and
-handing it to the bot again starts a new run.
+After any result or rejection the item is **handed back**, the state becomes `ended` with
+`ended_at`, the time the tracker gave the outcome's comment, and handing it to the bot again
+starts a new run.
+
+### 6.4 Follow-ups
+
+Added 2026-11-16, after the first GitHub trial: people who got an answer mention the bot
+again, as they would a colleague, and expect it to go on.
+
+On `commented` while the state is `ended`, the kit asks `replies(ref, since=ended_at)`. The
+newest reply, if any, starts the next run (§6.1 from "Otherwise"), without the item being
+handed over again:
+
+- The task's `instructions` are the title and body, then "Follow-up from *name*, after the
+  earlier run on this item:" and the reply's Markdown. `context.follow_up` holds its author
+  and time; `context.comments` holds every comment, the earlier runs' questions and results
+  among them.
+- The item is not assigned to the bot, so the run's end hands nothing back.
+- A scope that no single project claims is said once, as in §6.1, and `ended_at` is
+  cleared, so only a newer mention brings it up again.
+- A state written before `ended_at` existed has none: only a reply that is the item's
+  newest comment counts, so an old mention is not taken up by an unrelated later comment.
+- The first run of an item still starts only by handing it over: a mention on an item that
+  never ran starts nothing.
 
 ## 7. The task message
 
@@ -209,7 +232,8 @@ on the item (a Jira issue property, ...):
   "request_id": "a7c1...",
   "asked_at": "2026-11-08T10:02:41Z",
   "retries": 0,
-  "told_still_working": false
+  "told_still_working": false,
+  "ended_at": null
 }
 ```
 
@@ -293,7 +317,6 @@ Against `FakeTracker`, `FakeBroker` and `FakeExradius` (httpx `MockTransport`):
 
 ## 13. Later
 
-- A mention of the bot after a run ended starting a follow-up run.
 - Cancel in the flow (in Jira, unassigning the bot). Exradius has a public cancel since
   2026-11-14 (integration-api.md §10), and `Broker.publish_cancel` sends it; the flow does
   not use it yet.

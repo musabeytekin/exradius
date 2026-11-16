@@ -135,7 +135,5 @@ tests/
 
 ## 10. Later
 
-- A mention of the bot after the run ended starting a follow-up run (v0 §15 showed
-  people expect it).
 - Cancel by unassigning, once Exradius has a public cancel.
 - Jira Data Center.
