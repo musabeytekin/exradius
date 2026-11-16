@@ -51,6 +51,8 @@ spec:
                 secretKeyRef: {name: {{ $gh.existingSecret }}, key: {{ $gh.webhookSecretKey }}}
             - name: GITHUB_API_URL
               value: {{ $gh.apiUrl | quote }}
+            - name: GITHUB_ARTIFACTS_BRANCH
+              value: {{ $gh.artifactsBranch | quote }}
             - name: EXRADIUS_BROKER_URL
               value: {{ include "exradius.brokerUrl" . | quote }}
             {{- with include "exradius.brokerSecret" . }}

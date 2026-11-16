@@ -4,7 +4,12 @@ Connects GitHub issues to one [Exradius](https://github.com/musabeytekin/exradiu
 installation through a bot account. Assign an issue to the bot as you would to a colleague:
 Exradius picks the agent, the bot says which agent took it, the agent's questions come back
 as the bot's comments, a comment that mentions the bot answers them, and the result is
-posted before the issue is assigned back to its author. Assigning it again runs it again.
+posted before the issue is assigned back to its author. Mentioning the bot afterwards, or
+assigning the issue again, runs it again.
+
+GitHub issues take no attachments through the API, so text files a run produced go into the
+result comment, and anything else (screenshots, binaries) is committed to a branch of the
+repository, `exradius-artifacts`, and shown from there (design §4.1).
 
 The design is in [docs/design.md](docs/design.md). It is built on the bridge kit
 ([../kit](../kit)), like the Jira bridge.
@@ -64,8 +69,8 @@ docker run --env-file bridge.env -p 8080:8080 exradius-github
 
 `bridge.env` holds `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `EXRADIUS_BROKER_URL`,
 `EXRADIUS_API_URL` and `EXRADIUS_INTEGRATION_TOKEN`, and optionally `GITHUB_API_URL`
-(`https://<host>/api/v3` for GitHub Enterprise Server), `MAX_ATTACHMENT_MB` and `PORT`
-(design §7). At startup the bridge lists every problem it finds before it exits.
+(`https://<host>/api/v3` for GitHub Enterprise Server), `GITHUB_ARTIFACTS_BRANCH`,
+`MAX_ATTACHMENT_MB` and `PORT` (design §7). At startup the bridge lists every problem it finds before it exits.
 
 ## Development
 

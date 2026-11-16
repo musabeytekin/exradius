@@ -119,3 +119,36 @@ class GitHub:
 
     async def remove_assignees(self, repo: str, number: int, logins: list[str]) -> dict:
         return await self._json("DELETE", f"/repos/{repo}/issues/{number}/assignees", json={"assignees": logins})
+
+    # -- git data: the artifacts branch (design §4.1) ----------------------------------------
+
+    async def branch_head(self, repo: str, branch: str) -> str | None:
+        """The commit a branch points at; ``None`` when there is no such branch."""
+        response = await self._request("GET", f"/repos/{repo}/git/ref/heads/{branch}", ok=(200, 404))
+        return response.json()["object"]["sha"] if response.status_code == 200 else None
+
+    async def commit_tree(self, repo: str, commit: str) -> str:
+        return (await self._json("GET", f"/repos/{repo}/git/commits/{commit}"))["tree"]["sha"]
+
+    async def create_blob(self, repo: str, content_base64: str) -> str:
+        body = {"content": content_base64, "encoding": "base64"}
+        return (await self._json("POST", f"/repos/{repo}/git/blobs", json=body))["sha"]
+
+    async def create_tree(self, repo: str, files: dict[str, str], base_tree: str | None) -> str:
+        """``files`` maps paths to blob shas."""
+        body: dict[str, Any] = {"tree": [{"path": path, "mode": "100644", "type": "blob", "sha": sha}
+                                         for path, sha in files.items()]}
+        if base_tree:
+            body["base_tree"] = base_tree
+        return (await self._json("POST", f"/repos/{repo}/git/trees", json=body))["sha"]
+
+    async def create_commit(self, repo: str, message: str, tree: str, parents: list[str]) -> str:
+        body = {"message": message, "tree": tree, "parents": parents}
+        return (await self._json("POST", f"/repos/{repo}/git/commits", json=body))["sha"]
+
+    async def create_branch(self, repo: str, branch: str, commit: str) -> None:
+        await self._request("POST", f"/repos/{repo}/git/refs", json={"ref": f"refs/heads/{branch}", "sha": commit})
+
+    async def move_branch(self, repo: str, branch: str, commit: str) -> None:
+        """Fast-forward only: a ``422`` means someone else moved it first."""
+        await self._request("PATCH", f"/repos/{repo}/git/refs/heads/{branch}", json={"sha": commit, "force": False})

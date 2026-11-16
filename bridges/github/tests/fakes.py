@@ -33,6 +33,14 @@ class FakeGitHub:
         self.comments: dict[tuple[str, int], list[dict]] = defaultdict(list)
         self.page_size = page_size
         """Small, so pagination is exercised."""
+        self.blobs: dict[str, bytes] = {}
+        self.trees: dict[str, dict[str, str]] = {}
+        """Tree sha to its files (path to blob sha), flattened."""
+        self.commits: dict[str, dict] = {}
+        self.refs: dict[tuple[str, str], str] = {}
+        """(repo, branch) to commit sha."""
+        self.race = 0
+        """Moves the branch behind the bridge's back this many times (a concurrent writer)."""
         self._ids = itertools.count(1000)
         self._clock = datetime(2026, 11, 16, 9, 0, tzinfo=UTC)
 
@@ -79,6 +87,14 @@ class FakeGitHub:
     def assignees(self, key: tuple[str, int]) -> list[str]:
         return [a["login"] for a in self.issues[key]["assignees"]]
 
+    def files(self, repo: str, branch: str) -> dict[str, bytes]:
+        """The files on a branch's head."""
+        tree = self.trees[self.commits[self.refs[(repo, branch)]]["tree"]]
+        return {path: self.blobs[sha] for path, sha in tree.items()}
+
+    def _sha(self, kind: str) -> str:
+        return f"{kind}{next(self._ids):037d}"
+
     # -- the transport ------------------------------------------------------------------
 
     def transport(self) -> httpx.MockTransport:
@@ -110,6 +126,10 @@ class FakeGitHub:
                             comment["body"] = body["body"]
                             return _json(200, comment)
                 return _error(404, "Not Found")
+        if m := re.fullmatch(r"/repos/([^/]+/[^/]+)/git/(.+)", path):
+            if login not in self.collaborators[m[1]]:
+                return _error(404, "Not Found")
+            return self._git(m[1], method, m[2], body)
         if m := re.fullmatch(r"/repos/([^/]+/[^/]+)/issues/(\d+)(/.*)?", path):
             key = (m[1], int(m[2]))
             if key not in self.issues:
@@ -126,6 +146,48 @@ class FakeGitHub:
             nxt = request.url.copy_merge_params({"page": page + 1})
             headers["Link"] = f'<{nxt}>; rel="next"'
         return httpx.Response(200, json=chunk, headers=headers)
+
+    def _git(self, repo: str, method: str, rest: str, body: Any) -> httpx.Response:
+        import base64
+
+        if (m := re.fullmatch(r"ref/heads/(.+)", rest)) and method == "GET":
+            sha = self.refs.get((repo, m[1]))
+            return _json(200, {"object": {"sha": sha}}) if sha else _error(404, "Not Found")
+        if rest == "blobs" and method == "POST":
+            sha = self._sha("b")
+            self.blobs[sha] = base64.b64decode(body["content"])
+            return _json(201, {"sha": sha})
+        if rest == "trees" and method == "POST":
+            files = dict(self.trees[body["base_tree"]]) if body.get("base_tree") else {}
+            files.update({e["path"]: e["sha"] for e in body["tree"]})
+            sha = self._sha("t")
+            self.trees[sha] = files
+            return _json(201, {"sha": sha})
+        if rest == "commits" and method == "POST":
+            sha = self._sha("c")
+            self.commits[sha] = {"tree": body["tree"], "parents": body["parents"], "message": body["message"]}
+            return _json(201, {"sha": sha})
+        if (m := re.fullmatch(r"commits/(\w+)", rest)) and method == "GET":
+            return _json(200, {"sha": m[1], "tree": {"sha": self.commits[m[1]]["tree"]}})
+        if rest == "refs" and method == "POST":
+            branch = body["ref"].removeprefix("refs/heads/")
+            if (repo, branch) in self.refs:
+                return _error(422, "Reference already exists")
+            self.refs[(repo, branch)] = body["sha"]
+            return _json(201, {"ref": body["ref"]})
+        if (m := re.fullmatch(r"refs/heads/(.+)", rest)) and method == "PATCH":
+            key = (repo, m[1])
+            if self.race:
+                self.race -= 1
+                other = self._sha("c")
+                self.commits[other] = {"tree": self.commits[self.refs[key]]["tree"], "parents": [self.refs[key]],
+                                       "message": "someone else"}
+                self.refs[key] = other
+            if self.refs[key] not in self.commits[body["sha"]]["parents"]:
+                return _error(422, "Update is not a fast forward")
+            self.refs[key] = body["sha"]
+            return _json(200, {"object": {"sha": body["sha"]}})
+        return _error(404, f"no route {method} git/{rest}")
 
     def _issue_routes(self, login, method, key, rest, query, body, request) -> httpx.Response:
         issue = self.issues[key]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -39,6 +40,7 @@ class Settings:
     github_api_url: str
     github_token: str
     github_webhook_secret: str
+    artifacts_branch: str
     port: int
     kit: KitSettings
 
@@ -61,6 +63,9 @@ class Settings:
         api = (env.get("GITHUB_API_URL", "").strip() or "https://api.github.com").rstrip("/")
         if not api.startswith(("https://", "http://")):
             problems.append("GITHUB_API_URL must start with https://")
+        branch = env.get("GITHUB_ARTIFACTS_BRANCH", "").strip() or "exradius-artifacts"
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch) or ".." in branch or branch.endswith((".lock", "/")):
+            problems.append(f"GITHUB_ARTIFACTS_BRANCH is not a branch name: {branch!r}")
         raw_port = env.get("PORT", "8080").strip() or "8080"
         port = int(raw_port) if raw_port.isdigit() and 0 < int(raw_port) < 65536 else 0
         if not port:
@@ -69,6 +74,7 @@ class Settings:
             github_api_url=api,
             github_token=text("GITHUB_TOKEN"),
             github_webhook_secret=text("GITHUB_WEBHOOK_SECRET"),
+            artifacts_branch=branch,
             port=port,
         )
         try:

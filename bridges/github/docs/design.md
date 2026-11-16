@@ -62,11 +62,33 @@ repositories: [acme/plane]
 | `start()` | `GET /user` with the token gives the bot's login, which identifies assignments, mentions and the bot's own comments. A `401` or `403` is a `TrackerProblem`. |
 | `item()` | `GET /repos/{repo}/issues/{n}` and its comments. `details`: repository, number, state, labels, assignees, milestone, created. A `404` or `410` is `ItemGone`. |
 | `post()` | `POST .../comments`, the kit's message as Markdown; a mention is `@login`. |
-| `attach()` | GitHub issues have no attachments API. A text file is held and put into the next comment (the result's) as a `<details>` block, up to 50,000 characters in all; anything else fails and the kit names it as not attached. |
+| `attach()` | §4.1. |
 | `hand_back()` | Only if the bot is still an assignee: add the issue's author (GitHub leaves out, silently, an author who cannot be assigned), then remove the bot. |
 | `load_state()`, `save_state()` | §5. |
 | `assigned_to_bot()` | `GET /issues?filter=assigned&state=open`, pull requests left out: the startup reconcile. |
 | `replies()` | Comments after `since`, not by the bot, that mention `@<bot>` (read through the API, never trusted from the webhook). The mention and the lines a Quote reply copies (`> ...`) are taken out. |
+
+### 4.1 Files a run produced
+
+GitHub's API has no way to attach a file to an issue or a comment: the editor's uploads
+(`github.com/user-attachments/...`) take a browser session, not a token. So `attach()`:
+
+- holds a **text file** and puts it into the next comment (the result's) as a `<details>`
+  block, while the inlined text stays within 50,000 characters;
+- commits **anything else** (and text past that) to the **artifacts branch**,
+  `exradius-artifacts` by default (`GITHUB_ARTIFACTS_BRANCH`), at `<item key>/<name>`, with
+  the git data API as the bot: blob, tree on the branch's head, commit, fast-forward the
+  ref, and again on top when someone moved it meanwhile (three tries). The first time it
+  makes the branch as an orphan, with no history of the code, and a README saying what it is
+  and that it can be deleted. Files up to 50 MB.
+- shows the file in that comment, linked to `https://github.com/<repo>/blob/<commit>/<path>?raw=true`:
+  an image (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) as an image, the rest as a link. The
+  link is pinned to its commit, so a later run's file of the same name does not change an
+  earlier comment.
+
+The files keep the repository's own access: in a private repository only people who can
+read it see them. The bot needs write access, which assigning issues needs anyway; a branch
+rule that blocks it makes the file "could not attach", as before. This is a stopgap (§9).
 
 Files people put in an issue are links in its Markdown (GitHub uploads them for the
 editor); the agent sees the links. `Item.attachments` is always empty.
@@ -101,6 +123,7 @@ own comments as an HTML comment that never renders:
 | `GITHUB_TOKEN` | The bot account's token (§2) |
 | `GITHUB_WEBHOOK_SECRET` | The webhooks' secret |
 | `GITHUB_API_URL` | Default `https://api.github.com`; `https://<host>/api/v3` for Enterprise Server |
+| `GITHUB_ARTIFACTS_BRANCH` | Default `exradius-artifacts` (§4.1) |
 | `EXRADIUS_BROKER_URL`, `EXRADIUS_API_URL`, `EXRADIUS_INTEGRATION_TOKEN`, `MAX_ATTACHMENT_MB` | The kit's (kit §10) |
 | `EXRADIUS_BROKER_USERNAME`, `EXRADIUS_BROKER_PASSWORD` | Optional: the broker's user, quoted into the URL (how the Helm chart passes it) |
 | `PORT` | Default `8080` |
@@ -117,3 +140,12 @@ named build context, like the Jira bridge's. The Helm chart runs it as the optio
 Tests run against an in-memory GitHub (`tests/fakes.py`: tokens, collaborators, issues,
 comments, pagination) and the kit's fake broker and Exradius: the tracker's calls, the
 state markers, replies and mentions, webhooks, and the flow from assignment to result.
+
+## 9. Later
+
+- **Files without a branch.** The artifacts branch (§4.1) works but writes to people's
+  repositories, and the files outlive the issue. Better would be a place Exradius itself
+  serves to the people who can see the issue: a short-lived, per-viewer link through the
+  panel's sign-in, or an object store link scoped to the issue. It needs Exradius to serve
+  artifacts to people outside the admin, which it does not do yet.
+- A mention on an issue that never ran starting its first run (today: assign it).

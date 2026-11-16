@@ -65,8 +65,6 @@ async def test_post_renders_mentions_and_inlines_text_files(fake, tracker):
     key = fake.add_issue(REPO, 2, "x", author=fake.ayse)
     ref = ref_for(REPO, 2)
     await tracker.attach(ref, "notes.md", "text/markdown", b"# Notes\n```sh\nmake\n```\n")
-    with pytest.raises(ValueError, match="not a text file"):
-        await tracker.attach(ref, "shot.png", "image/png", b"\x89PNG\x00\x00")
     posted = await tracker.post(ref, Message((
         Paragraph((Span("Scout", bold=True), Span(" asks "), Mention(Person("ayse", "ayse")), Span(":"))),
         Markdown("Which *branch*?"),
@@ -111,3 +109,40 @@ async def test_replies_need_a_mention_and_drop_it(fake, tracker):
     fake.add_comment(key, fake.bot, "@exradius-bot talking to myself")
     replies = await tracker.replies(ref_for(REPO, 6), since=asked)
     assert [(r.author, r.body) for r in replies] == [(Person("ayse", "ayse"), "the preview one")]
+
+
+async def test_other_files_go_to_the_artifacts_branch(fake, tracker):
+    key = fake.add_issue(REPO, 8, "x", author=fake.ayse)
+    ref = ref_for(REPO, 8)
+    await tracker.attach(ref, "admin orders.png", "image/png", b"\x89PNG\x00one")
+    await tracker.attach(ref, "report.pdf", "application/pdf", b"%PDF\x00")
+    await tracker.post(ref, Message((Paragraph((Span("done"),)),)))
+    files = fake.files(REPO, "exradius-artifacts")
+    assert files == {"README.md": files["README.md"], "plane-8/admin orders.png": b"\x89PNG\x00one",
+                     "plane-8/report.pdf": b"%PDF\x00"}
+    assert b"can be deleted" in files["README.md"]
+    first = next(c for c in fake.commits.values() if not c["parents"])  # an orphan: no history of the code
+    assert first["message"] == "plane-8: admin orders.png"
+    head = fake.refs[(REPO, "exradius-artifacts")]
+    [body] = fake.bodies(key)
+    assert f"![admin orders.png](https://github.com/acme/plane/blob/" in body
+    assert "/plane-8/admin%20orders.png?raw=true)" in body
+    assert f"[Open](https://github.com/acme/plane/blob/{head}/plane-8/report.pdf?raw=true)" in body
+
+    # A later run's file of the same name: a new commit, and the old link still points at the old one.
+    fake.race = 1  # someone else moves the branch first: the bridge goes again on top of it
+    await tracker.attach(ref, "admin orders.png", "image/png", b"\x89PNG\x00two")
+    await tracker.post(ref, Message((Paragraph((Span("again"),)),)))
+    assert fake.files(REPO, "exradius-artifacts")["plane-8/admin orders.png"] == b"\x89PNG\x00two"
+    assert fake.commits[fake.refs[(REPO, "exradius-artifacts")]]["message"] == "plane-8: admin orders.png"
+    assert fake.bodies(key)[1].count("![admin orders.png]") == 1
+
+
+async def test_a_long_text_file_goes_to_the_branch_and_a_refusal_is_raised(fake, tracker):
+    fake.add_issue(REPO, 9, "x", author=fake.ayse)
+    ref = ref_for(REPO, 9)
+    await tracker.attach(ref, "big.log", "text/plain", b"x" * 60_000)
+    assert "plane-9/big.log" in fake.files(REPO, "exradius-artifacts")
+    fake.collaborators[REPO].discard(fake.bot)  # the bot lost write access
+    with pytest.raises(Exception, match="404"):
+        await tracker.attach(ref, "shot.png", "image/png", b"\x89PNG\x00")

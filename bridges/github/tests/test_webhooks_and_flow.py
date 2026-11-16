@@ -142,8 +142,10 @@ async def test_assign_ask_answer_finish(post, fake, broker, exradius):
     })
     result = texts(fake, key)[-1]
     assert result.startswith("**Scout** finished.\n\nRegistered the route.")
-    assert "report.md" in result and "shot.png" in result
+    assert "Attached: report.md, shot.png" in result and "Could not attach" not in result
     assert "<details><summary>report.md</summary>\n\n```\n# Report\nAll good.\n```" in result
+    assert "![shot.png](https://github.com/acme/plane/blob/" in result
+    assert fake.files(REPO, "exradius-artifacts")["plane-10/shot.png"] == b"\x89PNG\x00"
     assert fake.assignees(key) == ["ayse"]
     assert decode_state(fake.bodies(key)[-1])["state"] == "ended"
 
@@ -229,6 +231,10 @@ def test_settings():
     chart = env | {"EXRADIUS_BROKER_USERNAME": "user_x", "EXRADIUS_BROKER_PASSWORD": "p@ss/w:rd"}
     assert Settings.from_env(chart).kit.broker_url == "amqp://user_x:p%40ss%2Fw%3Ard@rabbitmq:5672/"
     assert web_url("https://ghe.acme.test/api/v3") == "https://ghe.acme.test"
+    assert settings.artifacts_branch == "exradius-artifacts"
+    assert Settings.from_env(env | {"GITHUB_ARTIFACTS_BRANCH": "bot/files"}).artifacts_branch == "bot/files"
+    with pytest.raises(SettingsError, match="GITHUB_ARTIFACTS_BRANCH is not a branch name"):
+        Settings.from_env(env | {"GITHUB_ARTIFACTS_BRANCH": "a..b"})
     with pytest.raises(SettingsError) as missing:
         Settings.from_env({"PORT": "x", "GITHUB_API_URL": "ghe.acme.test"})
     text = str(missing.value)

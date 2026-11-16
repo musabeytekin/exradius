@@ -20,7 +20,7 @@ log = logging.getLogger("exradius_github")
 
 async def serve(settings: Settings) -> None:
     github = GitHub(settings.github_api_url, settings.github_token)
-    tracker = GitHubTracker(github, settings.github_url)
+    tracker = GitHubTracker(github, settings.github_url, artifacts_branch=settings.artifacts_branch)
     kit = Kit(tracker, settings.kit, software=f"exradius-github {version('exradius-github')}")
     try:
         await kit.start()

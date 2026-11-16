@@ -7,8 +7,10 @@ import binascii
 import json
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 from exradius_bridge_kit import (
     AttachmentInfo,
@@ -30,6 +32,26 @@ STARTING = "Exradius is picking an agent for this."
 """The comment that carries the state when the bot has not commented on the issue yet."""
 INLINE_LIMIT = 50_000
 """Characters of text files inlined in one comment (GitHub's limit is 65,536)."""
+ARTIFACTS_BRANCH = "exradius-artifacts"
+MAX_FILE_BYTES = 50 * 1024 * 1024
+"""Past this, GitHub's API refuses a blob; it also keeps the branch reasonable."""
+IMAGES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+BRANCH_README = """# Exradius artifacts
+
+Files that Exradius agents produced for this repository's issues, one folder per issue,
+committed by the GitHub bridge so the issue's comments can show them (GitHub issues have
+no attachments API). Nothing in the repository depends on this branch: it can be deleted
+at any time, and the bridge creates it again when it next needs it.
+"""
+
+
+@dataclass(frozen=True)
+class _Pending:
+    """A file for the item's next comment: text to inline, or a file on the artifacts branch."""
+
+    name: str
+    text: str | None = None
+    url: str | None = None
 
 
 def ref_for(repo: str, number: int) -> ItemRef:
@@ -89,12 +111,13 @@ class GitHubTracker:
     bridge = "github"
     config_model = GitHubConfig
 
-    def __init__(self, github: GitHub, instance: str):
+    def __init__(self, github: GitHub, instance: str, *, artifacts_branch: str = ARTIFACTS_BRANCH):
         self.github = github
         self.instance = instance
+        self.artifacts_branch = artifacts_branch
         self.bot: Person | None = None
-        self._inline: dict[str, list[tuple[str, str]]] = {}
-        """Text files handed to ``attach``, posted with the item's next comment."""
+        self._pending: dict[str, list[_Pending]] = {}
+        """Files handed to ``attach``, shown in the item's next comment (the result's)."""
 
     def claims(self, config: GitHubConfig) -> Iterable[str]:
         return config.repositories
@@ -172,23 +195,62 @@ class GitHubTracker:
 
     async def post(self, ref: ItemRef, message: Message) -> datetime | None:
         body = message.plain()
-        for name, text in self._inline.pop(ref.id, []):
-            fence = "````" if "```" in text else "```"
-            body += f"\n\n<details><summary>{name}</summary>\n\n{fence}\n{text.rstrip()}\n{fence}\n\n</details>"
+        for file in self._pending.pop(ref.id, []):
+            if file.url is not None:
+                image = any(file.name.lower().endswith(ext) for ext in IMAGES)
+                body += f"\n\n**{file.name}**\n\n" + (f"![{file.name}]({file.url})" if image else f"[Open]({file.url})")
+            else:
+                text = file.text or ""
+                fence = "````" if "```" in text else "```"
+                body += f"\n\n<details><summary>{file.name}</summary>\n\n{fence}\n{text.rstrip()}\n{fence}\n\n</details>"
         repo, number = parse_ref(ref)
         comment = await self.github.add_comment(repo, number, body)
         return _time((comment or {}).get("created_at"))
 
     async def attach(self, ref: ItemRef, name: str, content_type: str, data: bytes) -> None:
-        """GitHub issues take no attachments: a text file goes into the next comment (the
-        result's), anything else is named there as not attached."""
+        """GitHub issues take no attachments (design §4.1). A text file that fits goes into
+        the next comment (the result's); anything else is committed to the artifacts branch
+        and shown there: an image as an image, the rest as a link."""
+        pending = self._pending.setdefault(ref.id, [])
         text = _is_text(content_type, data)
-        if text is None:
-            raise ValueError(f"{name} is not a text file, and GitHub issues take no attachments")
-        pending = self._inline.setdefault(ref.id, [])
-        if sum(len(t) for _, t in pending) + len(text) > INLINE_LIMIT:
-            raise ValueError(f"{name} is too long to put in a comment")
-        pending.append((name, text))
+        inlined = sum(len(f.text) for f in pending if f.text is not None)
+        if text is not None and inlined + len(text) <= INLINE_LIMIT:
+            pending.append(_Pending(name, text=text))
+            return
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError(f"{name} is larger than {MAX_FILE_BYTES // (1024 * 1024)} MB")
+        pending.append(_Pending(name, url=await self._commit_artifact(ref, name, data)))
+
+    async def _commit_artifact(self, ref: ItemRef, name: str, data: bytes) -> str:
+        """One commit on the artifacts branch, made from the bot's token with the git data API
+        (an orphan branch the first time); the link is pinned to that commit, so a later run's
+        file of the same name does not change an earlier comment."""
+        repo, _ = parse_ref(ref)
+        path = f"{ref.key}/{name.replace('/', '_')}"
+        blob = await self.github.create_blob(repo, base64.b64encode(data).decode())
+        for _attempt in range(3):
+            head = await self.github.branch_head(repo, self.artifacts_branch)
+            if head is None:
+                readme = await self.github.create_blob(repo, base64.b64encode(BRANCH_README.encode()).decode())
+                tree = await self.github.create_tree(repo, {"README.md": readme, path: blob}, None)
+                commit = await self.github.create_commit(repo, f"{ref.key}: {name}", tree, [])
+                try:
+                    await self.github.create_branch(repo, self.artifacts_branch, commit)
+                except GitHubError as exc:
+                    if exc.status == 422:  # created meanwhile: go again on top of it
+                        continue
+                    raise
+            else:
+                tree = await self.github.create_tree(repo, {path: blob}, await self.github.commit_tree(repo, head))
+                commit = await self.github.create_commit(repo, f"{ref.key}: {name}", tree, [head])
+                try:
+                    await self.github.move_branch(repo, self.artifacts_branch, commit)
+                except GitHubError as exc:
+                    if exc.status == 422:  # moved meanwhile: go again on top of it
+                        continue
+                    raise
+            return f"{self.instance}/{repo}/blob/{commit}/{quote(path)}?raw=true"
+        raise ValueError(f"the {self.artifacts_branch} branch kept moving while {name} was committed")
 
     async def hand_back(self, ref: ItemRef) -> None:
         """To the issue's author, unless the bot no longer has the issue; GitHub leaves the

@@ -422,6 +422,9 @@ github:
   enabled: false
   # https://<host>/api/v3 for GitHub Enterprise Server.
   apiUrl: https://api.github.com
+  # The branch, in each repository, where the bot commits the files a run produced that a
+  # comment cannot hold (images, binaries), so the result comment can show them.
+  artifactsBranch: exradius-artifacts
   # One Secret with the bot account's token, the webhook's secret, and an integration token
   # for the bridge github (panel: Settings, Integrations). The bridge stops with a clear
   # message until every key is there.
