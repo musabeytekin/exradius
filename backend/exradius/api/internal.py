@@ -21,13 +21,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
-from sqlalchemy import delete, select
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from pydantic import ValidationError
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
+from exradius import artifacts
 from exradius.api.deps import DB, State
 from exradius.crypto import hash_token
 from exradius.environment import config_environment_text
@@ -187,14 +190,62 @@ async def create_info_request(body: i.InfoRequestCreate, run: RunDep, session: D
     return i.InfoRequestCreated(request_id=str(request.id))
 
 
+@router.post("/artifacts", response_model=i.StoredArtifact, status_code=201)
+async def upload_artifact(request: Request, name: Annotated[str, Query()], run: RunDep, session: DB, state: State):
+    await artifacts.record_upload_attempt(session, run.id)
+    try:
+        filename = i.ArtifactName(name=name).name
+    except ValidationError as exc:
+        raise HTTPException(422, "invalid artifact name") from exc
+    content = await artifacts.read_body(request, artifacts.MAX_FILE_BYTES)
+    run = await artifacts.lock_run(session, run.id)
+    artifact = await artifacts.save(session, state.store, run, filename, content)
+    await session.commit()
+    return artifact
+
+
+@router.get("/artifacts", response_model=list[i.StoredArtifact])
+async def list_artifacts(run: RunDep, session: DB):
+    return (await session.scalars(select(Artifact).where(Artifact.run_id == run.id)
+                                 .order_by(Artifact.created_at, Artifact.id))).all()
+
+
+@router.get("/artifacts/{artifact_id}", response_model=i.StoredArtifact)
+async def get_artifact(artifact_id: uuid.UUID, run: RunDep, session: DB):
+    artifact = await session.scalar(select(Artifact).where(Artifact.id == artifact_id, Artifact.run_id == run.id))
+    if artifact is None:
+        raise HTTPException(404, "artifact not found in this run")
+    return artifact
+
+
 @router.post("/result", status_code=204)
-async def submit_result(body: i.ResultSubmission, run: RunDep, session: DB, state: State):
-    # The last call wins: replace the output and the artifact list.
-    await session.execute(delete(Artifact).where(Artifact.run_id == run.id))
+async def submit_result(request: Request, run: RunDep, session: DB, state: State):
+    raw = await artifacts.read_body(request, artifacts.MAX_RESULT_BYTES)
+    try:
+        body = i.ResultSubmission.model_validate_json(raw)
+    except ValidationError as exc:
+        raise HTTPException(422, "invalid result submission") from exc
+    if body.artifacts:
+        await artifacts.record_upload_attempt(session, run.id)
+    run = await artifacts.lock_run(session, run.id)
+    selected = set(body.artifact_ids)
+    if selected:
+        owned = set(await session.scalars(select(Artifact.id).where(Artifact.run_id == run.id,
+                                                                  Artifact.id.in_(selected))))
+        if owned != selected:
+            raise HTTPException(404, "artifact not found in this run")
+    # Compatibility for existing runners: persist old inline uploads through the same limits.
     for upload in body.artifacts:
-        key = f"runs/{run.id}/artifacts/{uuid.uuid4().hex[:8]}-{upload.name}"
-        await state.store.put(key, base64.b64decode(upload.content_base64), upload.content_type)
-        session.add(Artifact(run_id=run.id, name=upload.name, content_type=upload.content_type, object_key=key))
+        try:
+            content = base64.b64decode(upload.content_base64, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise HTTPException(422, "invalid base64 artifact") from exc
+        artifact = await artifacts.save(session, state.store, run, upload.name, content)
+        selected.add(artifact.id)
+    await session.execute(update(Artifact).where(Artifact.run_id == run.id).values(selected=False))
+    if selected:
+        await session.execute(update(Artifact).where(Artifact.run_id == run.id, Artifact.id.in_(selected))
+                              .values(selected=True))
     run.output = body.output
     await session.commit()
 

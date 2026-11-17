@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import uuid
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -163,10 +164,11 @@ def _http_url(value: str | None) -> str | None:
 
 
 class ArtifactRef(BaseModel):
+    id: uuid.UUID | None = None
     name: str
     content_type: str
     url: str
-    """HTTP download URL served by the Exradius API (signed, see §4.3)."""
+    """Integration API URL; requires the owning bridge token."""
 
     _check_url = field_validator("url")(_http_url)
 

@@ -12,7 +12,6 @@ import httpx
 
 from exradius.schemas.internal import (
     AnswersResponse,
-    ArtifactUpload,
     AttachmentItem,
     InfoRequestCreate,
     InfoRequestCreated,
@@ -22,6 +21,7 @@ from exradius.schemas.internal import (
     ResultSubmission,
     RunSpecResponse,
     SessionReport,
+    StoredArtifact,
     ToolReport,
     TranscriptBatch,
     TranscriptEvent,
@@ -40,7 +40,10 @@ class RunApi(Protocol):
     async def report_session(self, session_id: str) -> None: ...
     async def append_transcript(self, events: list[TranscriptEvent]) -> None: ...
     async def create_info_request(self, question: str, context: str | None) -> str: ...
-    async def submit_result(self, output: Any, artifacts: list[ArtifactUpload]) -> None: ...
+    async def submit_result(self, output: Any, artifact_ids: list[str]) -> None: ...
+    async def upload_artifact(self, name: str, content: bytes) -> StoredArtifact: ...
+    async def list_artifacts(self) -> list[StoredArtifact]: ...
+    async def get_artifact(self, artifact_id: str) -> StoredArtifact: ...
     async def report_outcome(self, outcome: OutcomeReport) -> None: ...
     async def report(self, status: str) -> None: ...
     async def wait_answers(self, wait: float) -> AnswersResponse: ...
@@ -60,12 +63,12 @@ class _Http:
         await self._client.aclose()
 
     async def _request(self, method: str, path: str, body: Any = None, *, params: dict | None = None,
-                       timeout: float | None = None, attempts: int = 5) -> httpx.Response:
+                       timeout: float | None = None, attempts: int = 5, content: bytes | None = None) -> httpx.Response:
         last: Exception | None = None
         for attempt in range(attempts):
             try:
                 response = await self._client.request(
-                    method, path, json=body, params=params,
+                    method, path, json=body, params=params, content=content,
                     timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
                 )
                 if response.status_code >= 500:
@@ -101,9 +104,19 @@ class HttpRunApi(_Http):
         response = await self._request("POST", "/info-requests", body)
         return InfoRequestCreated.model_validate(response.json()).request_id
 
-    async def submit_result(self, output: Any, artifacts: list[ArtifactUpload]) -> None:
-        body = ResultSubmission(output=output, artifacts=artifacts).model_dump(mode="json")
+    async def submit_result(self, output: Any, artifact_ids: list[str]) -> None:
+        body = ResultSubmission(output=output, artifact_ids=artifact_ids).model_dump(mode="json")
         await self._request("POST", "/result", body)
+
+    async def upload_artifact(self, name: str, content: bytes) -> StoredArtifact:
+        response = await self._request("POST", "/artifacts", params={"name": name}, content=content, timeout=300)
+        return StoredArtifact.model_validate(response.json())
+
+    async def list_artifacts(self) -> list[StoredArtifact]:
+        return [StoredArtifact.model_validate(row) for row in (await self._request("GET", "/artifacts")).json()]
+
+    async def get_artifact(self, artifact_id: str) -> StoredArtifact:
+        return StoredArtifact.model_validate((await self._request("GET", f"/artifacts/{artifact_id}")).json())
 
     async def report_outcome(self, outcome: OutcomeReport) -> None:
         await self._request("POST", "/outcome", outcome.model_dump())

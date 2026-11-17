@@ -13,10 +13,8 @@ import os
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
-
 from exradius_bridge_kit import texts
-from exradius_bridge_kit.exradius import Publisher
+from exradius_bridge_kit.exradius import IntegrationApi, Publisher
 from exradius_bridge_kit.projects import Projects
 from exradius_bridge_kit.state import ItemState, task_id_for
 from exradius_bridge_kit.tracker import AttachmentInfo, Item, ItemGone, ItemRef, Reply, Tracker
@@ -63,13 +61,13 @@ class Flow:
         projects: Projects,
         publisher: Publisher,
         max_attachment_bytes: int,
-        downloads: httpx.AsyncClient,
+        api: IntegrationApi,
     ):
         self.tracker = tracker
         self.projects = projects
         self.publisher = publisher
         self.max_attachment_bytes = max_attachment_bytes
-        self.downloads = downloads
+        self.api = api
 
     async def _load(self, ref: ItemRef) -> ItemState:
         return ItemState.load(await self.tracker.load_state(ref))
@@ -381,13 +379,12 @@ class Flow:
         for artifact in artifacts:
             name = str(artifact.get("name") or "artifact")
             try:
-                response = await self.downloads.get(str(artifact.get("url")))
-                response.raise_for_status()
+                content = await self.api.artifact(str(artifact.get("id") or artifact.get("url")))
                 await self.tracker.attach(ref, name, artifact.get("content_type") or "application/octet-stream",
-                                          response.content)
+                                          content)
                 attached.append(name)
             except Exception as exc:  # noqa: BLE001 - named in the comment, the rest go on
-                log.warning("could not attach %s to %s: %s", name, ref.key, exc or type(exc).__name__)
+                log.warning("could not attach artifact to %s (%s)", ref.key, type(exc).__name__)
                 failed.append(name)
         return attached, failed
 

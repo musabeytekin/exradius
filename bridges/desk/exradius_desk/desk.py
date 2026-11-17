@@ -31,7 +31,6 @@ from sqlalchemy.orm import undefer
 
 from exradius_desk import mentions
 from exradius_desk.access import Directory
-from exradius_desk.files import download_url
 from exradius_desk.live import Hub
 from exradius_desk.mail import Mail, Mailer, cut
 from exradius_desk.models import (
@@ -119,8 +118,6 @@ class Desk:
         software: str,
         mailer: Mailer | None = None,
         hub: Hub | None = None,
-        downloads: httpx.AsyncClient | None = None,
-        api_url: str = "",
         provider_problem: Callable[[], str | None] = lambda: None,
         clock: Callable[[], float] = time.monotonic,
     ):
@@ -133,8 +130,6 @@ class Desk:
         if self.mailer.on_failure is None:
             self.mailer.on_failure = lambda reason: self._failed(Problem(None, reason))
         self.hub = hub or Hub()
-        self.downloads = downloads or httpx.AsyncClient(timeout=120.0, follow_redirects=True)
-        self.api_url = api_url.rstrip("/")
         self.provider_problem = provider_problem
         self.directory = Directory()
         self.status = StatusReporter(api, software, self.problems)
@@ -165,7 +160,6 @@ class Desk:
         await self.idle()
         await self.broker.close()
         await self.api.aclose()
-        await self.downloads.aclose()
 
     async def idle(self) -> None:
         """Wait for background work: mail, re-reported status (tests, shutdown)."""
@@ -414,15 +408,10 @@ class Desk:
             task = await session.get(Task, run.task_id) if run else None
         if row is None or task is None or not self.allowed(person, task.project):
             raise Refused(404, "no such file")
-        url = download_url(row.url, self.api_url)
         try:
-            request = self.downloads.build_request("GET", url)
-            response = await self.downloads.send(request, stream=True)
-        except httpx.HTTPError as exc:
-            raise Refused(502, f"Exradius cannot be reached for {row.name}: {exc or type(exc).__name__}") from exc
-        if response.status_code != 200:
-            await response.aclose()
-            raise Refused(502, f"Exradius answered {response.status_code} for {row.name}")
+            response = await self.api.open_artifact(row.url)
+        except ExradiusError as exc:
+            raise Refused(502, "Exradius could not serve this file") from exc
         return row, response
 
     # -- tasks (design §5) -----------------------------------------------------------------------

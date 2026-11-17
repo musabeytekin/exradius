@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
-from exradius import downloads, messaging
+from exradius import artifacts, downloads, messaging
 from exradius.api.deps import DB, Admin, State, get_or_404, require_admin
 from exradius.models import Artifact, EgressRecord, Event, InfoRequest, Project, Run, Task, TranscriptChunk
 from exradius.schemas import api as s
@@ -185,20 +185,9 @@ async def _authorise_download(request: Request, session, state, path: str, sig: 
 
 
 @router.get("/artifacts/{artifact_id}/content")
-async def download_artifact(
-    artifact_id: uuid.UUID, request: Request, session: DB, state: State, sig: str | None = None
-):
-    await _authorise_download(request, session, state, downloads.artifact_path(artifact_id), sig)
+async def download_artifact(artifact_id: uuid.UUID, session: DB, state: State, admin: Admin):
     artifact = await get_or_404(session, Artifact, artifact_id)
-    try:
-        data = await state.store.get(artifact.object_key)
-    except ObjectNotFound as exc:
-        raise HTTPException(404, "artifact content not found") from exc
-    return Response(
-        content=data,
-        media_type=artifact.content_type,
-        headers={"Content-Disposition": f'attachment; filename="{artifact.name}"'},
-    )
+    return await artifacts.download(state.store, artifact, f"admin:{admin.id}")
 
 
 @router.get("/runs/{run_id}/transcript")

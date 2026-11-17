@@ -335,3 +335,14 @@ Against `FakeTracker`, `FakeBroker` and `FakeExradius` (httpx `MockTransport`):
   2026-11-14 (integration-api.md §10), and `Broker.publish_cancel` sends it; the flow does
   not use it yet.
 - Texts in other languages.
+
+
+## Authenticated artifacts
+
+The kit downloads result files through `IntegrationApi.artifact`, using a UUID and the
+configured API address plus the integration token. It accepts old result URLs only as a
+source of the UUID; neither event-supplied hosts nor redirects receive credentials. The
+backend authorizes the bridge, project and result selection. No signature is required or
+accepted for artifact access. Downloads are bounded to 50 MiB. `open_artifact` supports
+Desk's streaming proxy after its own user authorization. See `docs/artifacts.md` at the
+repository root for upload, selection, limits and rollout details.

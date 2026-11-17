@@ -203,11 +203,11 @@ that bridge's file, and only that file.
   ```
 
 - **Bound to its bridge.** A token sees only its bridge's directory (§4) and reports only
-  its bridge's status (§7). Tokens have no other scopes: there is one company and one
-  admin.
+  its bridge's status (§7), and downloads selected artifacts of that bridge's tasks
+  in configured projects (Artifact downloads below). There is one company and one admin.
 - Tokens are accepted only on `/api/integration/v1/*`, and those routes accept nothing
-  else: not the admin session, not download signatures. Everything else a bridge does
-  stays on the broker.
+  else: not the admin session, not download signatures. Task, answer and cancellation
+  messages stay on the broker.
 - Revoking a token takes effect immediately. `last_used_at` is written at most once a
   minute.
 - The panel lists tokens (name, bridge, created, last used) and offers New and Revoke.
@@ -346,3 +346,18 @@ publishes it (`publish_cancel`), and `exradius cancel --task-id <id>` sends one 
 - Reason codes on rejections. Today a bridge that wants to retry a duplicate task id
   matches the text of the rejection's `reason` (`duplicate task_id '...'`).
 - Secrets in bridge files.
+
+
+## Artifact downloads
+
+Result files are stored independently from result submission. Each `task.result.artifacts`
+entry includes `id`, `name`, `content_type`, and `url`. Download with
+`GET /api/integration/v1/artifacts/{id}/content` and the bridge's integration bearer token.
+Only selected files from tasks belonging to that bridge, in projects whose cached
+configuration still includes the bridge, can be read. Responses are downloads, not active
+content. An artifact ID alone grants no access; artifact signatures are no longer accepted.
+
+Use the configured API origin, not an arbitrary event URL, and do not follow redirects with
+credentials. The kit implements this for GitHub/Jira and Desk. Historical URLs can be used
+to extract an artifact UUID and call this endpoint. Upgrade bridges with the backend.
+See [Artifact storage and delivery](artifacts.md) for the full contract and limits.

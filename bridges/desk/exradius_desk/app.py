@@ -189,7 +189,9 @@ def make_app(desk: Desk, signin: SignIn, web: Web) -> FastAPI:
             finally:
                 await upstream.aclose()
 
-        return StreamingResponse(body(), media_type=row.content_type, headers=attachment_headers(row.name))
+        return StreamingResponse(body(), media_type="application/octet-stream",
+                                 headers={**attachment_headers(row.name), "X-Content-Type-Options": "nosniff",
+                                          "Cache-Control": "private, no-store"})
 
     @app.get("/api/stream")
     async def stream(request: Request, person: Me):

@@ -34,7 +34,6 @@ async def serve(settings: Settings) -> None:
         max_attachment_bytes=settings.kit.max_attachment_bytes,
         software=software_name(f"exradius-desk {version('exradius-desk')}"),
         mailer=Mailer(settings.smtp),
-        api_url=settings.kit.api_url,
         provider_problem=lambda: oidc.problem,
     )
     try:

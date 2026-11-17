@@ -46,7 +46,7 @@ Like every bridge, it speaks only the public contracts and imports nothing from
   `exradius.events` in;
 - the integration API: the directory with `bridges/desk.yaml`, the `directory.changed`
   notice, and the bridge status report;
-- the signed download URLs of `task.result`.
+- the authenticated artifact download API, using the Desk integration token.
 
 ## 2. Who sees which project: `bridges/desk.yaml`
 
@@ -531,3 +531,10 @@ The frontend has its own lint, tests (vitest, jsdom) and build.
 - **Task id shapes.** Nothing in the contract reserves a shape of task id for one bridge.
   Desk relies on the other bridges' ids always ending in `-<digits>` (§6). A documented
   rule, such as one id prefix per bridge, would make that a guarantee.
+
+
+Artifact access now uses the kit's `IntegrationApi.open_artifact` after Desk checks the
+person's project access. The event URL supplies only a UUID; downloads always go to the
+configured API address without following redirects. The proxy serves files as downloads
+with octet-stream and nosniff. Old signature-only artifact access is retired; see the
+repository's `docs/artifacts.md` for coordinated upgrade requirements.

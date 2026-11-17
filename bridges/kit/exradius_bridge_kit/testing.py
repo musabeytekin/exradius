@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -260,7 +261,7 @@ def project_entry(
 
 class FakeExradius:
     """The integration API: the directory with ETags, and the status reports; plus the
-    artifact downloads of ``task.result`` under ``/artifacts/<name>``."""
+    authenticated artifact downloads of ``task.result``."""
 
     def __init__(self, projects: list[dict[str, Any]] | None = None, bridge: str = "fake"):
         self.bridge = bridge
@@ -272,8 +273,7 @@ class FakeExradius:
         """What the status report answers."""
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        if request.headers.get("authorization") != f"Bearer {SETTINGS.integration_token}" and \
-                not request.url.path.startswith("/artifacts/"):
+        if request.headers.get("authorization") != f"Bearer {SETTINGS.integration_token}":
             return httpx.Response(401, json={"detail": "unknown integration token"})
         if request.url.path == "/api/integration/v1/directory":
             self.directory_fetches += 1
@@ -285,8 +285,10 @@ class FakeExradius:
         if request.url.path == "/api/integration/v1/status" and request.method == "PUT":
             self.reports.append(json.loads(request.content))
             return httpx.Response(self.status_code)
-        if request.url.path.startswith("/artifacts/"):
-            name = request.url.path.removeprefix("/artifacts/")
+        if request.url.path.startswith("/api/integration/v1/artifacts/"):
+            identifier = request.url.path.split("/")[-2]
+            name = next((name for name in self.artifacts
+                         if str(uuid.uuid5(uuid.NAMESPACE_URL, name)) == identifier), "")
             if name in self.artifacts:
                 return httpx.Response(200, content=self.artifacts[name])
             return httpx.Response(404)
@@ -296,7 +298,7 @@ class FakeExradius:
         return httpx.MockTransport(self.handler)
 
     def artifact_url(self, name: str) -> str:
-        return f"{SETTINGS.api_url}/artifacts/{name}?sig=x"
+        return f"{SETTINGS.api_url}/api/integration/v1/artifacts/{uuid.uuid5(uuid.NAMESPACE_URL, name)}/content"
 
 
 def make_kit(tracker: Any, exradius: FakeExradius, broker: FakeBroker | None = None, **kwargs: Any) -> Kit:
@@ -308,7 +310,6 @@ def make_kit(tracker: Any, exradius: FakeExradius, broker: FakeBroker | None = N
         software=kwargs.pop("software", "fake-bridge 0.0.1"),
         broker=broker or FakeBroker(),
         api=IntegrationApi(SETTINGS.api_url, SETTINGS.integration_token, transport=transport),
-        downloads=httpx.AsyncClient(transport=transport),
         **kwargs,
     )
 

@@ -419,7 +419,7 @@ def test_internal_run_reporting(client, admin, sync_db, store, tmp_path):
     assert download.status_code == 200 and download.content == b"# R"
 
 
-def test_downloads_accept_admin_session_or_signature(client, admin, sync_db, store, settings, tmp_path):
+def test_artifacts_require_auth_while_transcripts_keep_signed_links(client, admin, sync_db, store, settings, tmp_path):
     _, run_id = make_run(admin, sync_db, tmp_path)
     auth = {"Authorization": "Bearer tok"}
     files = [{"name": "report.md", "content_type": "text/markdown", "content_base64": base64.b64encode(b"# R").decode()}]
@@ -432,10 +432,10 @@ def test_downloads_accept_admin_session_or_signature(client, admin, sync_db, sto
     artifact_url = downloads.artifact_url(settings, artifact.id).removeprefix(settings.public_api_url)
     transcript_url = downloads.transcript_url(settings, run_id).removeprefix(settings.public_api_url)
 
-    # Signed URLs from task.result work without a session...
-    response = client.get(artifact_url)
-    assert response.status_code == 200 and response.content == b"# R"
-    assert response.headers["content-type"].startswith("text/markdown")
+    # Artifacts no longer grant access to anyone holding a result URL.
+    assert client.get(artifact_url).status_code == 401
+    old_signature = downloads.sign(settings, downloads.artifact_path(artifact.id))
+    assert client.get(f"/api/artifacts/{artifact.id}/content?sig={old_signature}").status_code == 401
     # ...the transcript is assembled from chunks while the run is still going...
     response = client.get(transcript_url)
     assert response.status_code == 200

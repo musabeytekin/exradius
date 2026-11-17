@@ -235,8 +235,7 @@ async def desk(sessions, broker, exradius, oidc, mail_settings):
         sessions=sessions, broker=broker,
         api=IntegrationApi(SETTINGS.api_url, SETTINGS.integration_token, transport=transport),
         public_url=PUBLIC, max_attachment_bytes=1024 * 1024, software="exradius-desk test",
-        mailer=Mailer(mail_settings), downloads=httpx.AsyncClient(transport=transport),
-        api_url="http://exradius-api.internal:8000", provider_problem=lambda: oidc.problem,
+        mailer=Mailer(mail_settings), provider_problem=lambda: oidc.problem,
     )
     await desk.start()
     await desk.listen()

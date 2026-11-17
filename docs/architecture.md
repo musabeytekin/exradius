@@ -164,7 +164,7 @@ Payloads:
   "state": "completed | failed | cancelled",
   "summary": "final assistant message, markdown",
   "output": { "structured": "json the agent submitted via submit_result, or null" },
-  "artifacts": [ { "name": "report.md", "content_type": "text/markdown", "url": "https://exradius.example.com/api/artifacts/<id>/content?sig=..." } ],
+  "artifacts": [ { "id": "<uuid>", "name": "report.md", "content_type": "text/markdown", "url": "https://exradius.example.com/api/integration/v1/artifacts/<id>/content" } ],
   "transcript_url": "https://exradius.example.com/api/runs/<run_id>/transcript?sig=...",
   "error": null
 }
@@ -299,7 +299,12 @@ Every agent gets one built-in connection, hosted in-process by the runner:
 | Tool | Effect |
 |---|---|
 | `request_information(question, context?)` | Records an info request, publishes `task.info_request`, returns "Your question was sent. Stop working now; you will be resumed with the answer." The runner then interrupts the session, which moves the run to `waiting_for_input`. |
-| `submit_result(output, artifacts?)` | Stores structured output and uploads the listed files from the working directory to the object store. Can be called more than once; the last call wins. |
+| `artifact_upload(path)` | Stores a file independently and returns its ID. Paths include the repository folder relative to the working directory. |
+| `artifact_list()` / `artifact_get(artifact_id)` | Lists stored files / reads one file's metadata in the current run. |
+| `submit_result(output, artifact_ids?)` | Replaces structured output and selects stored files to deliver. Does not delete uploaded files. A result without files is allowed. |
+
+See [Artifact storage and delivery](artifacts.md) for limits, ownership checks and the
+bridge authentication contract.
 
 Any other destination for results (posting to a chat tool, writing to a wiki) is just the agent using a connection the admin attached. The `task.result` event is emitted regardless.
 
@@ -349,7 +354,7 @@ runs              id, task_id, state, runtime_session_id, run_object, started_at
 info_requests     id, run_id, question, context, created_at, answered_at, answer, answer_attachments (json)
 events            id, task_id, run_id, type, payload (json), published_at
 transcript_chunks id, run_id, seq, payload (json)
-artifacts         id, run_id, name, content_type, object_key
+artifacts         id, run_id, name, content_type, object_key, size, sha256, selected, created_at
 admin_user        id, username, password_hash
 workers           id, hostname, started_at, last_seen_at, concurrency, runtimes (json),
                   operator (json), version
@@ -484,7 +489,7 @@ did it with Docker, the Kubernetes section is named instead.
 - Five images. `exradius-backend` runs the api and worker; it has git, but no Docker SDK, no Node and no Agent SDK (the `runner` dependency group is not installed), and runs as uid 1000. `exradius-operator` is the Go operator (distroless, uid 65532). `exradius-frontend` is nginx with the panel. `exradius-runtime-claude-code` holds only the Claude Code bundle (`docs/runtime-bundles.md`). `exradius-project-default` is the workstation image of projects that name none. Tilt builds them all locally; `make -C deploy/kind images` builds and pushes them with the version tag. The chart passes the bundle and default images to the worker as `EXRADIUS_RUNTIME_IMAGE_CLAUDE_CODE` and `EXRADIUS_PROJECT_DEFAULT_IMAGE`.
 - A stdio connection in a run needs its command in the workstation image; the default image has neither `npx` nor `uvx`, which the config check reports as a warning.
 - The object store is any S3 API through the `EXRADIUS_S3_*` variables: SeaweedFS in a local install (from the chart; MinIO's community edition is no longer maintained), S3 in AWS. Keys are validated before use: no empty, `.` or `..` segments, no leading `/`, backslash or NUL. The filesystem and in-memory stores are for tests only. There is no data directory any more: config-repository mirrors live in an `emptyDir` cache of the api and worker pods (`EXRADIUS_CACHE_DIR`) and are fetched again after a restart.
-- Download URLs in `task.result` are signed with an HMAC-SHA256 of the URL path, keyed by a value derived from `EXRADIUS_SECRET_KEY`; a key in `EXRADIUS_SECRET_KEY_PREVIOUS` still verifies (kubernetes.md §10.1). `GET /api/artifacts/{id}/content` and `GET /api/runs/{run_id}/transcript` accept a valid `sig` or the admin session. A signature is bound to its path and does not expire in version one. The transcript endpoint serves the stored JSON lines file once the run has ended, and assembles it from the stored chunks while the run is still going. Behind a reverse proxy that adds a path prefix, include the prefix in `EXRADIUS_PUBLIC_API_URL`; the signature covers only the API path.
+- Artifact URLs in `task.result` require the owning bridge’s integration token; admin downloads require an admin session. Old artifact signatures no longer grant access. See [artifacts.md](artifacts.md). Transcript URLs retain their existing path-bound HMAC signatures and key-rotation behavior, and the transcript endpoint accepts a signature or admin session.
 
 **Data model additions** (beyond §6)
 
@@ -766,6 +771,13 @@ deliver.
   only when necessary and never more than one question at a time.
 - When you are done, call submit_result with a result written for that person: what you
   found, what you changed, and what they should do next. Attach files that help.
+- Store deliverable files with artifact_upload before submitting the result. Its paths
+  are relative to the working directory (include the repository folder), or absolute
+  inside it. Check the returned artifact ID; artifact_list and artifact_get show files
+  already stored for this run. Pass selected IDs as submit_result.artifact_ids.
+  A failed upload does not prevent a result: retry a corrected path when possible,
+  otherwise explain the missing file and submit without it. Stored files survive a
+  later result submission; only files selected in the latest result go to the requester.
 - Nobody is watching. Do not ask for confirmation or permission; decide and act. If the
   task cannot be done, say why in the result.
 - The project directory exists only for this task and is discarded afterwards, so

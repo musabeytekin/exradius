@@ -17,10 +17,11 @@ from pydantic import ValidationError
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from exradius import directory
+from exradius import artifacts, directory
 from exradius.api.deps import DB, Admin, State, get_or_404
 from exradius.crypto import hash_token, new_integration_token
-from exradius.models import BridgeStatus, IntegrationToken, utcnow
+from exradius.models import Artifact, BridgeStatus, IntegrationToken, Run, utcnow
+from exradius.project_state import cached
 from exradius.schemas import api as s
 
 LAST_USED_EVERY = timedelta(minutes=1)
@@ -86,6 +87,21 @@ async def get_directory(request: Request, session: DB, state: State, token: Toke
     if _matches(request.headers.get("if-none-match"), tag):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     return Response(body, media_type="application/json", headers=headers)
+
+
+@router.get("/artifacts/{artifact_id}/content")
+async def download_artifact(artifact_id: uuid.UUID, session: DB, state: State, token: Token):
+    artifact = await session.get(Artifact, artifact_id)
+    run = await session.get(Run, artifact.run_id) if artifact is not None else None
+    if artifact is None or not artifact.selected or run is None:
+        raise HTTPException(404, "artifact not found")
+    correlation = run.task.correlation
+    snapshot = cached(run.task.project)
+    bridge = snapshot.bridges.get(token.bridge) if snapshot is not None else None
+    if (not isinstance(correlation, dict) or correlation.get("bridge") != token.bridge
+            or not bridge or bridge.get("error") or bridge.get("config") is None):
+        raise HTTPException(404, "artifact not found")
+    return await artifacts.download(state.store, artifact, f"bridge-token:{token.id}")
 
 
 @router.put("/status", status_code=204)

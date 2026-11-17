@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import base64
-import mimetypes
+import asyncio
+import json
+import uuid
 from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server
 
+from exradius.runner.artifact_files import ArtifactError, read_artifact
 from exradius.runner.client import RunApi
-from exradius.schemas.internal import ArtifactUpload
 
 SERVER_NAME = "exradius"
 SUSPEND_MESSAGE = (
@@ -33,10 +34,10 @@ SUBMIT_RESULT_SCHEMA = {
     "type": "object",
     "properties": {
         "output": {"description": "Structured result of the task, any JSON value."},
-        "artifacts": {
+        "artifact_ids": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Paths of files in the working directory to attach to the result.",
+            "description": "IDs returned by artifact_upload or artifact_list to attach to the result. Omit for no files.",
         },
     },
     "required": ["output"],
@@ -48,10 +49,6 @@ def _text(text: str, is_error: bool = False) -> dict[str, Any]:
     if is_error:
         result["is_error"] = True
     return result
-
-
-class ArtifactError(ValueError):
-    pass
 
 
 class ExradiusTools:
@@ -77,29 +74,50 @@ class ExradiusTools:
         self._suspend = True
         return _text(SUSPEND_MESSAGE)
 
-    def _artifact(self, path: str) -> ArtifactUpload:
-        candidate = (self.working_dir / path).resolve()
-        if not candidate.is_relative_to(self.working_dir):
-            raise ArtifactError(f"{path}: artifacts must be inside the working directory")
-        if not candidate.is_file():
-            raise ArtifactError(f"{path}: no such file")
-        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        return ArtifactUpload(
-            name=candidate.name,
-            content_type=content_type,
-            content_base64=base64.b64encode(candidate.read_bytes()).decode(),
-        )
+    async def artifact_upload(self, args: dict[str, Any]) -> dict[str, Any]:
+        path = args.get("path")
+        if not isinstance(path, str) or not path.strip():
+            return _text("'path' must be a non-empty file path.", is_error=True)
+        try:
+            name, content = await asyncio.to_thread(read_artifact, self.working_dir, path)
+            saved = await self.api.upload_artifact(name, content)
+        except (ArtifactError, RuntimeError) as exc:
+            return _text(str(exc), is_error=True)
+        return _text(saved.model_dump_json())
+
+    async def artifact_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            saved = await self.api.list_artifacts()
+        except RuntimeError as exc:
+            return _text(str(exc), is_error=True)
+        return _text(json.dumps([item.model_dump(mode="json") for item in saved]))
+
+    async def artifact_get(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            artifact_id = str(uuid.UUID(str(args.get("artifact_id"))))
+        except ValueError:
+            return _text("'artifact_id' must be an artifact UUID.", is_error=True)
+        try:
+            saved = await self.api.get_artifact(artifact_id)
+        except RuntimeError as exc:
+            return _text(str(exc), is_error=True)
+        return _text(saved.model_dump_json())
 
     async def submit_result(self, args: dict[str, Any]) -> dict[str, Any]:
-        paths = args.get("artifacts") or []
-        if not isinstance(paths, list):
-            return _text("'artifacts' must be a list of file paths.", is_error=True)
+        if "artifacts" in args:
+            return _text("Upload files with artifact_upload, then pass their IDs as 'artifact_ids'.", is_error=True)
+        ids = args.get("artifact_ids", [])
+        if not isinstance(ids, list) or len(ids) > 100:
+            return _text("'artifact_ids' must be a list of at most 100 artifact UUIDs.", is_error=True)
         try:
-            artifacts = [self._artifact(str(p)) for p in paths]
-        except ArtifactError as exc:
+            ids = [str(uuid.UUID(str(value))) for value in ids]
+        except ValueError:
+            return _text("'artifact_ids' must contain artifact UUIDs, not file paths.", is_error=True)
+        try:
+            await self.api.submit_result(args.get("output"), ids)
+        except RuntimeError as exc:
             return _text(str(exc), is_error=True)
-        await self.api.submit_result(args.get("output"), artifacts)
-        return _text(f"Result stored with {len(artifacts)} artifact(s).")
+        return _text(f"Result stored with {len(set(ids))} artifact(s).")
 
     def tools(self) -> list[SdkMcpTool[Any]]:
         return [
@@ -114,11 +132,29 @@ class ExradiusTools:
                 handler=self.request_information,
             ),
             SdkMcpTool(
+                name="artifact_upload",
+                description=(f"Persist a file of any type from {self.working_dir}. Paths are absolute inside "
+                             f"{self.working_dir} or relative to it, e.g. repo/report.pdf. "
+                             "Returns an artifact ID after storage succeeds. Max 50 MiB; no symlinks. "
+                             "Does not submit a result. Retrying the same name and bytes returns the same ID."),
+                input_schema={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+                handler=self.artifact_upload,
+            ),
+            SdkMcpTool(
+                name="artifact_list", description="List files already stored for this run, including unselected files.",
+                input_schema={"type": "object", "properties": {}}, handler=self.artifact_list,
+            ),
+            SdkMcpTool(
+                name="artifact_get", description="Get a stored file's metadata in this run by its artifact ID.",
+                input_schema={"type": "object", "properties": {"artifact_id": {"type": "string"}},
+                              "required": ["artifact_id"]}, handler=self.artifact_get,
+            ),
+            SdkMcpTool(
                 name="submit_result",
                 description=(
-                    "Submit the structured result of the task, optionally with files from the "
-                    "working directory as artifacts. May be called more than once; the last "
-                    "call wins."
+                    "Submit the result, optionally selecting previously uploaded artifact IDs. "
+                    "The last call replaces the result and selection, but never deletes stored files. "
+                    "A result without files is allowed, including after an upload failed."
                 ),
                 input_schema=SUBMIT_RESULT_SCHEMA,
                 handler=self.submit_result,

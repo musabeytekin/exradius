@@ -1,10 +1,8 @@
-"""HTTP download URLs for artifacts and transcripts, as published in ``task.result``.
+"""Artifact URLs require bridge authentication; transcript URLs retain signed access.
 
-The consumer of outbound events is the user's integration layer, which has no admin
-session, so each URL carries a signature (``?sig=``): an HMAC of its path, keyed by a
-value derived from ``EXRADIUS_SECRET_KEY``. The API accepts either the admin session or a
-valid signature. Signatures do not expire in version one; after a key rotation, those made
-with a key in ``EXRADIUS_SECRET_KEY_PREVIOUS`` still verify until that key is removed.
+Artifact downloads go through the integration API with a bridge token. The admin uses
+its session and the separate admin artifact route. Transcript signatures use the current
+or previous download signing key and retain the existing non-expiring behavior.
 """
 
 from __future__ import annotations
@@ -48,7 +46,7 @@ def signed_url(settings: Settings, path: str) -> str:
 
 
 def artifact_url(settings: Settings, artifact_id: uuid.UUID | str) -> str:
-    return signed_url(settings, artifact_path(artifact_id))
+    return f"{settings.public_api_url.rstrip('/')}/api/integration/v1/artifacts/{artifact_id}/content"
 
 
 def transcript_url(settings: Settings, run_id: uuid.UUID | str) -> str:

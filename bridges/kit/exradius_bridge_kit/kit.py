@@ -20,8 +20,6 @@ from collections.abc import Awaitable, Callable
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
-import httpx
-
 from exradius_bridge_kit.exradius import Broker, IntegrationApi
 from exradius_bridge_kit.flow import Flow
 from exradius_bridge_kit.projects import Problem, Projects
@@ -58,7 +56,6 @@ class Kit:
         software: str,
         broker: Any = None,
         api: IntegrationApi | None = None,
-        downloads: httpx.AsyncClient | None = None,
         clock: Callable[[], float] = time.monotonic,
     ):
         self.tracker = tracker
@@ -67,13 +64,12 @@ class Kit:
         self.broker = broker if broker is not None else Broker(settings.broker_url, tracker.bridge)
         self.api = api or IntegrationApi(settings.api_url, settings.integration_token)
         self.projects = Projects(tracker)
-        self._downloads = downloads or httpx.AsyncClient(timeout=120.0, follow_redirects=True)
         self.flow = Flow(
             tracker=tracker,
             projects=self.projects,
             publisher=self.broker,
             max_attachment_bytes=settings.max_attachment_bytes,
-            downloads=self._downloads,
+            api=self.api,
         )
         self.status = StatusReporter(self.api, self.software, self.problems)
         self.started_at = self.status.started_at
@@ -199,4 +195,3 @@ class Kit:
         await self.idle()
         await self.broker.close()
         await self.api.aclose()
-        await self._downloads.aclose()

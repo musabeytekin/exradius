@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ConnectionSpecModel(BaseModel):
@@ -81,15 +82,37 @@ class InfoRequestCreated(BaseModel):
     request_id: str
 
 
-class ArtifactUpload(BaseModel):
-    name: str = Field(min_length=1, max_length=255, pattern=r"^[^/\\\x00]+$")
+class ArtifactName(BaseModel):
+    name: str = Field(min_length=1, max_length=255, pattern=r"^[^/\\\x00-\x1f\x7f]+$")
+
+    @field_validator("name")
+    @classmethod
+    def safe_name(cls, value: str) -> str:
+        if value in {".", ".."}:
+            raise ValueError("invalid file name")
+        return value
+
+
+class StoredArtifact(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    name: str
+    content_type: str
+    size: int | None
+    sha256: str | None
+    selected: bool
+
+
+class ArtifactUpload(ArtifactName):
     content_type: str = "application/octet-stream"
     content_base64: str
 
 
 class ResultSubmission(BaseModel):
     output: Any = None
-    artifacts: list[ArtifactUpload] = Field(default_factory=list)
+    artifacts: list[ArtifactUpload] = Field(default_factory=list, max_length=100)
+    artifact_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
 
 
 class OutcomeReport(BaseModel):

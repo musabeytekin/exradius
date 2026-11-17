@@ -66,6 +66,43 @@ def _alembic(path) -> Config:
     return config
 
 
+def test_artifact_migration_preserves_existing_deliveries(tmp_path):
+    config = _alembic(tmp_path / "artifacts.sqlite")
+    command.upgrade(config, "0010")
+    engine = create_engine(f"sqlite:///{tmp_path / 'artifacts.sqlite'}")
+    project_id, run_id, artifact_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    metadata = sa.MetaData()
+    metadata.reflect(engine)
+    try:
+        with engine.begin() as connection:
+            connection.execute(metadata.tables["projects"].insert(), {
+                "id": project_id.hex, "slug": "sample", "config_url": "local", "created_at": utcnow(),
+                "hook_token": "hook",
+            })
+            connection.execute(metadata.tables["tasks"].insert(), {
+                "id": "T-1", "project_id": project_id.hex, "agent": "dev", "instructions": "work",
+                "state": "completed", "received_at": utcnow(),
+            })
+            connection.execute(metadata.tables["runs"].insert(), {
+                "id": run_id.hex, "task_id": "T-1", "state": "completed",
+            })
+            connection.execute(metadata.tables["artifacts"].insert(), {
+                "id": artifact_id.hex, "run_id": run_id.hex, "name": "old.pdf",
+                "content_type": "application/pdf", "object_key": "old/file",
+            })
+        command.upgrade(config, "head")
+        with Session(engine) as session:
+            artifact = session.get(models.Artifact, artifact_id)
+            assert artifact.selected and artifact.object_key == "old/file"
+            assert artifact.size is None and artifact.sha256 is None
+            assert session.get(models.Run, run_id).artifact_upload_count == 0
+        command.downgrade(config, "0010")
+        with engine.connect() as connection:
+            assert connection.execute(sa.text("SELECT name FROM artifacts")).scalar_one() == "old.pdf"
+    finally:
+        engine.dispose()
+
+
 STORE_CONFIG = """\
 version: 1
 project: {slug: %s}

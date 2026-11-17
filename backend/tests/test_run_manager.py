@@ -633,7 +633,7 @@ async def test_resumable_runs(manager, sessions, store, cluster, published, conf
     assert await manager.resumable_runs() == [run_id]
 
 
-async def test_result_links_artifacts_by_signed_http_url(
+async def test_result_links_selected_artifacts_by_authenticated_api(
         manager, sessions, store, cluster, published, settings, configured, accept):
     settings.public_api_url = "https://exradius.example.com/"
     run_id = await submit_task(accept, published)
@@ -642,6 +642,8 @@ async def test_result_links_artifacts_by_signed_http_url(
     async def with_artifact(rid, env):
         async with sessions() as session:
             session.add(Artifact(run_id=rid, name="report.md", content_type="text/markdown", object_key="runs/x/report.md"))
+            session.add(Artifact(run_id=rid, name="private.pdf", content_type="application/pdf",
+                                 object_key="runs/x/private", selected=False))
             await session.commit()
         return await base(rid, env)
 
@@ -649,13 +651,14 @@ async def test_result_links_artifacts_by_signed_http_url(
     await execute(manager, cluster, run_id)
     [result] = results(published)
     async with sessions() as session:
-        artifact = await session.scalar(select(Artifact))
+        artifact = await session.scalar(select(Artifact).where(Artifact.selected.is_(True)))
     [ref] = result["artifacts"]
-    path = f"/api/artifacts/{artifact.id}/content"
+    path = f"/api/integration/v1/artifacts/{artifact.id}/content"
     assert ref == {
+        "id": str(artifact.id),
         "name": "report.md",
         "content_type": "text/markdown",
-        "url": f"https://exradius.example.com{path}?sig={downloads.sign(settings, path)}",
+        "url": f"https://exradius.example.com{path}",
     }
     assert result["transcript_url"].startswith(f"https://exradius.example.com/api/runs/{run_id}/transcript?sig=")
 

@@ -645,13 +645,13 @@ class RunManager:
             ).all()
             transcript = "".join(json.dumps(c.payload, ensure_ascii=False) + "\n" for c in chunks)
             await self.store.put(downloads.transcript_key(run_id), transcript.encode(), "application/x-ndjson")
-            artifacts = (await session.scalars(select(Artifact).where(Artifact.run_id == run_id))).all()
+            artifacts = (await session.scalars(select(Artifact).where(Artifact.run_id == run_id, Artifact.selected.is_(True)))).all()
             payload = ResultPayload(
                 state=run.state,
                 summary=run.summary,
                 output=run.output,
                 artifacts=[
-                    ArtifactRef(name=a.name, content_type=a.content_type, url=downloads.artifact_url(self.settings, a.id))
+                    ArtifactRef(id=a.id, name=a.name, content_type=a.content_type, url=downloads.artifact_url(self.settings, a.id))
                     for a in artifacts
                 ],
                 transcript_url=downloads.transcript_url(self.settings, run_id),

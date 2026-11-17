@@ -303,6 +303,8 @@ class Run(Base):
     run_object: Mapped[str | None] = mapped_column(String(100))
     """The name of the run's Kubernetes ``Run`` once the worker created it (``run-<id>``);
     recovery tells a Run that disappeared from one never created (docs/kubernetes.md §4)."""
+    artifact_upload_started_at: Mapped[datetime | None] = mapped_column(Timestamp)
+    artifact_upload_count: Mapped[int] = mapped_column(default=0, server_default="0")
     delivery_warnings: Mapped[list[Any] | None] = mapped_column(nullable=True)
     """What the runner's delivery check found after the session (§8.5), for the result."""
     config_commit: Mapped[str | None] = mapped_column(String(64))
@@ -408,6 +410,10 @@ class Artifact(Base):
     name: Mapped[str] = mapped_column(String(255))
     content_type: Mapped[str] = mapped_column(String(255))
     object_key: Mapped[str] = mapped_column(Text)
+    size: Mapped[int | None] = mapped_column(BigInteger)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    selected: Mapped[bool] = mapped_column(default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(Timestamp, default=utcnow)
 
 
 class Worker(Base):

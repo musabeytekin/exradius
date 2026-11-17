@@ -8,7 +8,7 @@ import base64
 import httpx
 
 from exradius_desk.desk import exradius_task_id, guess_text
-from exradius_desk.files import download_url
+from exradius_bridge_kit.testing import SETTINGS
 from tests.conftest import event
 
 
@@ -85,18 +85,23 @@ async def test_a_run_from_assignment_to_result(browser, desk, broker, smtp):
     assert [c for c in comments(task) if c["kind"] == "question"][0]["answered_by"] == answer.json()["id"]
     assert comments(task)[-1]["answers"] == question["id"]
 
+    await desk.idle()  # Finish earlier notifications before testing result delivery.
     calls = []
+    original_transport = desk.api._http._transport
 
     def exradius_api(request: httpx.Request) -> httpx.Response:
+        if "/artifacts/" not in request.url.path:
+            return original_transport.handler(request)
+        assert request.headers["authorization"] == f"Bearer {SETTINGS.integration_token}"
         calls.append(str(request.url))
         return httpx.Response(200, content=b"# Report")
 
-    desk.downloads = httpx.AsyncClient(transport=httpx.MockTransport(exradius_api))
+    desk.api._http._transport = httpx.MockTransport(exradius_api)
     await broker.deliver(event(desk, "status", task_id, {"state": "resuming", "previous": "waiting_for_input"}))
     await broker.deliver(event(desk, "result", task_id, {
         "state": "completed", "summary": "Fixed the rounding.", "error": None, "warnings": ["1 commit not pushed"],
         "artifacts": [{"name": "report.md", "content_type": "text/markdown",
-                       "url": "https://exradius.example.com/prefix/api/artifacts/a1/content?sig=abc"}],
+                       "url": "https://exradius.example.com/prefix/api/artifacts/12345678-1234-1234-1234-123456789abc/content?sig=abc"}],
         "transcript_url": "https://exradius.example.com/api/runs/r/transcript?sig=t"}, agent="scout"))
     task = (await ada.get(f"/api/tasks/{key}")).json()
     result = comments(task)[-1]
@@ -108,7 +113,7 @@ async def test_a_run_from_assignment_to_result(browser, desk, broker, smtp):
     assert task["run"] is None and task["runs"][0]["state"] == "completed" and task["exradius"] == "start"
     download = await ben.get(f"/api/artifacts/{result['artifacts'][0]['id']}")
     assert download.content == b"# Report"
-    assert calls == ["http://exradius-api.internal:8000/api/artifacts/a1/content?sig=abc"]
+    assert calls == [f"{SETTINGS.api_url}/api/integration/v1/artifacts/12345678-1234-1234-1234-123456789abc/content"]
 
     await desk.idle()
     # Ada handed it over and reported it; Ben's answer mentioned her.
@@ -249,9 +254,7 @@ def test_ids_guesses_and_download_urls():
     assert guess_text({"method": "decided", "guess": True, "probabilities": {"a": 0.2, "b": 0.5, "c": 0.2,
                                                                              "d": 0.1}}, {"b": "Bee"}) == \
         "a guess: Bee 50%, a 20%, c 20%"
-    assert download_url("https://x.test/p/api/artifacts/1/content?sig=s", "http://api:8000/") == \
-        "http://api:8000/api/artifacts/1/content?sig=s"
-    assert download_url("https://files.test/report.md", "http://api:8000") == "https://files.test/report.md"
+
 
 
 async def test_no_id_ends_in_digits(desk):

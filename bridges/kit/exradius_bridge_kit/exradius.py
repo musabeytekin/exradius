@@ -7,9 +7,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import aio_pika
 import httpx
@@ -31,6 +33,21 @@ def events_queue(bridge: str) -> str:
 
 class ExradiusError(Exception):
     pass
+
+
+def artifact_id(reference: str) -> str:
+    """Accept a UUID or a public artifact path; never trust the event's host or query."""
+    try:
+        return str(uuid.UUID(reference))
+    except ValueError:
+        match = re.search(r"/(?:api/artifacts|api/integration/v1/artifacts)/([0-9a-fA-F-]{36})/content$",
+                             urlsplit(reference).path)
+        if match:
+            try:
+                return str(uuid.UUID(match[1]))
+            except ValueError:
+                pass
+    raise ExradiusError("invalid Exradius artifact reference")
 
 
 class IntegrationApi:
@@ -71,6 +88,30 @@ class IntegrationApi:
         self._etag = response.headers.get("ETag")
         self._cached = body
         return body
+
+    async def open_artifact(self, reference: str) -> httpx.Response:
+        path = f"/api/integration/v1/artifacts/{artifact_id(reference)}/content"
+        try:
+            request = self._http.build_request("GET", path, timeout=120.0)
+            response = await self._http.send(request, stream=True, follow_redirects=False)
+        except httpx.HTTPError as exc:
+            raise ExradiusError("cannot reach the Exradius artifact API") from exc
+        if response.status_code != 200:
+            await response.aclose()
+            raise ExradiusError(f"the Exradius artifact API answered {response.status_code}")
+        return response
+
+    async def artifact(self, reference: str) -> bytes:
+        response = await self.open_artifact(reference)
+        content = bytearray()
+        try:
+            async for chunk in response.aiter_bytes():
+                if len(content) + len(chunk) > 50 * 1024 * 1024:
+                    raise ExradiusError("artifact exceeds 50 MiB")
+                content.extend(chunk)
+            return bytes(content)
+        finally:
+            await response.aclose()
 
     async def report(self, report: dict[str, Any]) -> None:
         try:
